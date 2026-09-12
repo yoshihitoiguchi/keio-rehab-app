@@ -376,6 +376,7 @@ function PasswordGate({ onAuthed, onCancel }) {
   const [pwInput, setPwInput] = useState("");
   const [pwConfirm, setPwConfirm] = useState("");
   const [error, setError] = useState(null);
+  const [debugInfo, setDebugInfo] = useState(null); // { inputHash, storedHash }
   const [busy, setBusy] = useState(false);
 
   const checkExistingPassword = async () => {
@@ -385,7 +386,6 @@ function PasswordGate({ onAuthed, onCancel }) {
       const hash = await fetchSetting("coach_password_hash");
       setPhase(hash ? "login" : "setup");
     } catch (err) {
-      // 確認自体に失敗した場合も、原因が分かるようログイン画面側にエラーを出す
       setError(`設定の確認に失敗しました（${err.message}）。Supabase側の app_settings テーブルとRLS設定をご確認ください。`);
       setPhase("login");
     }
@@ -397,6 +397,7 @@ function PasswordGate({ onAuthed, onCancel }) {
 
   const handleSetup = async () => {
     setError(null);
+    setDebugInfo(null);
     if (pwInput.trim().length < 4) {
       setError("4文字以上のパスワードを設定してください。");
       return;
@@ -417,23 +418,39 @@ function PasswordGate({ onAuthed, onCancel }) {
     }
   };
 
+  // 要件③：失敗の原因（DB未取得／ハッシュ不一致）を画面上で必ず特定できるようにする
   const handleLogin = async () => {
     setError(null);
+    setDebugInfo(null);
     setBusy(true);
     try {
-      const storedHash = await fetchSetting("coach_password_hash");
-      if (!storedHash) {
-        // ログインしようとした瞬間に設定行が見つからない＝セットアップへ誘導
-        setPhase("setup");
+      let storedHash;
+      try {
+        storedHash = await fetchSetting("coach_password_hash");
+      } catch (fetchErr) {
+        setError(`データベースからハッシュ値を取得できませんでした（${fetchErr.message}）`);
         setBusy(false);
         return;
       }
+
       const inputHash = await sha256Hex(pwInput);
+
+      if (!storedHash) {
+        setError(
+          "データベースからハッシュ値を取得できませんでした（app_settingsテーブルにcoach_password_hashの行が存在しません）。"
+        );
+        setDebugInfo({ inputHash, storedHash: "(該当行なし)" });
+        setBusy(false);
+        return;
+      }
+
       if (storedHash === inputHash) {
         setPwInput("");
+        setDebugInfo(null);
         onAuthed();
       } else {
-        setError("パスワードが違います。");
+        setError("パスワードが一致しません。下記のハッシュ値を比較してください。");
+        setDebugInfo({ inputHash, storedHash });
       }
     } catch (err) {
       setError(`認証中にエラーが発生しました: ${err.message}`);
@@ -441,6 +458,18 @@ function PasswordGate({ onAuthed, onCancel }) {
       setBusy(false);
     }
   };
+
+  const DebugBox = () =>
+    debugInfo && (
+      <div className="mt-3 bg-slate-50 border border-slate-200 rounded-lg p-3 text-[10px] font-mono text-slate-500 space-y-1">
+        <p className="break-all">
+          入力ハッシュ: <span className="text-slate-700">{debugInfo.inputHash}</span>
+        </p>
+        <p className="break-all">
+          DBハッシュ: <span className="text-slate-700">{debugInfo.storedHash}</span>
+        </p>
+      </div>
+    );
 
   if (phase === "checking") {
     return (
@@ -523,6 +552,7 @@ function PasswordGate({ onAuthed, onCancel }) {
         autoFocus
       />
       {error && <p className="text-red-500 text-sm mt-2 text-center">{error}</p>}
+      <DebugBox />
       <div className="flex gap-2 mt-5">
         <button
           onClick={onCancel}
@@ -539,6 +569,16 @@ function PasswordGate({ onAuthed, onCancel }) {
           ログイン
         </button>
       </div>
+      <button
+        onClick={() => {
+          setError(null);
+          setDebugInfo(null);
+          setPhase("setup");
+        }}
+        className="w-full mt-3 text-xs text-slate-400 hover:text-slate-600 underline"
+      >
+        パスワードが分からない場合／未設定の場合はこちら（再設定）
+      </button>
     </div>
   );
 }
@@ -698,10 +738,12 @@ function CoachSettings() {
   const [confirm, setConfirm] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const [debugInfo, setDebugInfo] = useState(null);
   const [success, setSuccess] = useState(false);
 
   const handleChange = async () => {
     setError(null);
+    setDebugInfo(null);
     setSuccess(false);
     if (next.length < 4) {
       setError("新しいパスワードは4文字以上にしてください");
@@ -715,8 +757,15 @@ function CoachSettings() {
     try {
       const storedHash = await fetchSetting("coach_password_hash");
       const currentHash = await sha256Hex(current);
-      if (!storedHash || storedHash !== currentHash) {
-        setError("現在のパスワードが違います");
+      if (!storedHash) {
+        setError("現在のパスワードのハッシュ値をデータベースから取得できませんでした。");
+        setDebugInfo({ inputHash: currentHash, storedHash: "(該当行なし)" });
+        setSaving(false);
+        return;
+      }
+      if (storedHash !== currentHash) {
+        setError("現在のパスワードが違います。下記のハッシュ値を比較してください。");
+        setDebugInfo({ inputHash: currentHash, storedHash });
         setSaving(false);
         return;
       }
@@ -761,6 +810,16 @@ function CoachSettings() {
         className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
       {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
+      {debugInfo && (
+        <div className="mb-3 bg-slate-50 border border-slate-200 rounded-lg p-3 text-[10px] font-mono text-slate-500 space-y-1">
+          <p className="break-all">
+            入力ハッシュ: <span className="text-slate-700">{debugInfo.inputHash}</span>
+          </p>
+          <p className="break-all">
+            DBハッシュ: <span className="text-slate-700">{debugInfo.storedHash}</span>
+          </p>
+        </div>
+      )}
       {success && <p className="text-xs text-green-600 mb-2">パスワードを変更しました。</p>}
       <button
         onClick={handleChange}
