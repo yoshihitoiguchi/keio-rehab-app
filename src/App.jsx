@@ -25,6 +25,11 @@ import {
   Settings,
   History,
   CalendarRange,
+  Video,
+  Youtube,
+  Building2,
+  Trophy,
+  Link as LinkIcon,
 } from "lucide-react";
 
 // ============================================================
@@ -61,18 +66,15 @@ const sbUpdate = (table, id, body) =>
   sb(`${table}?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) });
 const sbDelete = (table, id) =>
   sb(`${table}?id=eq.${encodeURIComponent(id)}`, { method: "DELETE", prefer: "return=minimal" });
-// key列（例："key"）の一致でINSERT/UPDATEを自動判定するupsert。
-// パスワード設定のように「なければ作る、あれば上書きする」処理に使う。
-const sbUpsert = (table, body, onConflictColumn) =>
-  sb(`${table}?on_conflict=${encodeURIComponent(onConflictColumn)}`, {
+// on_conflict列（カンマ区切り可）でINSERT/UPDATEを自動判定するupsert
+const sbUpsert = (table, body, onConflictColumns) =>
+  sb(`${table}?on_conflict=${encodeURIComponent(onConflictColumns)}`, {
     method: "POST",
     body: JSON.stringify(body),
     prefer: "resolution=merge-duplicates,return=representation",
   });
 
 // ---- パスワードのハッシュ化（SHA-256、平文は保存・送信しない） ----
-// 入力値は念のためtrim()してから統一的にハッシュ化・比較する（前後の空白ズレによる
-// 照合ミスマッチを防ぐため）。crypto.subtleはHTTPS（またはlocalhost）でのみ使用可能。
 async function sha256Hex(text) {
   if (!window.crypto || !window.crypto.subtle) {
     throw new Error(
@@ -88,9 +90,12 @@ async function sha256Hex(text) {
     .toLowerCase();
 }
 
-// app_settingsから指定キーの値を1件取得するヘルパー（無ければnull）
-async function fetchSetting(key) {
-  const rows = await sbSelect("app_settings", `?key=eq.${encodeURIComponent(key)}&select=value`);
+// 組織スコープのapp_settingsから指定キーの値を1件取得（無ければnull）
+async function fetchSetting(orgId, key) {
+  const rows = await sbSelect(
+    "app_settings",
+    `?org_id=eq.${encodeURIComponent(orgId)}&key=eq.${encodeURIComponent(key)}&select=value`
+  );
   if (!rows || rows.length === 0) return null;
   const value = rows[0].value;
   return value === null || value === undefined ? null : String(value).trim().toLowerCase();
@@ -98,13 +103,19 @@ async function fetchSetting(key) {
 
 // ---- DBの行(snake_case) <-> アプリ内部表現(camelCase) の変換 ----
 function normalizeProtocol(row) {
-  return { id: row.id, name: row.name, totalWeeks: row.total_weeks, phases: row.phases || [] };
+  return {
+    id: row.id,
+    name: row.name,
+    totalWeeks: row.total_weeks,
+    phases: row.phases || [],
+    videoUrl: row.video_url || null,
+  };
 }
 function normalizeMessage(row) {
   return {
     id: row.id,
-    sender: row.sender, // 'player' | 'staff'
-    staffRole: row.staff_role, // 'coach' | 'student_trainer' | 'trainer' | 'doctor' | null
+    sender: row.sender,
+    staffRole: row.staff_role,
     isRead: row.is_read,
     content: row.content,
     createdAt: row.created_at,
@@ -137,6 +148,7 @@ function normalizeSlot(row) {
     datetime: row.datetime,
     bookedBy: row.booked_by,
     matchedRoles: row.matched_roles || [],
+    zoomUrl: row.zoom_url || null,
   };
 }
 
@@ -162,6 +174,22 @@ const CHAT_STAFF_ROLE_LABELS = {
   student_trainer: "学生トレーナー",
   trainer: "トレーナー",
   doctor: "医師",
+};
+
+// フェーズごとの色分け（赤→オレンジ→黄→黄緑→青）
+const PHASE_TEXT_COLORS = {
+  1: "text-red-600",
+  2: "text-orange-500",
+  3: "text-amber-500",
+  4: "text-lime-600",
+  5: "text-blue-600",
+};
+const PHASE_BG_COLORS = {
+  1: "bg-red-500",
+  2: "bg-orange-500",
+  3: "bg-amber-500",
+  4: "bg-lime-500",
+  5: "bg-blue-500",
 };
 
 function todayStr() {
@@ -192,7 +220,6 @@ function parseDatetime(str) {
 function diffDaysBetween(dateStr, datetimeStr) {
   return Math.floor((parseDatetime(datetimeStr) - new Date(dateStr)) / 86400000);
 }
-// 受傷後2週間/3週間 経過しても面談が1件も実施されていない選手を検知
 function meetingAlertLevel(player, slots) {
   if (!player.injuryDate) return null;
   const held = slots.some((s) => s.bookedBy === player.id && parseDatetime(s.datetime) <= new Date());
@@ -202,9 +229,46 @@ function meetingAlertLevel(player, slots) {
   if (elapsed >= 14) return "yellow";
   return null;
 }
+// 要件⑤：同じプロトコルを完遂した「過去の全選手」から、受傷日→完遂日の平均日数を
+// 実データ（injury_date, completed_at）のみを用いて厳密に計算する（モックなし）。
+// coachPlayersは指導者が既に読み込んでいる同一組織の全選手データなのでJS側で直接計算できる。
+function computeAvgRecoveryFromPlayers(players, protocolId) {
+  const completed = players.filter(
+    (p) => p.protocolId === protocolId && p.injuryDate && p.completedAt
+  );
+  if (completed.length === 0) return null;
+  const totalDays = completed.reduce((sum, p) => {
+    const injury = new Date(p.injuryDate);
+    const done = new Date(p.completedAt);
+    const days = Math.round((done - injury) / 86400000);
+    return sum + days;
+  }, 0);
+  return {
+    avgDays: Math.round((totalDays / completed.length) * 10) / 10,
+    sampleSize: completed.length,
+  };
+}
+function getYouTubeEmbedUrl(url) {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    let videoId = null;
+    if (u.hostname.includes("youtu.be")) {
+      videoId = u.pathname.slice(1);
+    } else if (u.hostname.includes("youtube.com")) {
+      videoId = u.searchParams.get("v");
+      if (!videoId && u.pathname.startsWith("/embed/")) videoId = u.pathname.split("/")[2];
+    }
+    return videoId ? `https://www.youtube.com/embed/${videoId}` : null;
+  } catch {
+    return null;
+  }
+}
 
 // ==================================================================
 export default function RehabApp() {
+  const [org, setOrg] = useState(null); // { id, name } | null
+
   const [mode, setMode] = useState("player"); // 'player' | 'coach' | 'coach-login'
   const [coachAuthed, setCoachAuthed] = useState(false);
 
@@ -212,7 +276,7 @@ export default function RehabApp() {
   const [slots, setSlots] = useState([]);
   const [playerDirectory, setPlayerDirectory] = useState([]);
 
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
 
   const [coachPlayers, setCoachPlayers] = useState([]);
@@ -220,14 +284,17 @@ export default function RehabApp() {
 
   const [myPlayer, setMyPlayer] = useState(null);
 
-  const loadPublicData = async () => {
+  const loadPublicData = async (orgId) => {
     setLoading(true);
     setLoadError(null);
     try {
       const [protocolRows, slotRows, dirRows] = await Promise.all([
-        sbSelect("protocols", "?select=*&order=name.asc"),
-        sbSelect("slots", "?select=*&order=datetime.asc"),
-        sbSelect("player_directory", "?select=*&order=name.asc"),
+        sbSelect("protocols", `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=name.asc`),
+        sbSelect("slots", `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=datetime.asc`),
+        sbSelect(
+          "player_directory",
+          `?org_id=eq.${encodeURIComponent(orgId)}&select=id,name&order=name.asc`
+        ),
       ]);
       setMasterProtocols(protocolRows.map(normalizeProtocol));
       setSlots(slotRows.map(normalizeSlot));
@@ -240,15 +307,16 @@ export default function RehabApp() {
   };
 
   useEffect(() => {
-    loadPublicData();
-  }, []);
+    if (org) loadPublicData(org.id);
+  }, [org?.id]);
 
   const loadCoachPlayers = async () => {
+    if (!org) return;
     setCoachLoading(true);
     try {
       const rows = await sbSelect(
         "players",
-        `?select=${PLAYER_FIELDS}${PLAYER_EMBED_ORDER}&order=name.asc`
+        `?org_id=eq.${encodeURIComponent(org.id)}&select=${PLAYER_FIELDS}${PLAYER_EMBED_ORDER}&order=name.asc`
       );
       setCoachPlayers(rows.map(normalizePlayer));
     } catch (err) {
@@ -272,6 +340,21 @@ export default function RehabApp() {
     await loadCoachPlayers();
   };
 
+  const handleSwitchOrg = () => {
+    setOrg(null);
+    setMode("player");
+    setCoachAuthed(false);
+    setCoachPlayers([]);
+    setMyPlayer(null);
+    setMasterProtocols([]);
+    setSlots([]);
+    setPlayerDirectory([]);
+  };
+
+  if (!org) {
+    return <OrgLogin onAuthed={setOrg} />;
+  }
+
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col">
       <header className="bg-slate-900 text-white sticky top-0 z-20 shadow-md">
@@ -281,10 +364,13 @@ export default function RehabApp() {
             <span className="font-bold tracking-tight text-lg">
               RE:SPRINT <span className="text-slate-400 font-normal text-sm">Rehab Progress</span>
             </span>
+            <span className="hidden sm:flex items-center gap-1 ml-2 text-xs text-slate-400 border-l border-slate-700 pl-3">
+              <Building2 size={12} /> {org.name}
+            </span>
           </div>
           <div className="flex items-center gap-3">
             {loadError && (
-              <span className="text-xs text-red-300 max-w-[200px] truncate" title={loadError}>
+              <span className="text-xs text-red-300 max-w-[160px] truncate" title={loadError}>
                 同期エラー
               </span>
             )}
@@ -309,6 +395,13 @@ export default function RehabApp() {
                 📋 指導者モード
               </button>
             </div>
+            <button
+              onClick={handleSwitchOrg}
+              className="text-xs text-slate-400 hover:text-white flex items-center gap-1"
+              title="別の組織に切り替える"
+            >
+              <LogOut size={13} />
+            </button>
           </div>
         </div>
       </header>
@@ -316,7 +409,7 @@ export default function RehabApp() {
       {loadError && (
         <div className="bg-red-50 border-b border-red-200 text-red-600 text-xs px-4 py-2 flex items-center justify-between">
           <span>データの取得に失敗しました: {loadError}</span>
-          <button onClick={loadPublicData} className="font-bold underline shrink-0 ml-3">
+          <button onClick={() => loadPublicData(org.id)} className="font-bold underline shrink-0 ml-3">
             再試行
           </button>
         </div>
@@ -331,11 +424,12 @@ export default function RehabApp() {
         )}
 
         {!loading && mode === "coach-login" && (
-          <PasswordGate onAuthed={handleCoachAuthed} onCancel={() => setMode("player")} />
+          <PasswordGate orgId={org.id} onAuthed={handleCoachAuthed} onCancel={() => setMode("player")} />
         )}
 
         {!loading && mode === "coach" && coachAuthed && (
           <CoachDashboard
+            orgId={org.id}
             masterProtocols={masterProtocols}
             setMasterProtocols={setMasterProtocols}
             coachPlayers={coachPlayers}
@@ -348,6 +442,7 @@ export default function RehabApp() {
 
         {!loading && mode === "player" && (
           <PlayerMode
+            orgId={org.id}
             masterProtocols={masterProtocols}
             playerDirectory={playerDirectory}
             setPlayerDirectory={setPlayerDirectory}
@@ -363,37 +458,139 @@ export default function RehabApp() {
 }
 
 // ==================================================================
-// パスワードゲート（指導者モード）
+// 組織（テナント）ログイン
 // ==================================================================
-// パスワードゲート：
-// 1) まず app_settings に coach_password_hash が存在するか確認する
-// 2) 存在しなければ「初回セットアップ」画面（新規パスワードの設定）を表示
-// 3) 存在すれば通常のログイン画面を表示し、ハッシュを比較する
-// フェッチ自体の失敗（権限/ネットワーク等）とパスワード不一致を区別して表示することで、
-// 「常にパスワードが違うと言われる」原因の切り分けができるようにしている。
-function PasswordGate({ onAuthed, onCancel }) {
+function OrgLogin({ onAuthed }) {
+  const [orgCode, setOrgCode] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const [debugInfo, setDebugInfo] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const handleLogin = async () => {
+    setError(null);
+    setDebugInfo(null);
+    if (!orgCode.trim()) {
+      setError("組織ID（組織コード）を入力してください。");
+      return;
+    }
+    setBusy(true);
+    try {
+      const rows = await sbSelect(
+        "organizations",
+        `?id=eq.${encodeURIComponent(orgCode.trim())}&select=id,name,password_hash`
+      );
+      if (!rows || rows.length === 0) {
+        setError("その組織IDは見つかりませんでした。");
+        setBusy(false);
+        return;
+      }
+      const row = rows[0];
+      const storedHash = row.password_hash ? String(row.password_hash).trim().toLowerCase() : null;
+      const inputHash = await sha256Hex(password);
+      if (!storedHash) {
+        setError("この組織にはパスワードが設定されていません。管理者にご確認ください。");
+        setBusy(false);
+        return;
+      }
+      if (storedHash !== inputHash) {
+        setError("パスワードが違います。下記のハッシュ値を比較してください。");
+        setDebugInfo({ inputHash, storedHash });
+        setBusy(false);
+        return;
+      }
+      onAuthed({ id: row.id, name: row.name });
+    } catch (err) {
+      setError(`ログインに失敗しました: ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-100 flex items-center justify-center px-4">
+      <div className="max-w-sm w-full bg-white rounded-2xl shadow-lg p-8 border border-slate-200">
+        <div className="flex flex-col items-center gap-3 mb-6">
+          <div className="w-14 h-14 rounded-full bg-blue-50 flex items-center justify-center">
+            <Building2 className="text-blue-600" size={26} />
+          </div>
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-1.5">
+            <Flame className="text-orange-400" size={18} /> RE:SPRINT
+          </h2>
+          <p className="text-sm text-slate-500 text-center">
+            所属する組織のIDとパスワードを入力してください。
+          </p>
+        </div>
+        <label className="text-xs text-slate-500">組織ID（組織コード）</label>
+        <input
+          value={orgCode}
+          onChange={(e) => setOrgCode(e.target.value)}
+          placeholder="例：default"
+          className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          autoFocus
+        />
+        <label className="text-xs text-slate-500">パスワード</label>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+          placeholder="組織パスワード"
+          className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        {error && <p className="text-red-500 text-sm mb-2 text-center">{error}</p>}
+        {debugInfo && (
+          <div className="mb-3 bg-slate-50 border border-slate-200 rounded-lg p-3 text-[10px] font-mono text-slate-500 space-y-1">
+            <p className="break-all">
+              入力ハッシュ: <span className="text-slate-700">{debugInfo.inputHash}</span>
+            </p>
+            <p className="break-all">
+              DBハッシュ: <span className="text-slate-700">{debugInfo.storedHash}</span>
+            </p>
+          </div>
+        )}
+        <button
+          onClick={handleLogin}
+          disabled={busy}
+          className="w-full py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium disabled:bg-slate-300 flex items-center justify-center gap-2"
+        >
+          {busy && <Loader2 size={14} className="animate-spin" />}
+          ログイン
+        </button>
+        <p className="text-xs text-slate-400 text-center mt-4">
+          初めての場合は組織ID「default」・初期パスワード「1234」でログインできます。
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ==================================================================
+// パスワードゲート（指導者モード・組織スコープ）
+// ==================================================================
+function PasswordGate({ orgId, onAuthed, onCancel }) {
   const [phase, setPhase] = useState("checking"); // 'checking' | 'setup' | 'login'
   const [pwInput, setPwInput] = useState("");
   const [pwConfirm, setPwConfirm] = useState("");
   const [error, setError] = useState(null);
-  const [debugInfo, setDebugInfo] = useState(null); // { inputHash, storedHash }
+  const [debugInfo, setDebugInfo] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const checkExistingPassword = async () => {
     setPhase("checking");
     setError(null);
     try {
-      const hash = await fetchSetting("coach_password_hash");
+      const hash = await fetchSetting(orgId, "coach_password_hash");
       setPhase(hash ? "login" : "setup");
     } catch (err) {
-      setError(`設定の確認に失敗しました（${err.message}）。Supabase側の app_settings テーブルとRLS設定をご確認ください。`);
+      setError(`設定の確認に失敗しました（${err.message}）。`);
       setPhase("login");
     }
   };
 
   useEffect(() => {
     checkExistingPassword();
-  }, []);
+  }, [orgId]);
 
   const handleSetup = async () => {
     setError(null);
@@ -409,7 +606,7 @@ function PasswordGate({ onAuthed, onCancel }) {
     setBusy(true);
     try {
       const hash = await sha256Hex(pwInput);
-      await sbUpsert("app_settings", { key: "coach_password_hash", value: hash }, "key");
+      await sbUpsert("app_settings", { org_id: orgId, key: "coach_password_hash", value: hash }, "org_id,key");
       onAuthed();
     } catch (err) {
       setError(`パスワードの保存に失敗しました: ${err.message}`);
@@ -418,7 +615,6 @@ function PasswordGate({ onAuthed, onCancel }) {
     }
   };
 
-  // 要件③：失敗の原因（DB未取得／ハッシュ不一致）を画面上で必ず特定できるようにする
   const handleLogin = async () => {
     setError(null);
     setDebugInfo(null);
@@ -426,7 +622,7 @@ function PasswordGate({ onAuthed, onCancel }) {
     try {
       let storedHash;
       try {
-        storedHash = await fetchSetting("coach_password_hash");
+        storedHash = await fetchSetting(orgId, "coach_password_hash");
       } catch (fetchErr) {
         setError(`データベースからハッシュ値を取得できませんでした（${fetchErr.message}）`);
         setBusy(false);
@@ -436,9 +632,7 @@ function PasswordGate({ onAuthed, onCancel }) {
       const inputHash = await sha256Hex(pwInput);
 
       if (!storedHash) {
-        setError(
-          "データベースからハッシュ値を取得できませんでした（app_settingsテーブルにcoach_password_hashの行が存在しません）。"
-        );
+        setError("データベースからハッシュ値を取得できませんでした（app_settingsに行が存在しません）。");
         setDebugInfo({ inputHash, storedHash: "(該当行なし)" });
         setBusy(false);
         return;
@@ -489,7 +683,7 @@ function PasswordGate({ onAuthed, onCancel }) {
           </div>
           <h2 className="text-lg font-bold text-slate-800">指導者パスワードの初回設定</h2>
           <p className="text-sm text-slate-500 text-center">
-            まだパスワードが設定されていません。最初に使うパスワードを決めてください。
+            この組織ではまだ指導者パスワードが設定されていません。
           </p>
         </div>
         <label className="text-xs text-slate-500">新しいパスワード</label>
@@ -671,6 +865,7 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions }) {
 // 指導者モード
 // ==================================================================
 function CoachDashboard({
+  orgId,
   masterProtocols,
   setMasterProtocols,
   coachPlayers,
@@ -710,10 +905,10 @@ function CoachDashboard({
       </div>
 
       {subTab === "protocols" && (
-        <ProtocolManagement masterProtocols={masterProtocols} setMasterProtocols={setMasterProtocols} />
+        <ProtocolManagement orgId={orgId} masterProtocols={masterProtocols} setMasterProtocols={setMasterProtocols} />
       )}
-      {subTab === "scheduling" && <CoachScheduling slots={slots} setSlots={setSlots} />}
-      {subTab === "settings" && <CoachSettings />}
+      {subTab === "scheduling" && <CoachScheduling orgId={orgId} slots={slots} setSlots={setSlots} />}
+      {subTab === "settings" && <CoachSettings orgId={orgId} />}
       {subTab === "players" &&
         (coachLoading ? (
           <div className="flex items-center justify-center py-16 text-slate-400 gap-2">
@@ -725,6 +920,7 @@ function CoachDashboard({
             coachPlayers={coachPlayers}
             setCoachPlayers={setCoachPlayers}
             slots={slots}
+            setSlots={setSlots}
           />
         ))}
     </div>
@@ -732,7 +928,7 @@ function CoachDashboard({
 }
 
 // ---------- 設定：指導者パスワードの変更 ----------
-function CoachSettings() {
+function CoachSettings({ orgId }) {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -755,7 +951,7 @@ function CoachSettings() {
     }
     setSaving(true);
     try {
-      const storedHash = await fetchSetting("coach_password_hash");
+      const storedHash = await fetchSetting(orgId, "coach_password_hash");
       const currentHash = await sha256Hex(current);
       if (!storedHash) {
         setError("現在のパスワードのハッシュ値をデータベースから取得できませんでした。");
@@ -770,8 +966,7 @@ function CoachSettings() {
         return;
       }
       const newHash = await sha256Hex(next);
-      // 行が万一存在しない場合でも復旧できるようUPDATEではなくupsertを使う
-      await sbUpsert("app_settings", { key: "coach_password_hash", value: newHash }, "key");
+      await sbUpsert("app_settings", { org_id: orgId, key: "coach_password_hash", value: newHash }, "org_id,key");
       setSuccess(true);
       setCurrent("");
       setNext("");
@@ -834,7 +1029,7 @@ function CoachSettings() {
 }
 
 // ---------- 日程調整：3者の空き時間登録 → 自動照合 → 公開 ----------
-function CoachScheduling({ slots, setSlots }) {
+function CoachScheduling({ orgId, slots, setSlots }) {
   const [availability, setAvailability] = useState([]);
   const [loading, setLoading] = useState(true);
   const [role, setRole] = useState("coach");
@@ -851,7 +1046,10 @@ function CoachScheduling({ slots, setSlots }) {
   const loadAvailability = async () => {
     setLoading(true);
     try {
-      const rows = await sbSelect("staff_availability", "?select=*&order=datetime.asc");
+      const rows = await sbSelect(
+        "staff_availability",
+        `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=datetime.asc`
+      );
       setAvailability(rows);
     } catch (err) {
       setError(err.message);
@@ -862,7 +1060,7 @@ function CoachScheduling({ slots, setSlots }) {
 
   useEffect(() => {
     loadAvailability();
-  }, []);
+  }, [orgId]);
 
   const daysInMonth = new Date(year, month, 0).getDate();
   useEffect(() => {
@@ -877,7 +1075,7 @@ function CoachScheduling({ slots, setSlots }) {
     setSaving(true);
     setError(null);
     try {
-      const [inserted] = await sbInsert("staff_availability", { role, datetime });
+      const [inserted] = await sbInsert("staff_availability", { role, datetime, org_id: orgId });
       setAvailability((prev) => [...prev, inserted].sort((a, b) => a.datetime.localeCompare(b.datetime)));
     } catch (err) {
       setError(err.message);
@@ -907,15 +1105,19 @@ function CoachScheduling({ slots, setSlots }) {
     try {
       const matched = Object.entries(grouped)
         .filter(([, roleSet]) => roleSet.has("coach") && roleSet.has("trainer"))
-        .map(([datetime, roleSet]) => ({ datetime, matched_roles: Array.from(roleSet) }));
+        .map(([datetime, roleSet]) => ({
+          org_id: orgId,
+          datetime,
+          matched_roles: Array.from(roleSet),
+        }));
       if (matched.length > 0) {
-        await sb("slots?on_conflict=datetime", {
+        await sb("slots?on_conflict=org_id,datetime", {
           method: "POST",
           body: JSON.stringify(matched),
           prefer: "resolution=merge-duplicates,return=representation",
         });
       }
-      const rows = await sbSelect("slots", "?select=*&order=datetime.asc");
+      const rows = await sbSelect("slots", `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=datetime.asc`);
       setSlots(rows.map(normalizeSlot));
     } catch (err) {
       setError(err.message);
@@ -1078,12 +1280,13 @@ function CoachScheduling({ slots, setSlots }) {
 }
 
 // ---------- プロトコル管理(CMS) ----------
-function ProtocolManagement({ masterProtocols, setMasterProtocols }) {
+function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
   const blankPhases = () =>
     Array.from({ length: 5 }, (_, i) => ({ title: `フェーズ${i + 1}`, conditionsText: "" }));
 
   const [name, setName] = useState("");
   const [totalWeeks, setTotalWeeks] = useState(8);
+  const [videoUrl, setVideoUrl] = useState("");
   const [phaseForms, setPhaseForms] = useState(blankPhases());
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -1100,8 +1303,10 @@ function ProtocolManagement({ masterProtocols, setMasterProtocols }) {
     }));
     const payload = {
       id: `proto-${Date.now()}`,
+      org_id: orgId,
       name: name.trim(),
       total_weeks: Number(totalWeeks) || 8,
+      video_url: videoUrl.trim() || null,
       phases,
     };
     setSaving(true);
@@ -1111,6 +1316,7 @@ function ProtocolManagement({ masterProtocols, setMasterProtocols }) {
       setMasterProtocols((prev) => [...prev, normalizeProtocol(inserted)]);
       setName("");
       setTotalWeeks(8);
+      setVideoUrl("");
       setPhaseForms(blankPhases());
     } catch (err) {
       setError(err.message);
@@ -1128,6 +1334,17 @@ function ProtocolManagement({ masterProtocols, setMasterProtocols }) {
     }
   };
 
+  const handleUpdateVideoUrl = async (id, url) => {
+    try {
+      await sbUpdate("protocols", id, { video_url: url.trim() || null });
+      setMasterProtocols((prev) =>
+        prev.map((p) => (p.id === id ? { ...p, videoUrl: url.trim() || null } : p))
+      );
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <div className="space-y-4">
@@ -1135,35 +1352,7 @@ function ProtocolManagement({ masterProtocols, setMasterProtocols }) {
           登録済みプロトコル ({masterProtocols.length})
         </h3>
         {masterProtocols.map((p) => (
-          <div key={p.id} className="bg-white rounded-xl border border-slate-200 p-4">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="font-bold text-slate-800">{p.name}</p>
-                <p className="text-xs text-slate-400">標準復帰期間: 約{p.totalWeeks}週間</p>
-              </div>
-              <button
-                onClick={() => handleDeleteProtocol(p.id)}
-                className="text-slate-400 hover:text-red-500 p-1"
-                title="削除"
-              >
-                <Trash2 size={16} />
-              </button>
-            </div>
-            <div className="mt-3 space-y-2">
-              {p.phases.map((ph, i) => (
-                <div key={i} className="text-xs bg-slate-50 rounded-lg px-3 py-2">
-                  <p className="font-semibold text-slate-600">
-                    Phase {i + 1}: {ph.title}
-                  </p>
-                  <ul className="mt-1 list-disc list-inside text-slate-500">
-                    {ph.conditions.map((c, j) => (
-                      <li key={j}>{c}</li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-            </div>
-          </div>
+          <ProtocolCard key={p.id} protocol={p} onDelete={handleDeleteProtocol} onSaveVideo={handleUpdateVideoUrl} />
         ))}
         {masterProtocols.length === 0 && (
           <p className="text-sm text-slate-400">まだプロトコルが登録されていません。</p>
@@ -1190,6 +1379,17 @@ function ProtocolManagement({ masterProtocols, setMasterProtocols }) {
               type="number"
               value={totalWeeks}
               onChange={(e) => setTotalWeeks(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 flex items-center gap-1">
+              <Youtube size={12} className="text-red-500" /> 参考動画URL（YouTube・任意）
+            </label>
+            <input
+              value={videoUrl}
+              onChange={(e) => setVideoUrl(e.target.value)}
+              placeholder="https://www.youtube.com/watch?v=..."
               className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
@@ -1228,8 +1428,67 @@ function ProtocolManagement({ masterProtocols, setMasterProtocols }) {
   );
 }
 
+function ProtocolCard({ protocol, onDelete, onSaveVideo }) {
+  const [videoUrl, setVideoUrl] = useState(protocol.videoUrl || "");
+  const [savingVideo, setSavingVideo] = useState(false);
+
+  const handleSave = async () => {
+    setSavingVideo(true);
+    await onSaveVideo(protocol.id, videoUrl);
+    setSavingVideo(false);
+  };
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-4">
+      <div className="flex items-start justify-between">
+        <div>
+          <p className="font-bold text-slate-800">{protocol.name}</p>
+          <p className="text-xs text-slate-400">標準復帰期間: 約{protocol.totalWeeks}週間</p>
+        </div>
+        <button onClick={() => onDelete(protocol.id)} className="text-slate-400 hover:text-red-500 p-1" title="削除">
+          <Trash2 size={16} />
+        </button>
+      </div>
+      <div className="mt-3 space-y-2">
+        {protocol.phases.map((ph, i) => (
+          <div key={i} className="text-xs bg-slate-50 rounded-lg px-3 py-2">
+            <p className="font-semibold text-slate-600">
+              Phase {i + 1}: {ph.title}
+            </p>
+            <ul className="mt-1 list-disc list-inside text-slate-500">
+              {ph.conditions.map((c, j) => (
+                <li key={j}>{c}</li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 pt-3 border-t border-slate-100">
+        <label className="text-xs text-slate-500 flex items-center gap-1">
+          <Youtube size={12} className="text-red-500" /> 参考動画URL
+        </label>
+        <div className="flex gap-2 mt-1">
+          <input
+            value={videoUrl}
+            onChange={(e) => setVideoUrl(e.target.value)}
+            placeholder="https://www.youtube.com/watch?v=..."
+            className="flex-1 border border-slate-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <button
+            onClick={handleSave}
+            disabled={savingVideo}
+            className="px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 disabled:bg-slate-300"
+          >
+            保存
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------- 選手管理（2ペイン） ----------
-function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slots }) {
+function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slots, setSlots }) {
   const [selectedId, setSelectedId] = useState(null);
   const [error, setError] = useState(null);
 
@@ -1319,6 +1578,11 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
     );
   };
 
+  const saveZoomUrl = async (slotId, url) => {
+    await sbUpdate("slots", slotId, { zoom_url: url.trim() || null });
+    setSlots((prev) => prev.map((s) => (s.id === slotId ? { ...s, zoomUrl: url.trim() || null } : s)));
+  };
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6">
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden h-fit">
@@ -1327,7 +1591,7 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
             選手一覧 ({coachPlayers.length})・Phase昇順
           </p>
           <p className="text-[10px] text-slate-400 mt-1">
-            🟡 受傷2週間・面談未実施　🔴 受傷3週間・面談未実施
+            🟡 受傷2週間・面談未実施　🔴 受傷3週間・面談未実施　🟢 完全復帰
           </p>
         </div>
         <ul className="divide-y divide-slate-100 max-h-[70vh] overflow-y-auto">
@@ -1336,14 +1600,16 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
             const r = latestReport(p);
             const unread = p.messages.filter((m) => m.sender === "player" && !m.isRead).length;
             const meetingLevel = meetingAlertLevel(p, slots);
-            const rowBg =
-              meetingLevel === "red"
-                ? "bg-red-50"
-                : meetingLevel === "yellow"
-                ? "bg-yellow-50"
-                : selectedId === p.id
-                ? "bg-blue-50"
-                : "";
+            const isCompleted = Boolean(p.completedAt);
+            const rowBg = isCompleted
+              ? "bg-green-50"
+              : meetingLevel === "red"
+              ? "bg-red-50"
+              : meetingLevel === "yellow"
+              ? "bg-yellow-50"
+              : selectedId === p.id
+              ? "bg-blue-50"
+              : "";
             return (
               <li key={p.id}>
                 <button
@@ -1351,13 +1617,24 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
                   className={`w-full text-left px-4 py-3 flex items-center justify-between hover:bg-slate-50 transition-colors ${rowBg}`}
                 >
                   <div className="flex items-center gap-2">
-                    {alert && <AlertTriangle size={16} className="text-red-500 shrink-0" />}
+                    {isCompleted ? (
+                      <Trophy size={16} className="text-green-600 shrink-0" />
+                    ) : (
+                      alert && <AlertTriangle size={16} className="text-red-500 shrink-0" />
+                    )}
                     <div>
-                      <p className={`text-sm font-semibold ${alert ? "text-red-600" : "text-slate-800"}`}>
+                      <p
+                        className={`text-sm font-semibold ${
+                          isCompleted ? "text-green-700" : alert ? "text-red-600" : "text-slate-800"
+                        }`}
+                      >
                         {p.name}
                       </p>
                       <p className="text-xs text-slate-400">
-                        {protocolOf(p)?.name ?? "未設定"} ・ Phase {p.currentPhase}/5
+                        {protocolOf(p)?.name ?? "未設定"} ・{" "}
+                        <span className={`font-bold ${PHASE_TEXT_COLORS[p.currentPhase]}`}>
+                          Phase {p.currentPhase}/5
+                        </span>
                       </p>
                     </div>
                   </div>
@@ -1402,12 +1679,14 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
           <PlayerDetailPanel
             player={selectedPlayer}
             protocol={protocolOf(selectedPlayer)}
+            allPlayers={coachPlayers}
             slots={slots}
             toggleChecklist={toggleChecklist}
             advancePhase={advancePhase}
             markCompleted={markCompleted}
             onDelete={() => deletePlayer(selectedPlayer.id, selectedPlayer.name)}
             onSendMessage={(content, role) => sendCoachMessage(selectedPlayer.id, content, role)}
+            onSaveZoomUrl={saveZoomUrl}
             setCoachPlayers={setCoachPlayers}
           />
         )}
@@ -1419,20 +1698,24 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
 function PlayerDetailPanel({
   player,
   protocol,
+  allPlayers,
   slots,
   toggleChecklist,
   advancePhase,
   markCompleted,
   onDelete,
   onSendMessage,
+  onSaveZoomUrl,
   setCoachPlayers,
 }) {
   const report = latestReport(player);
   const phaseInfo = protocol?.phases[player.currentPhase - 1];
   const allChecked = player.checklist.length > 0 && player.checklist.every(Boolean);
-  const [avg, setAvg] = useState(null);
 
-  // 選手からの未読メッセージを既読にする
+  // 要件⑤：同一組織内の実データ（injury_date・completed_at）から直接JavaScriptで算出。
+  // モックではなく、指導者が読み込んでいる実際の選手一覧が計算元になる。
+  const avg = protocol ? computeAvgRecoveryFromPlayers(allPlayers, protocol.id) : null;
+
   useEffect(() => {
     const markRead = async () => {
       try {
@@ -1454,7 +1737,6 @@ function PlayerDetailPanel({
     markRead();
   }, [player.id]);
 
-  // チャットのポーリング更新（5秒ごと）
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
@@ -1473,22 +1755,6 @@ function PlayerDetailPanel({
     return () => clearInterval(interval);
   }, [player.id, setCoachPlayers]);
 
-  useEffect(() => {
-    let active = true;
-    if (protocol) {
-      sbSelect("protocol_avg_recovery", `?protocol_id=eq.${encodeURIComponent(protocol.id)}&select=*`)
-        .then((rows) => {
-          if (active) setAvg(rows[0] || null);
-        })
-        .catch(() => {});
-    } else {
-      setAvg(null);
-    }
-    return () => {
-      active = false;
-    };
-  }, [protocol?.id]);
-
   const myMeetings = slots
     .filter((s) => s.bookedBy === player.id)
     .slice()
@@ -1500,22 +1766,32 @@ function PlayerDetailPanel({
         <div>
           <h3 className="font-bold text-lg text-slate-800">{player.name}</h3>
           <p className="text-sm text-slate-400">
-            {protocol?.name ?? "未設定"} ・ 現在 Phase {player.currentPhase}/5：{phaseInfo?.title}
+            {protocol?.name ?? "未設定"} ・ 現在{" "}
+            <span className={`font-bold ${PHASE_TEXT_COLORS[player.currentPhase]}`}>
+              Phase {player.currentPhase}/5
+            </span>
+            ：{phaseInfo?.title}
           </p>
           {player.injuryDate && (
             <p className="text-xs text-slate-400 mt-1">
               受傷日：{player.injuryDate}（受傷から{daysSince(player.injuryDate)}日経過）
-              {avg && avg.sample_size > 0 && (
-                <span className="text-blue-500"> ・ 過去{avg.sample_size}人の平均完遂日数：{avg.avg_days}日</span>
+              {avg && (
+                <span className="text-blue-500"> ・ 過去{avg.sampleSize}人の平均完遂日数：{avg.avgDays}日</span>
               )}
             </p>
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {isAlert(player) && (
-            <span className="flex items-center gap-1 bg-red-100 text-red-600 text-xs font-bold px-3 py-1.5 rounded-full">
-              <AlertTriangle size={14} /> 要確認
+          {player.completedAt ? (
+            <span className="flex items-center gap-1 bg-green-100 text-green-700 text-xs font-bold px-3 py-1.5 rounded-full">
+              <Trophy size={14} /> 完全復帰
             </span>
+          ) : (
+            isAlert(player) && (
+              <span className="flex items-center gap-1 bg-red-100 text-red-600 text-xs font-bold px-3 py-1.5 rounded-full">
+                <AlertTriangle size={14} /> 要確認
+              </span>
+            )
           )}
           <button
             onClick={onDelete}
@@ -1604,7 +1880,7 @@ function PlayerDetailPanel({
         )}
         {player.completedAt && (
           <div className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-green-50 text-green-700 font-bold text-sm">
-            <ShieldCheck size={16} /> 完全復帰 記録済み（{new Date(player.completedAt).toLocaleDateString("ja-JP")}）
+            <Trophy size={16} /> 完全復帰 記録済み（{new Date(player.completedAt).toLocaleDateString("ja-JP")}）
           </div>
         )}
       </div>
@@ -1624,21 +1900,11 @@ function PlayerDetailPanel({
         {myMeetings.length === 0 && (
           <p className="text-sm text-slate-400">まだ面談の予約・実施履歴がありません。</p>
         )}
-        <ul className="space-y-1.5">
+        <ul className="space-y-2">
           {myMeetings.map((s) => {
             const held = parseDatetime(s.datetime) <= new Date();
             const daysAfter = player.injuryDate ? diffDaysBetween(player.injuryDate, s.datetime) : null;
-            return (
-              <li key={s.id} className="flex items-center justify-between text-xs bg-slate-50 rounded-lg px-3 py-2">
-                <span className="text-slate-600">{s.datetime}</span>
-                <span className="flex items-center gap-2">
-                  {daysAfter !== null && <span className="text-slate-400">受傷後{daysAfter}日</span>}
-                  <span className={`font-bold ${held ? "text-green-600" : "text-blue-500"}`}>
-                    {held ? "実施済み" : "予定"}
-                  </span>
-                </span>
-              </li>
-            );
+            return <MeetingRow key={s.id} slot={s} held={held} daysAfter={daysAfter} onSaveZoomUrl={onSaveZoomUrl} />;
           })}
         </ul>
         <p className="text-[10px] text-slate-400 mt-3">
@@ -1649,10 +1915,55 @@ function PlayerDetailPanel({
   );
 }
 
+function MeetingRow({ slot, held, daysAfter, onSaveZoomUrl }) {
+  const [zoomUrl, setZoomUrl] = useState(slot.zoomUrl || "");
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await onSaveZoomUrl(slot.id, zoomUrl);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <li className="bg-slate-50 rounded-lg px-3 py-2 text-xs space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-slate-600">{slot.datetime}</span>
+        <span className="flex items-center gap-2">
+          {daysAfter !== null && <span className="text-slate-400">受傷後{daysAfter}日</span>}
+          <span className={`font-bold ${held ? "text-green-600" : "text-blue-500"}`}>
+            {held ? "実施済み" : "予定"}
+          </span>
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        <Video size={12} className="text-slate-400 shrink-0" />
+        <input
+          value={zoomUrl}
+          onChange={(e) => setZoomUrl(e.target.value)}
+          placeholder="オンライン会議URL（Zoomなど）"
+          className="flex-1 border border-slate-200 rounded-lg px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-blue-400"
+        />
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="px-2.5 py-1 rounded-lg bg-slate-800 text-white text-[11px] font-medium hover:bg-slate-700 disabled:bg-slate-300 shrink-0"
+        >
+          保存
+        </button>
+      </div>
+    </li>
+  );
+}
+
 // ==================================================================
 // 選手モード（PIN認証つき）
 // ==================================================================
 function PlayerMode({
+  orgId,
   masterProtocols,
   playerDirectory,
   setPlayerDirectory,
@@ -1664,6 +1975,7 @@ function PlayerMode({
   if (!myPlayer) {
     return (
       <PlayerLogin
+        orgId={orgId}
         masterProtocols={masterProtocols}
         playerDirectory={playerDirectory}
         setPlayerDirectory={setPlayerDirectory}
@@ -1674,6 +1986,7 @@ function PlayerMode({
 
   return (
     <PlayerPersonalDashboard
+      orgId={orgId}
       player={myPlayer}
       protocol={masterProtocols.find((mp) => mp.id === myPlayer.protocolId)}
       setMyPlayer={setMyPlayer}
@@ -1684,7 +1997,7 @@ function PlayerMode({
   );
 }
 
-function PlayerLogin({ masterProtocols, playerDirectory, setPlayerDirectory, setMyPlayer }) {
+function PlayerLogin({ orgId, masterProtocols, playerDirectory, setPlayerDirectory, setMyPlayer }) {
   const [screen, setScreen] = useState("select");
   const [selectedDir, setSelectedDir] = useState(null);
   const [pin, setPin] = useState("");
@@ -1706,7 +2019,10 @@ function PlayerLogin({ masterProtocols, playerDirectory, setPlayerDirectory, set
     setChecking(true);
     setError(null);
     try {
-      const pinRows = await sbSelect("players", `?id=eq.${encodeURIComponent(selectedDir.id)}&select=pin`);
+      const pinRows = await sbSelect(
+        "players",
+        `?id=eq.${encodeURIComponent(selectedDir.id)}&org_id=eq.${encodeURIComponent(orgId)}&select=pin`
+      );
       if (!pinRows[0] || pinRows[0].pin !== pin) {
         setError("暗証番号が違います");
         setChecking(false);
@@ -1714,7 +2030,7 @@ function PlayerLogin({ masterProtocols, playerDirectory, setPlayerDirectory, set
       }
       const fullRows = await sbSelect(
         "players",
-        `?id=eq.${encodeURIComponent(selectedDir.id)}&select=${PLAYER_FIELDS}${PLAYER_EMBED_ORDER}`
+        `?id=eq.${encodeURIComponent(selectedDir.id)}&org_id=eq.${encodeURIComponent(orgId)}&select=${PLAYER_FIELDS}${PLAYER_EMBED_ORDER}`
       );
       setMyPlayer(normalizePlayer(fullRows[0]));
     } catch (err) {
@@ -1727,6 +2043,7 @@ function PlayerLogin({ masterProtocols, playerDirectory, setPlayerDirectory, set
   if (screen === "register") {
     return (
       <PlayerRegisterForm
+        orgId={orgId}
         masterProtocols={masterProtocols}
         setPlayerDirectory={setPlayerDirectory}
         setMyPlayer={setMyPlayer}
@@ -1808,7 +2125,7 @@ function PlayerLogin({ masterProtocols, playerDirectory, setPlayerDirectory, set
   );
 }
 
-function PlayerRegisterForm({ masterProtocols, setPlayerDirectory, setMyPlayer, onCancel }) {
+function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyPlayer, onCancel }) {
   const [name, setName] = useState("");
   const [protocolId, setProtocolId] = useState(masterProtocols[0]?.id ?? "");
   const [injuryDate, setInjuryDate] = useState("");
@@ -1836,6 +2153,7 @@ function PlayerRegisterForm({ masterProtocols, setPlayerDirectory, setMyPlayer, 
     ).fill(false);
     const payload = {
       id: `player-${Date.now()}`,
+      org_id: orgId,
       name: name.trim(),
       protocol_id: protocolId,
       current_phase: 1,
@@ -1960,6 +2278,7 @@ function UsageGuide() {
             強い不安や痛みがあるときは「🆘SOSを送る」をオンにしてから送信すると、指導者に赤いアラートで通知されます。
           </li>
           <li>「面談予約」から公開されている枠をタップするだけで、面談を予約できます。</li>
+          <li>予約後にZoom等のURLが設定されると「面談に参加」ボタンから直接参加できます。</li>
           <li>「指導者とのチャット」から直接メッセージのやり取りができます（返信者の立場も表示されます）。</li>
           <li>「受傷日」を登録すると、同じ怪我をした過去の選手たちの平均復帰期間が目安として表示されます。</li>
         </ul>
@@ -1968,7 +2287,7 @@ function UsageGuide() {
   );
 }
 
-function InjuryDateCard({ player, protocol, setMyPlayer }) {
+function InjuryDateCard({ orgId, player, protocol, setMyPlayer }) {
   const [date, setDate] = useState(player.injuryDate || "");
   const [saving, setSaving] = useState(false);
   const [avg, setAvg] = useState(null);
@@ -1976,7 +2295,10 @@ function InjuryDateCard({ player, protocol, setMyPlayer }) {
   useEffect(() => {
     let active = true;
     if (protocol) {
-      sbSelect("protocol_avg_recovery", `?protocol_id=eq.${encodeURIComponent(protocol.id)}&select=*`)
+      sbSelect(
+        "protocol_avg_recovery",
+        `?org_id=eq.${encodeURIComponent(orgId)}&protocol_id=eq.${encodeURIComponent(protocol.id)}&select=*`
+      )
         .then((rows) => {
           if (active) setAvg(rows[0] || null);
         })
@@ -1985,7 +2307,7 @@ function InjuryDateCard({ player, protocol, setMyPlayer }) {
     return () => {
       active = false;
     };
-  }, [protocol?.id]);
+  }, [protocol?.id, orgId]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -2022,18 +2344,22 @@ function InjuryDateCard({ player, protocol, setMyPlayer }) {
         </button>
       </div>
       {elapsed !== null && <p className="text-xs text-slate-500">受傷から {elapsed} 日経過しています。</p>}
-      {avg && avg.sample_size > 0 && (
+      {avg && avg.sample_size > 0 ? (
         <p className="text-xs text-blue-600 mt-2 flex items-start gap-1">
           <TrendingUp size={14} className="shrink-0 mt-0.5" />
           過去に同じ怪我を完遂した{avg.sample_size}人の平均は、受傷から約
           {Math.round((avg.avg_days / 7) * 10) / 10}週間（{avg.avg_days}日）でした。目安にしてください。
+        </p>
+      ) : (
+        <p className="text-xs text-slate-400 mt-2">
+          まだ同じプロトコルを完遂した選手のデータがないため、平均値はまだ表示できません。
         </p>
       )}
     </div>
   );
 }
 
-function PlayerPersonalDashboard({ player, protocol, setMyPlayer, slots, setSlots, onLogout }) {
+function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, setSlots, onLogout }) {
   const [vas, setVas] = useState(3);
   const [mental, setMental] = useState(3);
   const [honne, setHonne] = useState("");
@@ -2047,6 +2373,7 @@ function PlayerPersonalDashboard({ player, protocol, setMyPlayer, slots, setSlot
   const progressPct = ((player.currentPhase - 1) / 5) * 100;
   const bookedSlot = slots.find((s) => s.id === player.bookedSlotId);
   const availableSlots = slots.filter((s) => !s.bookedBy);
+  const embedUrl = getYouTubeEmbedUrl(protocol?.videoUrl);
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -2123,22 +2450,26 @@ function PlayerPersonalDashboard({ player, protocol, setMyPlayer, slots, setSlot
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
         <div className="flex items-center justify-between mb-2">
           <p className="text-sm font-bold text-slate-700">復帰ロードマップ</p>
-          <span className="text-xs font-bold text-blue-600">現在のステップ：{player.currentPhase}/5</span>
+          <span className={`text-xs font-bold ${PHASE_TEXT_COLORS[player.currentPhase]}`}>
+            現在のステップ：{player.currentPhase}/5
+          </span>
         </div>
         <p className="text-2xl font-extrabold text-slate-800 mb-1">全体復帰まであと {remainingWeeks} 週間</p>
         <p className="text-xs text-slate-400 mb-3">{protocol?.name}</p>
 
-        <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-gradient-to-r from-blue-500 to-orange-400 rounded-full transition-all"
-            style={{ width: `${progressPct}%` }}
-          />
+        <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden flex">
+          {[1, 2, 3, 4, 5].map((n) => (
+            <div
+              key={n}
+              className={`h-full flex-1 ${n <= player.currentPhase ? PHASE_BG_COLORS[n] : "bg-transparent"}`}
+            />
+          ))}
         </div>
         <div className="flex justify-between mt-2">
           {[1, 2, 3, 4, 5].map((n) => (
             <span
               key={n}
-              className={`text-[10px] font-bold ${n <= player.currentPhase ? "text-blue-600" : "text-slate-300"}`}
+              className={`text-[10px] font-bold ${n <= player.currentPhase ? PHASE_TEXT_COLORS[n] : "text-slate-300"}`}
             >
               P{n}
             </span>
@@ -2155,7 +2486,35 @@ function PlayerPersonalDashboard({ player, protocol, setMyPlayer, slots, setSlot
         </div>
       </div>
 
-      <InjuryDateCard player={player} protocol={protocol} setMyPlayer={setMyPlayer} />
+      {protocol?.videoUrl && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+          <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+            <Youtube size={16} className="text-red-500" /> リハビリ参考動画
+          </p>
+          {embedUrl ? (
+            <div className="aspect-video w-full rounded-lg overflow-hidden bg-slate-100">
+              <iframe
+                src={embedUrl}
+                title="リハビリ参考動画"
+                className="w-full h-full"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+              />
+            </div>
+          ) : (
+            <a
+              href={protocol.videoUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center justify-center gap-2 py-3 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-blue-600 font-medium"
+            >
+              <LinkIcon size={14} /> 動画リンクを開く
+            </a>
+          )}
+        </div>
+      )}
+
+      <InjuryDateCard orgId={orgId} player={player} protocol={protocol} setMyPlayer={setMyPlayer} />
 
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
         <p className="text-sm font-bold text-slate-700 mb-4">今日のコンディション報告</p>
@@ -2239,8 +2598,20 @@ function PlayerPersonalDashboard({ player, protocol, setMyPlayer, slots, setSlot
         </p>
 
         {bookedSlot ? (
-          <div className="bg-blue-50 rounded-lg px-4 py-3 text-sm text-blue-700 font-bold">
-            予約済み：{bookedSlot.datetime}
+          <div className="bg-blue-50 rounded-lg px-4 py-3 space-y-2">
+            <p className="text-sm text-blue-700 font-bold">予約済み：{bookedSlot.datetime}</p>
+            {bookedSlot.zoomUrl ? (
+              <a
+                href={bookedSlot.zoomUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center justify-center gap-2 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-bold hover:bg-blue-700"
+              >
+                <Video size={16} /> 面談に参加
+              </a>
+            ) : (
+              <p className="text-xs text-blue-500">オンライン会議URLは指導者側で準備中です。</p>
+            )}
           </div>
         ) : (
           <div className="space-y-2">
