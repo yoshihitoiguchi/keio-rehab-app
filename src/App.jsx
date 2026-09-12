@@ -12,7 +12,6 @@ import {
   CalendarClock,
   CalendarDays,
   ArrowRight,
-  Timer,
   Flame,
   ShieldCheck,
   Trash2,
@@ -23,6 +22,9 @@ import {
   KeyRound,
   UserRound,
   TrendingUp,
+  Settings,
+  History,
+  CalendarRange,
 } from "lucide-react";
 
 // ============================================================
@@ -60,12 +62,28 @@ const sbUpdate = (table, id, body) =>
 const sbDelete = (table, id) =>
   sb(`${table}?id=eq.${encodeURIComponent(id)}`, { method: "DELETE", prefer: "return=minimal" });
 
+// ---- パスワードのハッシュ化（SHA-256、平文は保存・送信しない） ----
+async function sha256Hex(text) {
+  const enc = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 // ---- DBの行(snake_case) <-> アプリ内部表現(camelCase) の変換 ----
 function normalizeProtocol(row) {
   return { id: row.id, name: row.name, totalWeeks: row.total_weeks, phases: row.phases || [] };
 }
 function normalizeMessage(row) {
-  return { id: row.id, sender: row.sender, content: row.content, createdAt: row.created_at };
+  return {
+    id: row.id,
+    sender: row.sender, // 'player' | 'staff'
+    staffRole: row.staff_role, // 'coach' | 'student_trainer' | 'trainer' | 'doctor' | null
+    isRead: row.is_read,
+    content: row.content,
+    createdAt: row.created_at,
+  };
 }
 function normalizePlayer(row) {
   return {
@@ -89,12 +107,37 @@ function normalizePlayer(row) {
   };
 }
 function normalizeSlot(row) {
-  return { id: row.id, datetime: row.datetime, bookedBy: row.booked_by };
+  return {
+    id: row.id,
+    datetime: row.datetime,
+    bookedBy: row.booked_by,
+    matchedRoles: row.matched_roles || [],
+  };
 }
 
 const MENTAL_FACES = ["😞", "😕", "😐", "🙂", "😄"];
 const PLAYER_FIELDS = "*,reports(*),messages(*)";
 const PLAYER_EMBED_ORDER = "&reports.order=created_at.asc&messages.order=created_at.asc";
+
+const SCHEDULING_ROLES = [
+  { value: "coach", label: "コーチ" },
+  { value: "trainer", label: "トレーナー" },
+  { value: "doctor", label: "ドクター" },
+];
+const SCHEDULING_ROLE_LABELS = { coach: "コーチ", trainer: "トレーナー", doctor: "ドクター" };
+
+const CHAT_STAFF_ROLES = [
+  { value: "coach", label: "コーチ" },
+  { value: "student_trainer", label: "学生トレーナー" },
+  { value: "trainer", label: "トレーナー" },
+  { value: "doctor", label: "医師" },
+];
+const CHAT_STAFF_ROLE_LABELS = {
+  coach: "コーチ",
+  student_trainer: "学生トレーナー",
+  trainer: "トレーナー",
+  doctor: "医師",
+};
 
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
@@ -118,6 +161,22 @@ function daysSince(dateStr) {
   const diff = Date.now() - new Date(dateStr).getTime();
   return Math.max(0, Math.floor(diff / 86400000));
 }
+function parseDatetime(str) {
+  return new Date(str.replace(" ", "T"));
+}
+function diffDaysBetween(dateStr, datetimeStr) {
+  return Math.floor((parseDatetime(datetimeStr) - new Date(dateStr)) / 86400000);
+}
+// 受傷後2週間/3週間 経過しても面談が1件も実施されていない選手を検知
+function meetingAlertLevel(player, slots) {
+  if (!player.injuryDate) return null;
+  const held = slots.some((s) => s.bookedBy === player.id && parseDatetime(s.datetime) <= new Date());
+  if (held) return null;
+  const elapsed = daysSince(player.injuryDate);
+  if (elapsed >= 21) return "red";
+  if (elapsed >= 14) return "yellow";
+  return null;
+}
 
 // ==================================================================
 export default function RehabApp() {
@@ -125,20 +184,18 @@ export default function RehabApp() {
   const [coachAuthed, setCoachAuthed] = useState(false);
   const [pwInput, setPwInput] = useState("");
   const [pwError, setPwError] = useState(false);
+  const [pwChecking, setPwChecking] = useState(false);
 
-  // 全モード共通・非機密の公開データ
   const [masterProtocols, setMasterProtocols] = useState([]);
   const [slots, setSlots] = useState([]);
-  const [playerDirectory, setPlayerDirectory] = useState([]); // [{id, name}] のみ
+  const [playerDirectory, setPlayerDirectory] = useState([]);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
 
-  // 指導者モード専用：認証後にのみ取得する全選手データ
   const [coachPlayers, setCoachPlayers] = useState([]);
   const [coachLoading, setCoachLoading] = useState(false);
 
-  // 選手モード専用：PIN認証後にのみ保持する「自分自身」のデータ
   const [myPlayer, setMyPlayer] = useState(null);
 
   const loadPublicData = async () => {
@@ -188,20 +245,30 @@ export default function RehabApp() {
   };
 
   const handlePasswordSubmit = async () => {
-    if (pwInput === "1234") {
-      setCoachAuthed(true);
-      setPwError(false);
-      setPwInput("");
-      setMode("coach");
-      await loadCoachPlayers();
-    } else {
+    setPwChecking(true);
+    setPwError(false);
+    try {
+      const rows = await sbSelect("app_settings", "?key=eq.coach_password_hash&select=value");
+      const storedHash = rows[0]?.value;
+      const inputHash = await sha256Hex(pwInput);
+      if (storedHash && storedHash === inputHash) {
+        setCoachAuthed(true);
+        setPwInput("");
+        setMode("coach");
+        await loadCoachPlayers();
+      } else {
+        setPwError(true);
+      }
+    } catch (err) {
+      setLoadError(err.message);
       setPwError(true);
+    } finally {
+      setPwChecking(false);
     }
   };
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col">
-      {/* ---------- ヘッダー / モード切替 ---------- */}
       <header className="bg-slate-900 text-white sticky top-0 z-20 shadow-md">
         <div className="max-w-6xl mx-auto flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-2">
@@ -263,6 +330,7 @@ export default function RehabApp() {
             pwInput={pwInput}
             setPwInput={setPwInput}
             pwError={pwError}
+            checking={pwChecking}
             onSubmit={handlePasswordSubmit}
             onCancel={() => setMode("player")}
           />
@@ -299,7 +367,7 @@ export default function RehabApp() {
 // ==================================================================
 // パスワードゲート（指導者モード）
 // ==================================================================
-function PasswordGate({ pwInput, setPwInput, pwError, onSubmit, onCancel }) {
+function PasswordGate({ pwInput, setPwInput, pwError, checking, onSubmit, onCancel }) {
   return (
     <div className="max-w-sm mx-auto mt-16 bg-white rounded-2xl shadow-lg p-8 border border-slate-200">
       <div className="flex flex-col items-center gap-3 mb-6">
@@ -334,28 +402,30 @@ function PasswordGate({ pwInput, setPwInput, pwError, onSubmit, onCancel }) {
         </button>
         <button
           onClick={onSubmit}
-          className="flex-1 py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium"
+          disabled={checking}
+          className="flex-1 py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium disabled:bg-slate-300 flex items-center justify-center gap-2"
         >
+          {checking && <Loader2 size={14} className="animate-spin" />}
           ログイン
         </button>
       </div>
-      <p className="text-xs text-slate-400 text-center mt-4">デモ用パスワード: 1234</p>
     </div>
   );
 }
 
 // ==================================================================
-// チャットパネル（選手⇔指導者 共通コンポーネント）
+// チャットパネル（選手⇔スタッフ 共通コンポーネント）
 // ==================================================================
-function ChatPanel({ messages, myRole, title, onSend }) {
+function ChatPanel({ messages, myRole, title, onSend, roleOptions }) {
   const [text, setText] = useState("");
+  const [role, setRole] = useState(roleOptions?.[0]?.value ?? null);
   const [sending, setSending] = useState(false);
 
   const handleSend = async () => {
     if (!text.trim()) return;
     setSending(true);
     try {
-      await onSend(text.trim());
+      await onSend(text.trim(), role);
       setText("");
     } catch (err) {
       alert(`送信に失敗しました: ${err.message}`);
@@ -380,12 +450,34 @@ function ChatPanel({ messages, myRole, title, onSend }) {
                 m.sender === myRole ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700"
               }`}
             >
+              {m.sender === "staff" && m.staffRole && (
+                <p
+                  className={`text-[10px] font-bold mb-0.5 ${
+                    m.sender === myRole ? "text-blue-100" : "text-slate-500"
+                  }`}
+                >
+                  {CHAT_STAFF_ROLE_LABELS[m.staffRole] || "スタッフ"}
+                </p>
+              )}
               {m.content}
             </div>
           </div>
         ))}
       </div>
       <div className="flex gap-2">
+        {roleOptions && (
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            className="border border-slate-300 rounded-lg px-2 py-2 text-xs bg-white shrink-0"
+          >
+            {roleOptions.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        )}
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -419,34 +511,39 @@ function CoachDashboard({
 }) {
   const [subTab, setSubTab] = useState("players");
 
+  const tabs = [
+    { key: "players", label: "選手管理", icon: Users },
+    { key: "protocols", label: "プロトコル管理", icon: ClipboardList },
+    { key: "scheduling", label: "日程調整", icon: CalendarRange },
+    { key: "settings", label: "設定", icon: Settings },
+  ];
+
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
-      <div className="flex gap-2 mb-6 border-b border-slate-300">
-        <button
-          onClick={() => setSubTab("players")}
-          className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
-            subTab === "players"
-              ? "border-blue-600 text-blue-700"
-              : "border-transparent text-slate-500 hover:text-slate-800"
-          }`}
-        >
-          <Users size={16} /> 選手管理
-        </button>
-        <button
-          onClick={() => setSubTab("protocols")}
-          className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
-            subTab === "protocols"
-              ? "border-blue-600 text-blue-700"
-              : "border-transparent text-slate-500 hover:text-slate-800"
-          }`}
-        >
-          <ClipboardList size={16} /> プロトコル管理
-        </button>
+      <div className="flex gap-2 mb-6 border-b border-slate-300 flex-wrap">
+        {tabs.map((t) => {
+          const Icon = t.icon;
+          return (
+            <button
+              key={t.key}
+              onClick={() => setSubTab(t.key)}
+              className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                subTab === t.key
+                  ? "border-blue-600 text-blue-700"
+                  : "border-transparent text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              <Icon size={16} /> {t.label}
+            </button>
+          );
+        })}
       </div>
 
       {subTab === "protocols" && (
         <ProtocolManagement masterProtocols={masterProtocols} setMasterProtocols={setMasterProtocols} />
       )}
+      {subTab === "scheduling" && <CoachScheduling slots={slots} setSlots={setSlots} />}
+      {subTab === "settings" && <CoachSettings />}
       {subTab === "players" &&
         (coachLoading ? (
           <div className="flex items-center justify-center py-16 text-slate-400 gap-2">
@@ -458,14 +555,343 @@ function CoachDashboard({
             coachPlayers={coachPlayers}
             setCoachPlayers={setCoachPlayers}
             slots={slots}
-            setSlots={setSlots}
           />
         ))}
     </div>
   );
 }
 
-// ---------- ① プロトコル管理(CMS) ----------
+// ---------- 設定：指導者パスワードの変更 ----------
+function CoachSettings() {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [success, setSuccess] = useState(false);
+
+  const handleChange = async () => {
+    setError(null);
+    setSuccess(false);
+    if (next.length < 4) {
+      setError("新しいパスワードは4文字以上にしてください");
+      return;
+    }
+    if (next !== confirm) {
+      setError("新しいパスワード（確認）が一致しません");
+      return;
+    }
+    setSaving(true);
+    try {
+      const rows = await sbSelect("app_settings", "?key=eq.coach_password_hash&select=value");
+      const storedHash = rows[0]?.value;
+      const currentHash = await sha256Hex(current);
+      if (storedHash !== currentHash) {
+        setError("現在のパスワードが違います");
+        setSaving(false);
+        return;
+      }
+      const newHash = await sha256Hex(next);
+      await sb("app_settings?key=eq.coach_password_hash", {
+        method: "PATCH",
+        body: JSON.stringify({ value: newHash }),
+      });
+      setSuccess(true);
+      setCurrent("");
+      setNext("");
+      setConfirm("");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="max-w-md bg-white rounded-xl border border-slate-200 p-6">
+      <h3 className="font-bold text-slate-700 text-sm mb-4 flex items-center gap-1.5">
+        <KeyRound size={16} className="text-blue-600" /> 指導者パスワードの変更
+      </h3>
+      <label className="text-xs text-slate-500">現在のパスワード</label>
+      <input
+        type="password"
+        value={current}
+        onChange={(e) => setCurrent(e.target.value)}
+        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+      <label className="text-xs text-slate-500">新しいパスワード</label>
+      <input
+        type="password"
+        value={next}
+        onChange={(e) => setNext(e.target.value)}
+        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+      <label className="text-xs text-slate-500">新しいパスワード（確認）</label>
+      <input
+        type="password"
+        value={confirm}
+        onChange={(e) => setConfirm(e.target.value)}
+        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+      {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
+      {success && <p className="text-xs text-green-600 mb-2">パスワードを変更しました。</p>}
+      <button
+        onClick={handleChange}
+        disabled={saving}
+        className="w-full py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:bg-slate-300 flex items-center justify-center gap-2"
+      >
+        {saving && <Loader2 size={14} className="animate-spin" />}
+        {saving ? "変更中..." : "パスワードを変更する"}
+      </button>
+    </div>
+  );
+}
+
+// ---------- 日程調整：3者の空き時間登録 → 自動照合 → 公開 ----------
+function CoachScheduling({ slots, setSlots }) {
+  const [availability, setAvailability] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [role, setRole] = useState("coach");
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [day, setDay] = useState(now.getDate());
+  const [hour, setHour] = useState(10);
+  const [minute, setMinute] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [error, setError] = useState(null);
+
+  const loadAvailability = async () => {
+    setLoading(true);
+    try {
+      const rows = await sbSelect("staff_availability", "?select=*&order=datetime.asc");
+      setAvailability(rows);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAvailability();
+  }, []);
+
+  const daysInMonth = new Date(year, month, 0).getDate();
+  useEffect(() => {
+    if (day > daysInMonth) setDay(daysInMonth);
+  }, [daysInMonth, day]);
+
+  const handleAddAvailability = async () => {
+    const datetime = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(
+      2,
+      "0"
+    )} ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+    setSaving(true);
+    setError(null);
+    try {
+      const [inserted] = await sbInsert("staff_availability", { role, datetime });
+      setAvailability((prev) => [...prev, inserted].sort((a, b) => a.datetime.localeCompare(b.datetime)));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteAvailability = async (id) => {
+    try {
+      await sbDelete("staff_availability", id);
+      setAvailability((prev) => prev.filter((a) => a.id !== id));
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const grouped = {};
+  availability.forEach((a) => {
+    if (!grouped[a.datetime]) grouped[a.datetime] = new Set();
+    grouped[a.datetime].add(a.role);
+  });
+
+  const handleSync = async () => {
+    setSyncing(true);
+    setError(null);
+    try {
+      const matched = Object.entries(grouped)
+        .filter(([, roleSet]) => roleSet.has("coach") && roleSet.has("trainer"))
+        .map(([datetime, roleSet]) => ({ datetime, matched_roles: Array.from(roleSet) }));
+      if (matched.length > 0) {
+        await sb("slots?on_conflict=datetime", {
+          method: "POST",
+          body: JSON.stringify(matched),
+          prefer: "resolution=merge-duplicates,return=representation",
+        });
+      }
+      const rows = await sbSelect("slots", "?select=*&order=datetime.asc");
+      setSlots(rows.map(normalizeSlot));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="bg-white rounded-xl border border-slate-200 p-5 h-fit">
+        <h3 className="font-bold text-slate-700 text-sm mb-4">面談可能日時の登録</h3>
+        <label className="text-xs text-slate-500">立場</label>
+        <select
+          value={role}
+          onChange={(e) => setRole(e.target.value)}
+          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          {SCHEDULING_ROLES.map((r) => (
+            <option key={r.value} value={r.value}>
+              {r.label}
+            </option>
+          ))}
+        </select>
+        <div className="grid grid-cols-3 gap-2 mb-2">
+          <select
+            value={year}
+            onChange={(e) => setYear(Number(e.target.value))}
+            className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
+          >
+            {[now.getFullYear(), now.getFullYear() + 1].map((y) => (
+              <option key={y} value={y}>
+                {y}年
+              </option>
+            ))}
+          </select>
+          <select
+            value={month}
+            onChange={(e) => setMonth(Number(e.target.value))}
+            className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
+          >
+            {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+              <option key={m} value={m}>
+                {m}月
+              </option>
+            ))}
+          </select>
+          <select
+            value={day}
+            onChange={(e) => setDay(Number(e.target.value))}
+            className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
+          >
+            {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((d) => (
+              <option key={d} value={d}>
+                {d}日
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="grid grid-cols-2 gap-2 mb-3">
+          <select
+            value={hour}
+            onChange={(e) => setHour(Number(e.target.value))}
+            className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
+          >
+            {Array.from({ length: 24 }, (_, i) => i).map((h) => (
+              <option key={h} value={h}>
+                {String(h).padStart(2, "0")}時
+              </option>
+            ))}
+          </select>
+          <select
+            value={minute}
+            onChange={(e) => setMinute(Number(e.target.value))}
+            className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
+          >
+            {[0, 30].map((m) => (
+              <option key={m} value={m}>
+                {String(m).padStart(2, "0")}分
+              </option>
+            ))}
+          </select>
+        </div>
+        {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
+        <button
+          onClick={handleAddAvailability}
+          disabled={saving}
+          className="w-full py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:bg-slate-300 flex items-center justify-center gap-2"
+        >
+          {saving && <Loader2 size={14} className="animate-spin" />}
+          {saving ? "登録中..." : "この日時を空き時間として登録"}
+        </button>
+      </div>
+
+      <div className="bg-white rounded-xl border border-slate-200 p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-bold text-slate-700 text-sm">登録済みの空き時間と自動照合</h3>
+          <button
+            onClick={handleSync}
+            disabled={syncing}
+            className="text-xs px-3 py-1.5 rounded-full bg-slate-800 text-white font-medium hover:bg-slate-700 disabled:bg-slate-300 flex items-center gap-1 shrink-0"
+          >
+            {syncing && <Loader2 size={12} className="animate-spin" />} 自動照合して公開
+          </button>
+        </div>
+        <p className="text-xs text-slate-400 mb-3">
+          コーチとトレーナーの空き時間が一致した日時（ドクターも一致すればさらに確実）だけが、
+          選手側で予約できる面談枠として公開されます。
+        </p>
+        {loading ? (
+          <p className="text-sm text-slate-400">読み込み中...</p>
+        ) : (
+          <ul className="space-y-2 max-h-72 overflow-y-auto">
+            {Object.entries(grouped)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([datetime, roleSet]) => {
+                const roles = Array.from(roleSet);
+                const qualifies = roleSet.has("coach") && roleSet.has("trainer");
+                return (
+                  <li
+                    key={datetime}
+                    className={`rounded-lg px-3 py-2 text-xs border ${
+                      qualifies ? "border-green-200 bg-green-50" : "border-slate-200 bg-slate-50"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-slate-700">{datetime}</span>
+                      {qualifies && <span className="text-green-600 font-bold">公開対象</span>}
+                    </div>
+                    <p className="text-slate-500 mt-1">
+                      {roles.map((r) => SCHEDULING_ROLE_LABELS[r]).join(" / ")}
+                    </p>
+                  </li>
+                );
+              })}
+            {availability.length === 0 && <p className="text-sm text-slate-400">まだ登録がありません。</p>}
+          </ul>
+        )}
+        <div className="mt-4 pt-4 border-t border-slate-100">
+          <p className="text-xs text-slate-400 mb-2">個別の空き時間を削除</p>
+          <ul className="space-y-1 max-h-40 overflow-y-auto">
+            {availability.map((a) => (
+              <li
+                key={a.id}
+                className="flex items-center justify-between text-xs bg-slate-50 rounded-lg px-3 py-1.5"
+              >
+                <span>
+                  {SCHEDULING_ROLE_LABELS[a.role]} ・ {a.datetime}
+                </span>
+                <button onClick={() => handleDeleteAvailability(a.id)} className="text-slate-400 hover:text-red-500">
+                  <Trash2 size={12} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- プロトコル管理(CMS) ----------
 function ProtocolManagement({ masterProtocols, setMasterProtocols }) {
   const blankPhases = () =>
     Array.from({ length: 5 }, (_, i) => ({ title: `フェーズ${i + 1}`, conditionsText: "" }));
@@ -616,101 +1042,8 @@ function ProtocolManagement({ masterProtocols, setMasterProtocols }) {
   );
 }
 
-// ---------- 面談枠：年月日 + 時刻(30分単位) のプルダウン作成UI ----------
-function SlotCreator({ onCreate }) {
-  const now = new Date();
-  const [year, setYear] = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth() + 1);
-  const [day, setDay] = useState(now.getDate());
-  const [hour, setHour] = useState(10);
-  const [minute, setMinute] = useState(0);
-
-  const daysInMonth = new Date(year, month, 0).getDate();
-  useEffect(() => {
-    if (day > daysInMonth) setDay(daysInMonth);
-  }, [daysInMonth, day]);
-
-  const handleCreate = () => {
-    const datetime = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(
-      2,
-      "0"
-    )} ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-    onCreate(datetime);
-  };
-
-  return (
-    <div className="space-y-2 mb-3">
-      <div className="grid grid-cols-3 gap-2">
-        <select
-          value={year}
-          onChange={(e) => setYear(Number(e.target.value))}
-          className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
-        >
-          {[now.getFullYear(), now.getFullYear() + 1].map((y) => (
-            <option key={y} value={y}>
-              {y}年
-            </option>
-          ))}
-        </select>
-        <select
-          value={month}
-          onChange={(e) => setMonth(Number(e.target.value))}
-          className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
-        >
-          {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-            <option key={m} value={m}>
-              {m}月
-            </option>
-          ))}
-        </select>
-        <select
-          value={day}
-          onChange={(e) => setDay(Number(e.target.value))}
-          className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
-        >
-          {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((d) => (
-            <option key={d} value={d}>
-              {d}日
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        <select
-          value={hour}
-          onChange={(e) => setHour(Number(e.target.value))}
-          className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
-        >
-          {Array.from({ length: 24 }, (_, i) => i).map((h) => (
-            <option key={h} value={h}>
-              {String(h).padStart(2, "0")}時
-            </option>
-          ))}
-        </select>
-        <select
-          value={minute}
-          onChange={(e) => setMinute(Number(e.target.value))}
-          className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
-        >
-          {[0, 30].map((m) => (
-            <option key={m} value={m}>
-              {String(m).padStart(2, "0")}分
-            </option>
-          ))}
-        </select>
-      </div>
-      <button
-        onClick={handleCreate}
-        className="w-full py-2 rounded-lg bg-slate-800 text-white text-sm font-medium hover:bg-slate-700"
-      >
-        この日時で枠を追加
-      </button>
-    </div>
-  );
-}
-
-// ---------- ② 選手管理（2ペイン） ----------
-function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slots, setSlots }) {
+// ---------- 選手管理（2ペイン） ----------
+function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slots }) {
   const [selectedId, setSelectedId] = useState(null);
   const [error, setError] = useState(null);
 
@@ -720,7 +1053,6 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
     }
   }, [coachPlayers, selectedId]);
 
-  // 要件⑤：フェーズが小さい選手から昇順で表示
   const sortedPlayers = [...coachPlayers].sort((a, b) => a.currentPhase - b.currentPhase);
   const selectedPlayer = coachPlayers.find((p) => p.id === selectedId) || null;
   const protocolOf = (p) => masterProtocols.find((mp) => mp.id === p.protocolId);
@@ -773,17 +1105,6 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
     }
   };
 
-  const addSlot = async (datetimeStr) => {
-    const payload = { id: `slot-${Date.now()}`, datetime: datetimeStr, booked_by: null };
-    try {
-      const [inserted] = await sbInsert("slots", payload);
-      setSlots((prev) => [...prev, normalizeSlot(inserted)]);
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-
-  // 要件⑥：選手の完全削除
   const deletePlayer = async (playerId, playerName) => {
     const confirmed = window.confirm(
       `本当に「${playerName}」選手のデータを完全に削除しますか？\nこの操作は取り消せません。`
@@ -798,9 +1119,13 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
     }
   };
 
-  // 要件⑦：チャットメッセージ送信（指導者側）
-  const sendCoachMessage = async (playerId, content) => {
-    const [inserted] = await sbInsert("messages", { player_id: playerId, sender: "coach", content });
+  const sendCoachMessage = async (playerId, content, staffRole) => {
+    const [inserted] = await sbInsert("messages", {
+      player_id: playerId,
+      sender: "staff",
+      staff_role: staffRole,
+      content,
+    });
     setCoachPlayers((prev) =>
       prev.map((p) =>
         p.id === playerId ? { ...p, messages: [...p.messages, normalizeMessage(inserted)] } : p
@@ -809,25 +1134,35 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
   };
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6">
-      {/* 左ペイン：選手リスト */}
+    <div className="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6">
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden h-fit">
         <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
           <p className="text-sm font-bold text-slate-700">
             選手一覧 ({coachPlayers.length})・Phase昇順
+          </p>
+          <p className="text-[10px] text-slate-400 mt-1">
+            🟡 受傷2週間・面談未実施　🔴 受傷3週間・面談未実施
           </p>
         </div>
         <ul className="divide-y divide-slate-100 max-h-[70vh] overflow-y-auto">
           {sortedPlayers.map((p) => {
             const alert = isAlert(p);
             const r = latestReport(p);
+            const unread = p.messages.filter((m) => m.sender === "player" && !m.isRead).length;
+            const meetingLevel = meetingAlertLevel(p, slots);
+            const rowBg =
+              meetingLevel === "red"
+                ? "bg-red-50"
+                : meetingLevel === "yellow"
+                ? "bg-yellow-50"
+                : selectedId === p.id
+                ? "bg-blue-50"
+                : "";
             return (
               <li key={p.id}>
                 <button
                   onClick={() => setSelectedId(p.id)}
-                  className={`w-full text-left px-4 py-3 flex items-center justify-between hover:bg-slate-50 transition-colors ${
-                    selectedId === p.id ? "bg-blue-50" : ""
-                  }`}
+                  className={`w-full text-left px-4 py-3 flex items-center justify-between hover:bg-slate-50 transition-colors ${rowBg}`}
                 >
                   <div className="flex items-center gap-2">
                     {alert && <AlertTriangle size={16} className="text-red-500 shrink-0" />}
@@ -840,19 +1175,26 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
                       </p>
                     </div>
                   </div>
-                  {r && (
-                    <span
-                      className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                        r.vas >= 7
-                          ? "bg-red-100 text-red-600"
-                          : r.vas >= 4
-                          ? "bg-orange-100 text-orange-600"
-                          : "bg-green-100 text-green-600"
-                      }`}
-                    >
-                      VAS {r.vas}
-                    </span>
-                  )}
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {unread > 0 && (
+                      <span className="flex items-center gap-0.5 bg-blue-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
+                        <MessageCircle size={10} /> {unread}
+                      </span>
+                    )}
+                    {r && (
+                      <span
+                        className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                          r.vas >= 7
+                            ? "bg-red-100 text-red-600"
+                            : r.vas >= 4
+                            ? "bg-orange-100 text-orange-600"
+                            : "bg-green-100 text-green-600"
+                        }`}
+                      >
+                        VAS {r.vas}
+                      </span>
+                    )}
+                  </div>
                 </button>
               </li>
             );
@@ -863,7 +1205,6 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
         </ul>
       </div>
 
-      {/* 右ペイン：詳細・承認 */}
       <div>
         {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
         {!selectedPlayer && (
@@ -879,9 +1220,8 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
             toggleChecklist={toggleChecklist}
             advancePhase={advancePhase}
             markCompleted={markCompleted}
-            addSlot={addSlot}
             onDelete={() => deletePlayer(selectedPlayer.id, selectedPlayer.name)}
-            onSendMessage={(content) => sendCoachMessage(selectedPlayer.id, content)}
+            onSendMessage={(content, role) => sendCoachMessage(selectedPlayer.id, content, role)}
             setCoachPlayers={setCoachPlayers}
           />
         )}
@@ -897,7 +1237,6 @@ function PlayerDetailPanel({
   toggleChecklist,
   advancePhase,
   markCompleted,
-  addSlot,
   onDelete,
   onSendMessage,
   setCoachPlayers,
@@ -905,8 +1244,29 @@ function PlayerDetailPanel({
   const report = latestReport(player);
   const phaseInfo = protocol?.phases[player.currentPhase - 1];
   const allChecked = player.checklist.length > 0 && player.checklist.every(Boolean);
-  const bookedSlot = slots.find((s) => s.id === player.bookedSlotId);
   const [avg, setAvg] = useState(null);
+
+  // 選手からの未読メッセージを既読にする
+  useEffect(() => {
+    const markRead = async () => {
+      try {
+        await sb(
+          `messages?player_id=eq.${encodeURIComponent(player.id)}&sender=eq.player&is_read=eq.false`,
+          { method: "PATCH", body: JSON.stringify({ is_read: true }), prefer: "return=minimal" }
+        );
+        setCoachPlayers((prev) =>
+          prev.map((p) =>
+            p.id === player.id
+              ? { ...p, messages: p.messages.map((m) => (m.sender === "player" ? { ...m, isRead: true } : m)) }
+              : p
+          )
+        );
+      } catch {
+        // 既読反映の失敗は致命的ではないため無視
+      }
+    };
+    markRead();
+  }, [player.id]);
 
   // チャットのポーリング更新（5秒ごと）
   useEffect(() => {
@@ -921,7 +1281,7 @@ function PlayerDetailPanel({
           prev.map((p) => (p.id === player.id ? { ...p, messages: normalized } : p))
         );
       } catch {
-        // ポーリング失敗は無視（次回リトライ）
+        // ポーリング失敗は無視
       }
     }, 5000);
     return () => clearInterval(interval);
@@ -943,9 +1303,13 @@ function PlayerDetailPanel({
     };
   }, [protocol?.id]);
 
+  const myMeetings = slots
+    .filter((s) => s.bookedBy === player.id)
+    .slice()
+    .sort((a, b) => a.datetime.localeCompare(b.datetime));
+
   return (
     <div className="space-y-5">
-      {/* ヘッダー */}
       <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center justify-between">
         <div>
           <h3 className="font-bold text-lg text-slate-800">{player.name}</h3>
@@ -956,10 +1320,7 @@ function PlayerDetailPanel({
             <p className="text-xs text-slate-400 mt-1">
               受傷日：{player.injuryDate}（受傷から{daysSince(player.injuryDate)}日経過）
               {avg && avg.sample_size > 0 && (
-                <span className="text-blue-500">
-                  {" "}
-                  ・ 過去{avg.sample_size}人の平均完遂日数：{avg.avg_days}日
-                </span>
+                <span className="text-blue-500"> ・ 過去{avg.sample_size}人の平均完遂日数：{avg.avg_days}日</span>
               )}
             </p>
           )}
@@ -980,7 +1341,6 @@ function PlayerDetailPanel({
         </div>
       </div>
 
-      {/* 本日の日報 */}
       <div className="bg-white rounded-xl border border-slate-200 p-5">
         <h4 className="text-sm font-bold text-slate-700 mb-3">本日の日報</h4>
         {!report && <p className="text-sm text-slate-400">まだ報告がありません。</p>}
@@ -1014,7 +1374,6 @@ function PlayerDetailPanel({
         )}
       </div>
 
-      {/* クリア条件チェック */}
       <div className="bg-white rounded-xl border border-slate-200 p-5">
         <h4 className="text-sm font-bold text-slate-700 mb-3">
           Phase {player.currentPhase} クリア条件の確認
@@ -1031,9 +1390,7 @@ function PlayerDetailPanel({
               ) : (
                 <Circle size={18} className="text-slate-300 shrink-0" />
               )}
-              <span className={`text-sm ${player.checklist[idx] ? "text-slate-800" : "text-slate-500"}`}>
-                {c}
-              </span>
+              <span className={`text-sm ${player.checklist[idx] ? "text-slate-800" : "text-slate-500"}`}>{c}</span>
             </button>
           ))}
           {(!phaseInfo || phaseInfo.conditions.length === 0) && (
@@ -1050,7 +1407,6 @@ function PlayerDetailPanel({
             次のフェーズへ進める <ArrowRight size={16} />
           </button>
         )}
-
         {player.currentPhase >= 5 && !player.completedAt && (
           <button
             onClick={() => markCompleted(player.id)}
@@ -1060,46 +1416,48 @@ function PlayerDetailPanel({
             <ShieldCheck size={16} /> 完全復帰として記録する
           </button>
         )}
-
         {player.completedAt && (
           <div className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-green-50 text-green-700 font-bold text-sm">
-            <ShieldCheck size={16} /> 完全復帰 記録済み（
-            {new Date(player.completedAt).toLocaleDateString("ja-JP")}）
+            <ShieldCheck size={16} /> 完全復帰 記録済み（{new Date(player.completedAt).toLocaleDateString("ja-JP")}）
           </div>
         )}
       </div>
 
-      {/* チャット */}
       <ChatPanel
         messages={player.messages}
-        myRole="coach"
+        myRole="staff"
         title={`${player.name} さんとのチャット`}
+        roleOptions={CHAT_STAFF_ROLES}
         onSend={onSendMessage}
       />
 
-      {/* 面談枠登録 */}
       <div className="bg-white rounded-xl border border-slate-200 p-5">
         <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
-          <CalendarClock size={16} className="text-blue-600" /> 面談可能枠の登録
+          <History size={16} className="text-blue-600" /> 面談履歴（{myMeetings.length}件）
         </h4>
-        {bookedSlot && (
-          <p className="text-xs text-green-600 bg-green-50 rounded-lg px-3 py-2 mb-3">
-            この選手は {bookedSlot.datetime} に面談予約済みです。
-          </p>
+        {myMeetings.length === 0 && (
+          <p className="text-sm text-slate-400">まだ面談の予約・実施履歴がありません。</p>
         )}
-        <SlotCreator onCreate={addSlot} />
         <ul className="space-y-1.5">
-          {slots.map((s) => (
-            <li key={s.id} className="flex items-center justify-between text-xs bg-slate-50 rounded-lg px-3 py-2">
-              <span className="text-slate-600 flex items-center gap-1.5">
-                <Timer size={12} /> {s.datetime}
-              </span>
-              <span className={`font-bold ${s.bookedBy ? "text-orange-500" : "text-slate-400"}`}>
-                {s.bookedBy ? "予約済み" : "空き"}
-              </span>
-            </li>
-          ))}
+          {myMeetings.map((s) => {
+            const held = parseDatetime(s.datetime) <= new Date();
+            const daysAfter = player.injuryDate ? diffDaysBetween(player.injuryDate, s.datetime) : null;
+            return (
+              <li key={s.id} className="flex items-center justify-between text-xs bg-slate-50 rounded-lg px-3 py-2">
+                <span className="text-slate-600">{s.datetime}</span>
+                <span className="flex items-center gap-2">
+                  {daysAfter !== null && <span className="text-slate-400">受傷後{daysAfter}日</span>}
+                  <span className={`font-bold ${held ? "text-green-600" : "text-blue-500"}`}>
+                    {held ? "実施済み" : "予定"}
+                  </span>
+                </span>
+              </li>
+            );
+          })}
         </ul>
+        <p className="text-[10px] text-slate-400 mt-3">
+          面談枠の登録・公開は「日程調整」タブから行えます。
+        </p>
       </div>
     </div>
   );
@@ -1140,9 +1498,8 @@ function PlayerMode({
   );
 }
 
-// ---------- 選手ログイン：名前選択 → PIN入力 ----------
 function PlayerLogin({ masterProtocols, playerDirectory, setPlayerDirectory, setMyPlayer }) {
-  const [screen, setScreen] = useState("select"); // 'select' | 'pin' | 'register'
+  const [screen, setScreen] = useState("select");
   const [selectedDir, setSelectedDir] = useState(null);
   const [pin, setPin] = useState("");
   const [error, setError] = useState(null);
@@ -1163,10 +1520,7 @@ function PlayerLogin({ masterProtocols, playerDirectory, setPlayerDirectory, set
     setChecking(true);
     setError(null);
     try {
-      const pinRows = await sbSelect(
-        "players",
-        `?id=eq.${encodeURIComponent(selectedDir.id)}&select=pin`
-      );
+      const pinRows = await sbSelect("players", `?id=eq.${encodeURIComponent(selectedDir.id)}&select=pin`);
       if (!pinRows[0] || pinRows[0].pin !== pin) {
         setError("暗証番号が違います");
         setChecking(false);
@@ -1268,7 +1622,6 @@ function PlayerLogin({ masterProtocols, playerDirectory, setPlayerDirectory, set
   );
 }
 
-// ---------- 選手 新規登録 ----------
 function PlayerRegisterForm({ masterProtocols, setPlayerDirectory, setMyPlayer, onCancel }) {
   const [name, setName] = useState("");
   const [protocolId, setProtocolId] = useState(masterProtocols[0]?.id ?? "");
@@ -1401,7 +1754,6 @@ function PlayerRegisterForm({ masterProtocols, setPlayerDirectory, setMyPlayer, 
   );
 }
 
-// ---------- 使い方ガイド ----------
 function UsageGuide() {
   const [open, setOpen] = useState(true);
   return (
@@ -1421,8 +1773,8 @@ function UsageGuide() {
           <li>
             強い不安や痛みがあるときは「🆘SOSを送る」をオンにしてから送信すると、指導者に赤いアラートで通知されます。
           </li>
-          <li>「面談予約」から空いている枠をタップするだけで、監督・トレーナーとの面談を予約できます。</li>
-          <li>「指導者とのチャット」から直接メッセージのやり取りができます。</li>
+          <li>「面談予約」から公開されている枠をタップするだけで、面談を予約できます。</li>
+          <li>「指導者とのチャット」から直接メッセージのやり取りができます（返信者の立場も表示されます）。</li>
           <li>「受傷日」を登録すると、同じ怪我をした過去の選手たちの平均復帰期間が目安として表示されます。</li>
         </ul>
       )}
@@ -1430,7 +1782,6 @@ function UsageGuide() {
   );
 }
 
-// ---------- 受傷日 登録 & 平均復帰期間 ----------
 function InjuryDateCard({ player, protocol, setMyPlayer }) {
   const [date, setDate] = useState(player.injuryDate || "");
   const [saving, setSaving] = useState(false);
@@ -1511,7 +1862,6 @@ function PlayerPersonalDashboard({ player, protocol, setMyPlayer, slots, setSlot
   const bookedSlot = slots.find((s) => s.id === player.bookedSlotId);
   const availableSlots = slots.filter((s) => !s.bookedBy);
 
-  // チャットのポーリング更新（5秒ごと）
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
@@ -1577,27 +1927,19 @@ function PlayerPersonalDashboard({ player, protocol, setMyPlayer, slots, setSlot
           <p className="text-xs text-slate-400">おかえりなさい</p>
           <h2 className="font-bold text-xl text-slate-800">{player.name} さん</h2>
         </div>
-        <button
-          onClick={onLogout}
-          className="text-xs text-slate-400 flex items-center gap-1 hover:text-slate-600"
-        >
+        <button onClick={onLogout} className="text-xs text-slate-400 flex items-center gap-1 hover:text-slate-600">
           <LogOut size={14} /> ログアウト
         </button>
       </div>
 
       <UsageGuide />
 
-      {/* ロードマップ */}
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
         <div className="flex items-center justify-between mb-2">
           <p className="text-sm font-bold text-slate-700">復帰ロードマップ</p>
-          <span className="text-xs font-bold text-blue-600">
-            現在のステップ：{player.currentPhase}/5
-          </span>
+          <span className="text-xs font-bold text-blue-600">現在のステップ：{player.currentPhase}/5</span>
         </div>
-        <p className="text-2xl font-extrabold text-slate-800 mb-1">
-          全体復帰まであと {remainingWeeks} 週間
-        </p>
+        <p className="text-2xl font-extrabold text-slate-800 mb-1">全体復帰まであと {remainingWeeks} 週間</p>
         <p className="text-xs text-slate-400 mb-3">{protocol?.name}</p>
 
         <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
@@ -1629,7 +1971,6 @@ function PlayerPersonalDashboard({ player, protocol, setMyPlayer, slots, setSlot
 
       <InjuryDateCard player={player} protocol={protocol} setMyPlayer={setMyPlayer} />
 
-      {/* コンディション入力 */}
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
         <p className="text-sm font-bold text-slate-700 mb-4">今日のコンディション報告</p>
 
@@ -1700,16 +2041,16 @@ function PlayerPersonalDashboard({ player, protocol, setMyPlayer, slots, setSlot
         )}
       </div>
 
-      {/* チャット */}
       <ChatPanel messages={player.messages} myRole="player" title="指導者とのチャット" onSend={sendPlayerMessage} />
 
-      {/* 面談予約 */}
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
         <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
           <CalendarClock size={16} className="text-blue-600" />
-          監督・トレーナーとの戦略ミーティング
+          面談予約
         </p>
-        <p className="text-xs text-slate-400 mb-3">受傷2週目の面談を目安に予約しましょう。</p>
+        <p className="text-xs text-slate-400 mb-3">
+          コーチ・トレーナーなどの日程調整により公開された枠から選べます。
+        </p>
 
         {bookedSlot ? (
           <div className="bg-blue-50 rounded-lg px-4 py-3 text-sm text-blue-700 font-bold">
@@ -1726,8 +2067,13 @@ function PlayerPersonalDashboard({ player, protocol, setMyPlayer, slots, setSlot
                 onClick={() => handleBookSlot(s.id)}
                 className="w-full flex items-center justify-between px-4 py-2.5 rounded-lg border border-slate-200 hover:border-blue-400 hover:bg-blue-50 text-sm"
               >
-                <span className="text-slate-600">{s.datetime}</span>
-                <span className="text-blue-600 font-bold text-xs">この枠で予約</span>
+                <span className="text-left">
+                  <span className="block text-slate-600">{s.datetime}</span>
+                  <span className="block text-[10px] text-slate-400">
+                    {(s.matchedRoles || []).map((r) => SCHEDULING_ROLE_LABELS[r]).join("・")}
+                  </span>
+                </span>
+                <span className="text-blue-600 font-bold text-xs shrink-0">この枠で予約</span>
               </button>
             ))}
           </div>
