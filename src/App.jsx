@@ -61,14 +61,39 @@ const sbUpdate = (table, id, body) =>
   sb(`${table}?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) });
 const sbDelete = (table, id) =>
   sb(`${table}?id=eq.${encodeURIComponent(id)}`, { method: "DELETE", prefer: "return=minimal" });
+// key列（例："key"）の一致でINSERT/UPDATEを自動判定するupsert。
+// パスワード設定のように「なければ作る、あれば上書きする」処理に使う。
+const sbUpsert = (table, body, onConflictColumn) =>
+  sb(`${table}?on_conflict=${encodeURIComponent(onConflictColumn)}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    prefer: "resolution=merge-duplicates,return=representation",
+  });
 
 // ---- パスワードのハッシュ化（SHA-256、平文は保存・送信しない） ----
+// 入力値は念のためtrim()してから統一的にハッシュ化・比較する（前後の空白ズレによる
+// 照合ミスマッチを防ぐため）。crypto.subtleはHTTPS（またはlocalhost）でのみ使用可能。
 async function sha256Hex(text) {
-  const enc = new TextEncoder().encode(text);
-  const digest = await crypto.subtle.digest("SHA-256", enc);
+  if (!window.crypto || !window.crypto.subtle) {
+    throw new Error(
+      "このページはHTTPS接続ではないため、パスワードのハッシュ化機能（Web Crypto API）が利用できません。"
+    );
+  }
+  const normalized = String(text).trim();
+  const enc = new TextEncoder().encode(normalized);
+  const digest = await window.crypto.subtle.digest("SHA-256", enc);
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+    .join("")
+    .toLowerCase();
+}
+
+// app_settingsから指定キーの値を1件取得するヘルパー（無ければnull）
+async function fetchSetting(key) {
+  const rows = await sbSelect("app_settings", `?key=eq.${encodeURIComponent(key)}&select=value`);
+  if (!rows || rows.length === 0) return null;
+  const value = rows[0].value;
+  return value === null || value === undefined ? null : String(value).trim().toLowerCase();
 }
 
 // ---- DBの行(snake_case) <-> アプリ内部表現(camelCase) の変換 ----
@@ -182,9 +207,6 @@ function meetingAlertLevel(player, slots) {
 export default function RehabApp() {
   const [mode, setMode] = useState("player"); // 'player' | 'coach' | 'coach-login'
   const [coachAuthed, setCoachAuthed] = useState(false);
-  const [pwInput, setPwInput] = useState("");
-  const [pwError, setPwError] = useState(false);
-  const [pwChecking, setPwChecking] = useState(false);
 
   const [masterProtocols, setMasterProtocols] = useState([]);
   const [slots, setSlots] = useState([]);
@@ -244,27 +266,10 @@ export default function RehabApp() {
     setMode(target);
   };
 
-  const handlePasswordSubmit = async () => {
-    setPwChecking(true);
-    setPwError(false);
-    try {
-      const rows = await sbSelect("app_settings", "?key=eq.coach_password_hash&select=value");
-      const storedHash = rows[0]?.value;
-      const inputHash = await sha256Hex(pwInput);
-      if (storedHash && storedHash === inputHash) {
-        setCoachAuthed(true);
-        setPwInput("");
-        setMode("coach");
-        await loadCoachPlayers();
-      } else {
-        setPwError(true);
-      }
-    } catch (err) {
-      setLoadError(err.message);
-      setPwError(true);
-    } finally {
-      setPwChecking(false);
-    }
+  const handleCoachAuthed = async () => {
+    setCoachAuthed(true);
+    setMode("coach");
+    await loadCoachPlayers();
   };
 
   return (
@@ -326,14 +331,7 @@ export default function RehabApp() {
         )}
 
         {!loading && mode === "coach-login" && (
-          <PasswordGate
-            pwInput={pwInput}
-            setPwInput={setPwInput}
-            pwError={pwError}
-            checking={pwChecking}
-            onSubmit={handlePasswordSubmit}
-            onCancel={() => setMode("player")}
-          />
+          <PasswordGate onAuthed={handleCoachAuthed} onCancel={() => setMode("player")} />
         )}
 
         {!loading && mode === "coach" && coachAuthed && (
@@ -367,7 +365,143 @@ export default function RehabApp() {
 // ==================================================================
 // パスワードゲート（指導者モード）
 // ==================================================================
-function PasswordGate({ pwInput, setPwInput, pwError, checking, onSubmit, onCancel }) {
+// パスワードゲート：
+// 1) まず app_settings に coach_password_hash が存在するか確認する
+// 2) 存在しなければ「初回セットアップ」画面（新規パスワードの設定）を表示
+// 3) 存在すれば通常のログイン画面を表示し、ハッシュを比較する
+// フェッチ自体の失敗（権限/ネットワーク等）とパスワード不一致を区別して表示することで、
+// 「常にパスワードが違うと言われる」原因の切り分けができるようにしている。
+function PasswordGate({ onAuthed, onCancel }) {
+  const [phase, setPhase] = useState("checking"); // 'checking' | 'setup' | 'login'
+  const [pwInput, setPwInput] = useState("");
+  const [pwConfirm, setPwConfirm] = useState("");
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const checkExistingPassword = async () => {
+    setPhase("checking");
+    setError(null);
+    try {
+      const hash = await fetchSetting("coach_password_hash");
+      setPhase(hash ? "login" : "setup");
+    } catch (err) {
+      // 確認自体に失敗した場合も、原因が分かるようログイン画面側にエラーを出す
+      setError(`設定の確認に失敗しました（${err.message}）。Supabase側の app_settings テーブルとRLS設定をご確認ください。`);
+      setPhase("login");
+    }
+  };
+
+  useEffect(() => {
+    checkExistingPassword();
+  }, []);
+
+  const handleSetup = async () => {
+    setError(null);
+    if (pwInput.trim().length < 4) {
+      setError("4文字以上のパスワードを設定してください。");
+      return;
+    }
+    if (pwInput !== pwConfirm) {
+      setError("確認用パスワードが一致しません。");
+      return;
+    }
+    setBusy(true);
+    try {
+      const hash = await sha256Hex(pwInput);
+      await sbUpsert("app_settings", { key: "coach_password_hash", value: hash }, "key");
+      onAuthed();
+    } catch (err) {
+      setError(`パスワードの保存に失敗しました: ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleLogin = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      const storedHash = await fetchSetting("coach_password_hash");
+      if (!storedHash) {
+        // ログインしようとした瞬間に設定行が見つからない＝セットアップへ誘導
+        setPhase("setup");
+        setBusy(false);
+        return;
+      }
+      const inputHash = await sha256Hex(pwInput);
+      if (storedHash === inputHash) {
+        setPwInput("");
+        onAuthed();
+      } else {
+        setError("パスワードが違います。");
+      }
+    } catch (err) {
+      setError(`認証中にエラーが発生しました: ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (phase === "checking") {
+    return (
+      <div className="max-w-sm mx-auto mt-16 flex flex-col items-center gap-2 text-slate-400">
+        <Loader2 className="animate-spin" size={22} />
+        <p className="text-sm">確認中...</p>
+      </div>
+    );
+  }
+
+  if (phase === "setup") {
+    return (
+      <div className="max-w-sm mx-auto mt-16 bg-white rounded-2xl shadow-lg p-8 border border-slate-200">
+        <div className="flex flex-col items-center gap-3 mb-6">
+          <div className="w-14 h-14 rounded-full bg-blue-50 flex items-center justify-center">
+            <KeyRound className="text-blue-600" size={26} />
+          </div>
+          <h2 className="text-lg font-bold text-slate-800">指導者パスワードの初回設定</h2>
+          <p className="text-sm text-slate-500 text-center">
+            まだパスワードが設定されていません。最初に使うパスワードを決めてください。
+          </p>
+        </div>
+        <label className="text-xs text-slate-500">新しいパスワード</label>
+        <input
+          type="password"
+          value={pwInput}
+          onChange={(e) => setPwInput(e.target.value)}
+          placeholder="4文字以上"
+          className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          autoFocus
+        />
+        <label className="text-xs text-slate-500">新しいパスワード（確認）</label>
+        <input
+          type="password"
+          value={pwConfirm}
+          onChange={(e) => setPwConfirm(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleSetup()}
+          placeholder="もう一度入力"
+          className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        {error && <p className="text-red-500 text-sm mb-2 text-center">{error}</p>}
+        <div className="flex gap-2 mt-2">
+          <button
+            onClick={onCancel}
+            className="flex-1 py-2.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 text-sm font-medium"
+          >
+            戻る
+          </button>
+          <button
+            onClick={handleSetup}
+            disabled={busy}
+            className="flex-1 py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium disabled:bg-slate-300 flex items-center justify-center gap-2"
+          >
+            {busy && <Loader2 size={14} className="animate-spin" />}
+            設定してログイン
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-sm mx-auto mt-16 bg-white rounded-2xl shadow-lg p-8 border border-slate-200">
       <div className="flex flex-col items-center gap-3 mb-6">
@@ -383,16 +517,12 @@ function PasswordGate({ pwInput, setPwInput, pwError, checking, onSubmit, onCanc
         type="password"
         value={pwInput}
         onChange={(e) => setPwInput(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && onSubmit()}
+        onKeyDown={(e) => e.key === "Enter" && handleLogin()}
         placeholder="パスワード"
         className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-center tracking-widest focus:outline-none focus:ring-2 focus:ring-blue-500"
         autoFocus
       />
-      {pwError && (
-        <p className="text-red-500 text-sm mt-2 text-center">
-          パスワードが違います。もう一度お試しください。
-        </p>
-      )}
+      {error && <p className="text-red-500 text-sm mt-2 text-center">{error}</p>}
       <div className="flex gap-2 mt-5">
         <button
           onClick={onCancel}
@@ -401,11 +531,11 @@ function PasswordGate({ pwInput, setPwInput, pwError, checking, onSubmit, onCanc
           戻る
         </button>
         <button
-          onClick={onSubmit}
-          disabled={checking}
+          onClick={handleLogin}
+          disabled={busy}
           className="flex-1 py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium disabled:bg-slate-300 flex items-center justify-center gap-2"
         >
-          {checking && <Loader2 size={14} className="animate-spin" />}
+          {busy && <Loader2 size={14} className="animate-spin" />}
           ログイン
         </button>
       </div>
@@ -583,19 +713,16 @@ function CoachSettings() {
     }
     setSaving(true);
     try {
-      const rows = await sbSelect("app_settings", "?key=eq.coach_password_hash&select=value");
-      const storedHash = rows[0]?.value;
+      const storedHash = await fetchSetting("coach_password_hash");
       const currentHash = await sha256Hex(current);
-      if (storedHash !== currentHash) {
+      if (!storedHash || storedHash !== currentHash) {
         setError("現在のパスワードが違います");
         setSaving(false);
         return;
       }
       const newHash = await sha256Hex(next);
-      await sb("app_settings?key=eq.coach_password_hash", {
-        method: "PATCH",
-        body: JSON.stringify({ value: newHash }),
-      });
+      // 行が万一存在しない場合でも復旧できるようUPDATEではなくupsertを使う
+      await sbUpsert("app_settings", { key: "coach_password_hash", value: newHash }, "key");
       setSuccess(true);
       setCurrent("");
       setNext("");
