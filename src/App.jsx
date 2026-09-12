@@ -26,8 +26,8 @@ import {
 // ここにあなたのプロジェクトのURLとanonキーを入れてください
 // (Supabaseダッシュボード > Project Settings > API から取得)
 // ============================================================
-const SUPABASE_URL = "https://YOUR-PROJECT-REF.supabase.co";
-const SUPABASE_ANON_KEY = "YOUR-ANON-PUBLIC-KEY";
+const SUPABASE_URL = "https://akvfrihatvfkrjzpxtcw.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFrdmZyaWhhdHZma3JqenB4dGN3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxMjk4NDEsImV4cCI6MjEwNDcwNTg0MX0.LUUpqkDo61LfV6vK5RSfYGyb7is93WrvQeikTiV1uIg";
 
 const SUPABASE_CONFIGURED =
   !SUPABASE_URL.includes("YOUR-PROJECT-REF") &&
