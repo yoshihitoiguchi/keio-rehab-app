@@ -30,7 +30,7 @@ import {
   Building2,
   Trophy,
   Link as LinkIcon,
-  Syringe,
+  FlaskConical,
   Printer,
   Dumbbell,
   ScanLine,
@@ -170,6 +170,8 @@ function normalizePlayer(row) {
     injuryDate: row.injury_date,
     completedAt: row.completed_at,
     imagingFindings: row.imaging_findings || "",
+    supportStatus: row.support_status || "unresolved",
+    supportAssigneeRole: row.support_assignee_role || null,
     reports: (row.reports || [])
       .slice()
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
@@ -183,6 +185,7 @@ function normalizePlayer(row) {
         sleepQuality: r.sleep_quality ?? null,
         tenderness: r.tenderness ?? null,
         compensation: r.compensation ?? null,
+        severeSymptom: r.severe_symptom ?? null,
         triage: r.triage ?? null,
       })),
     messages: (row.messages || [])
@@ -234,16 +237,17 @@ const PAIN_TYPES = [
 ];
 const PAIN_TYPE_LABELS = Object.fromEntries(PAIN_TYPES.map((p) => [p.value, p.label]));
 
-// 要件⑥：日報の自動トリアージ判定ロジック
-function computeTriage(vas, tenderness, compensation) {
-  if (vas >= 6 || compensation) return "red";
-  if ((vas >= 3 && vas <= 5) || tenderness) return "yellow";
+// 要件②：実務的なトリアージ判定ロジック（前日比VAS急増・VAS7以上・歩行困難な鋭い痛みでSOS）
+function computeTriage(vas, prevVas, compensation, severeSymptom) {
+  const delta = prevVas === null || prevVas === undefined ? 0 : vas - prevVas;
+  if (delta >= 3 || vas >= 7 || severeSymptom) return "red";
+  if (compensation || (vas >= 4 && vas <= 6)) return "yellow";
   return "green";
 }
 const TRIAGE_INFO = {
-  red: { label: "中止/SOS", bg: "bg-red-100", text: "text-red-700", emoji: "🔴" },
-  yellow: { label: "負荷低下", bg: "bg-yellow-100", text: "text-yellow-700", emoji: "🟡" },
-  green: { label: "継続OK", bg: "bg-green-100", text: "text-green-700", emoji: "🟢" },
+  red: { label: "中止/SOS", bg: "bg-red-100", text: "text-red-700" },
+  yellow: { label: "負荷・メニュー変更", bg: "bg-yellow-100", text: "text-yellow-700" },
+  green: { label: "継続OK", bg: "bg-green-100", text: "text-green-700" },
 };
 
 
@@ -293,7 +297,7 @@ function latestReport(player) {
 function isAlert(player) {
   const r = latestReport(player);
   if (!r) return player.sos;
-  return player.sos || r.vas >= 7;
+  return player.sos || r.triage === "red";
 }
 function weeksRemaining(protocol, currentPhase) {
   if (!protocol) return 0;
@@ -311,14 +315,19 @@ function parseDatetime(str) {
 function diffDaysBetween(dateStr, datetimeStr) {
   return Math.floor((parseDatetime(datetimeStr) - new Date(dateStr)) / 86400000);
 }
+// 要件④：面談未定の黄色アラートのみ残す（3週間超の赤アラートはSOSと被るため廃止）
 function meetingAlertLevel(player, slots) {
   if (!player.injuryDate) return null;
   const held = slots.some((s) => s.bookedBy === player.id && parseDatetime(s.datetime) <= new Date());
   if (held) return null;
   const elapsed = daysSince(player.injuryDate);
-  if (elapsed >= 21) return "red";
   if (elapsed >= 14) return "yellow";
   return null;
+}
+// 要件④：Phase5完遂から14日以上経過した選手は「復帰者リスト」へ自動的に移動する
+function isGraduatedOut(player) {
+  if (!player.completedAt) return false;
+  return daysSince(player.completedAt) > 14;
 }
 // 要件⑤：同じプロトコルを完遂した「過去の全選手」から、受傷日→完遂日の平均日数を
 // 実データ（injury_date, completed_at）のみを用いて厳密に計算する（モックなし）。
@@ -891,7 +900,7 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
 // ==================================================================
 // チャットパネル（選手⇔スタッフ 共通コンポーネント）
 // ==================================================================
-function ChatPanel({ messages, myRole, title, onSend, roleOptions }) {
+function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader }) {
   const [text, setText] = useState("");
   const [role, setRole] = useState(roleOptions?.[0]?.value ?? null);
   const [sending, setSending] = useState(false);
@@ -922,10 +931,12 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions }) {
   };
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-      <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
-        <MessageCircle size={16} className="text-blue-600" /> {title}
-      </p>
+    <div className={hideHeader ? "" : "bg-white rounded-2xl border border-slate-200 p-5 shadow-sm"}>
+      {!hideHeader && (
+        <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+          <MessageCircle size={16} className="text-blue-600" /> {title}
+        </p>
+      )}
       <div className="max-h-64 overflow-y-auto space-y-2 mb-3 pr-1">
         {messages.length === 0 && (
           <p className="text-xs text-slate-400">まだメッセージはありません。</p>
@@ -1887,15 +1898,20 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo }) {
 // ---------- 選手管理（2ペイン） ----------
 function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayers, slots, setSlots, phaseMenus }) {
   const [selectedId, setSelectedId] = useState(null);
+  const [listView, setListView] = useState("active"); // 'active' | 'graduated'
   const [error, setError] = useState(null);
 
-  useEffect(() => {
-    if ((!selectedId || !coachPlayers.some((p) => p.id === selectedId)) && coachPlayers.length > 0) {
-      setSelectedId(coachPlayers[0].id);
-    }
-  }, [coachPlayers, selectedId]);
+  const activePlayers = coachPlayers.filter((p) => !isGraduatedOut(p));
+  const graduatedPlayers = coachPlayers.filter((p) => isGraduatedOut(p));
+  const visiblePlayers = listView === "active" ? activePlayers : graduatedPlayers;
 
-  const sortedPlayers = [...coachPlayers].sort((a, b) => a.currentPhase - b.currentPhase);
+  useEffect(() => {
+    if ((!selectedId || !visiblePlayers.some((p) => p.id === selectedId)) && visiblePlayers.length > 0) {
+      setSelectedId(visiblePlayers[0].id);
+    }
+  }, [visiblePlayers, selectedId]);
+
+  const sortedPlayers = [...visiblePlayers].sort((a, b) => a.currentPhase - b.currentPhase);
   const selectedPlayer = coachPlayers.find((p) => p.id === selectedId) || null;
   const protocolOf = (p) => masterProtocols.find((mp) => mp.id === p.protocolId);
 
@@ -1990,11 +2006,32 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
       video_url: extra.videoUrl || null,
       timestamp_note: extra.timestampNote || null,
     });
+    // 要件⑤：誰かが返信したら自動で「〇〇（役職）が対応中」を全スタッフに共有する
+    await sbUpdate("players", playerId, { support_status: "in_progress", support_assignee_role: staffRole });
     setCoachPlayers((prev) =>
       prev.map((p) =>
-        p.id === playerId ? { ...p, messages: [...p.messages, normalizeMessage(inserted)] } : p
+        p.id === playerId
+          ? {
+              ...p,
+              messages: [...p.messages, normalizeMessage(inserted)],
+              supportStatus: "in_progress",
+              supportAssigneeRole: staffRole,
+            }
+          : p
       )
     );
+  };
+
+  const resolveChatStatus = async (playerId) => {
+    await sbUpdate("players", playerId, { support_status: "resolved", support_assignee_role: null });
+    setCoachPlayers((prev) =>
+      prev.map((p) => (p.id === playerId ? { ...p, supportStatus: "resolved", supportAssigneeRole: null } : p))
+    );
+  };
+
+  const resolveSos = async (playerId) => {
+    await sbUpdate("players", playerId, { sos: false });
+    setCoachPlayers((prev) => prev.map((p) => (p.id === playerId ? { ...p, sos: false } : p)));
   };
 
   const saveImagingFindings = async (playerId, text) => {
@@ -2002,16 +2039,18 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
     setCoachPlayers((prev) => prev.map((p) => (p.id === playerId ? { ...p, imagingFindings: text } : p)));
   };
 
-  // 要件⑥：トレーナーが圧痛・代償動作を評価し、自動トリアージを記録する
-  const assessReport = async (playerId, reportId, vas, tenderness, compensation) => {
-    const triage = computeTriage(vas, tenderness, compensation);
-    await sbUpdate("reports", reportId, { tenderness, compensation, triage });
+  // 要件②：前日比VAS急増・代償動作・歩行困難な鋭い痛みから自動トリアージを記録する
+  const assessReport = async (playerId, reportId, vas, prevVas, compensation, severeSymptom) => {
+    const triage = computeTriage(vas, prevVas, compensation, severeSymptom);
+    await sbUpdate("reports", reportId, { compensation, severe_symptom: severeSymptom, triage });
     setCoachPlayers((prev) =>
       prev.map((p) =>
         p.id === playerId
           ? {
               ...p,
-              reports: p.reports.map((r) => (r.id === reportId ? { ...r, tenderness, compensation, triage } : r)),
+              reports: p.reports.map((r) =>
+                r.id === reportId ? { ...r, compensation, severeSymptom, triage } : r
+              ),
             }
           : p
       )
@@ -2054,14 +2093,38 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6 print:block">
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden h-fit print:hidden">
+        <div className="flex border-b border-slate-200">
+          <button
+            onClick={() => setListView("active")}
+            className={`flex-1 text-xs font-bold py-2.5 ${
+              listView === "active" ? "text-blue-700 border-b-2 border-blue-600" : "text-slate-400"
+            }`}
+          >
+            現役選手 ({activePlayers.length})
+          </button>
+          <button
+            onClick={() => setListView("graduated")}
+            className={`flex-1 text-xs font-bold py-2.5 ${
+              listView === "graduated" ? "text-blue-700 border-b-2 border-blue-600" : "text-slate-400"
+            }`}
+          >
+            復帰者リスト ({graduatedPlayers.length})
+          </button>
+        </div>
         <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
           <p className="text-sm font-bold text-slate-700">
-            選手一覧 ({coachPlayers.length})・Phase昇順
+            {listView === "active" ? "現役選手一覧" : "復帰者リスト"} ({visiblePlayers.length})・Phase昇順
           </p>
-          <ul className="text-[10px] text-slate-400 mt-1.5 space-y-0.5">
-            <li>🟢 完全復帰</li>
-            <li>🟡 受傷2週間・面談未実施</li>
-            <li>🔴 受傷3週間・面談未実施</li>
+          <ul className="text-[10px] text-slate-500 mt-1.5 space-y-1">
+            <li className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-green-500 inline-block" /> 完全復帰（14日間はここに表示）
+            </li>
+            <li className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-yellow-400 inline-block" /> 受傷2週間・面談未定
+            </li>
+            <li className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block" /> SOS・要対応
+            </li>
           </ul>
         </div>
         <ul className="divide-y divide-slate-100 max-h-[70vh] overflow-y-auto">
@@ -2071,47 +2134,46 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
             const unread = p.messages.filter((m) => m.sender === "player" && !m.isRead).length;
             const meetingLevel = meetingAlertLevel(p, slots);
             const isCompleted = Boolean(p.completedAt);
-            const rowBg = isCompleted
-              ? "bg-green-50"
-              : meetingLevel === "red"
+            const rowBg = alert
               ? "bg-red-50"
+              : isCompleted
+              ? "bg-green-50"
               : meetingLevel === "yellow"
               ? "bg-yellow-50"
               : selectedId === p.id
               ? "bg-blue-50"
               : "";
+            const nameColor = alert ? "text-red-700" : isCompleted ? "text-green-700" : "text-slate-800";
             return (
               <li key={p.id}>
                 <button
                   onClick={() => setSelectedId(p.id)}
                   className={`w-full text-left px-4 py-3 flex items-center justify-between hover:bg-slate-50 transition-colors ${rowBg}`}
                 >
-                  <div className="flex items-center gap-2">
-                    {isCompleted ? (
-                      <Trophy size={16} className="text-green-600 shrink-0" />
-                    ) : (
-                      alert && <AlertTriangle size={16} className="text-red-500 shrink-0" />
-                    )}
-                    <div>
+                  <div>
+                    <p className={`text-sm font-semibold ${nameColor}`}>{p.name}</p>
+                    <p className="text-xs text-slate-400">
+                      {protocolOf(p)?.name ?? "未設定"} ・{" "}
+                      <span className={`font-bold ${PHASE_TEXT_COLORS[p.currentPhase]}`}>
+                        Phase {p.currentPhase}/5
+                      </span>
+                    </p>
+                    {p.supportStatus && p.supportStatus !== "unresolved" && (
                       <p
-                        className={`text-sm font-semibold ${
-                          isCompleted ? "text-green-700" : alert ? "text-red-600" : "text-slate-800"
+                        className={`text-[10px] font-bold mt-0.5 ${
+                          p.supportStatus === "resolved" ? "text-green-600" : "text-blue-600"
                         }`}
                       >
-                        {p.name}
+                        {p.supportStatus === "resolved"
+                          ? "解決済み"
+                          : `対応中：${CHAT_STAFF_ROLE_LABELS[p.supportAssigneeRole] || "スタッフ"}`}
                       </p>
-                      <p className="text-xs text-slate-400">
-                        {protocolOf(p)?.name ?? "未設定"} ・{" "}
-                        <span className={`font-bold ${PHASE_TEXT_COLORS[p.currentPhase]}`}>
-                          Phase {p.currentPhase}/5
-                        </span>
-                      </p>
-                    </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
                     {p.treatments.length > 0 && (
                       <span className="flex items-center gap-0.5 bg-purple-100 text-purple-700 text-[10px] font-bold px-1.5 py-0.5 rounded-full">
-                        <Syringe size={10} /> {p.treatments.length}
+                        <FlaskConical size={10} /> {p.treatments.length}
                       </span>
                     )}
                     {unread > 0 && (
@@ -2137,8 +2199,10 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
               </li>
             );
           })}
-          {coachPlayers.length === 0 && (
-            <li className="px-4 py-6 text-sm text-slate-400 text-center">選手が登録されていません</li>
+          {visiblePlayers.length === 0 && (
+            <li className="px-4 py-6 text-sm text-slate-400 text-center">
+              {listView === "active" ? "選手が登録されていません" : "復帰者はまだいません"}
+            </li>
           )}
         </ul>
       </div>
@@ -2166,9 +2230,11 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
             onAddTreatments={(types, note, date) => addTreatments(selectedPlayer.id, types, note, date)}
             onDeleteTreatment={(id) => deleteTreatment(selectedPlayer.id, id)}
             onSaveImagingFindings={(text) => saveImagingFindings(selectedPlayer.id, text)}
-            onAssessReport={(reportId, vas, tenderness, compensation) =>
-              assessReport(selectedPlayer.id, reportId, vas, tenderness, compensation)
+            onAssessReport={(reportId, vas, prevVas, compensation, severeSymptom) =>
+              assessReport(selectedPlayer.id, reportId, vas, prevVas, compensation, severeSymptom)
             }
+            onResolveSos={() => resolveSos(selectedPlayer.id)}
+            onResolveChatStatus={() => resolveChatStatus(selectedPlayer.id)}
             setCoachPlayers={setCoachPlayers}
           />
         )}
@@ -2193,6 +2259,8 @@ function PlayerDetailPanel({
   onDeleteTreatment,
   onSaveImagingFindings,
   onAssessReport,
+  onResolveSos,
+  onResolveChatStatus,
   setCoachPlayers,
 }) {
   const report = latestReport(player);
@@ -2271,13 +2339,22 @@ function PlayerDetailPanel({
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {player.completedAt ? (
-              <span className="flex items-center gap-1 bg-green-100 text-green-700 text-xs font-bold px-3 py-1.5 rounded-full">
-                <Trophy size={14} /> 完全復帰
+              <span className="bg-green-100 text-green-700 text-xs font-bold px-3 py-1.5 rounded-full">
+                完全復帰
               </span>
             ) : (
               isAlert(player) && (
-                <span className="flex items-center gap-1 bg-red-100 text-red-600 text-xs font-bold px-3 py-1.5 rounded-full">
-                  <AlertTriangle size={14} /> 要確認
+                <span className="flex items-center gap-2 bg-red-100 text-red-700 text-xs font-bold px-3 py-1.5 rounded-full">
+                  要確認（SOS）
+                  {player.sos && (
+                    <button
+                      onClick={onResolveSos}
+                      className="underline hover:no-underline text-red-800"
+                      title="SOSを対応済みにする"
+                    >
+                      対応済みにする
+                    </button>
+                  )}
                 </span>
               )
             )}
@@ -2338,7 +2415,12 @@ function PlayerDetailPanel({
             </div>
           )}
           {report && (
-            <TrainerAssessment key={report.id} report={report} onAssess={onAssessReport} />
+            <TrainerAssessment
+              key={report.id}
+              report={report}
+              prevVas={player.reports.length > 1 ? player.reports[player.reports.length - 2].vas : null}
+              onAssess={onAssessReport}
+            />
           )}
           {player.reports.length > 1 && (
             <div className="mt-4 pt-4 border-t border-slate-100">
@@ -2408,13 +2490,46 @@ function PlayerDetailPanel({
 
         <TreatmentCard player={player} onAddTreatments={onAddTreatments} onDeleteTreatment={onDeleteTreatment} />
 
-        <ChatPanel
-          messages={player.messages}
-          myRole="staff"
-          title={`${player.name} さんとのチャット`}
-          roleOptions={CHAT_STAFF_ROLES}
-          onSend={onSendMessage}
-        />
+        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm font-bold text-slate-700 flex items-center gap-1.5">
+              <MessageCircle size={16} className="text-blue-600" /> {player.name} さんとのチャット
+            </p>
+            <div className="flex items-center gap-2">
+              <span
+                className={`text-xs font-bold px-2.5 py-1 rounded-full ${
+                  player.supportStatus === "resolved"
+                    ? "bg-green-100 text-green-700"
+                    : player.supportStatus === "in_progress"
+                    ? "bg-blue-100 text-blue-700"
+                    : "bg-slate-100 text-slate-500"
+                }`}
+              >
+                {player.supportStatus === "resolved"
+                  ? "解決済み"
+                  : player.supportStatus === "in_progress"
+                  ? `対応中：${CHAT_STAFF_ROLE_LABELS[player.supportAssigneeRole] || "スタッフ"}`
+                  : "未対応"}
+              </span>
+              {player.supportStatus !== "resolved" && (
+                <button
+                  onClick={onResolveChatStatus}
+                  className="text-xs text-slate-400 hover:text-green-600 underline"
+                >
+                  解決済みにする
+                </button>
+              )}
+            </div>
+          </div>
+          <ChatPanel
+            messages={player.messages}
+            myRole="staff"
+            title=""
+            roleOptions={CHAT_STAFF_ROLES}
+            onSend={onSendMessage}
+            hideHeader
+          />
+        </div>
 
         <div className="bg-white rounded-xl border border-slate-200 p-5">
           <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
@@ -2491,35 +2606,43 @@ function SimpleTrendChart({ reports }) {
 
 // ---------- 治療介入の記録 ----------
 // ---------- トレーナーによる圧痛・代償動作の評価と自動トリアージ ----------
-function TrainerAssessment({ report, onAssess }) {
-  const [tenderness, setTenderness] = useState(Boolean(report.tenderness));
+function TrainerAssessment({ report, prevVas, onAssess }) {
   const [compensation, setCompensation] = useState(Boolean(report.compensation));
+  const [severeSymptom, setSevereSymptom] = useState(Boolean(report.severeSymptom));
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState(report.triage || null);
 
   const handleAssess = async () => {
     setSaving(true);
     try {
-      const triage = await onAssess(report.id, report.vas, tenderness, compensation);
+      const triage = await onAssess(report.id, report.vas, prevVas, compensation, severeSymptom);
       setResult(triage);
     } finally {
       setSaving(false);
     }
   };
 
+  const delta = prevVas === null || prevVas === undefined ? null : report.vas - prevVas;
+
   return (
     <div className="mt-3 pt-3 border-t border-slate-100">
       <p className="text-xs font-bold text-slate-600 mb-2 flex items-center gap-1.5">
         <Stethoscope size={14} className="text-blue-600" /> トレーナー評価（自動トリアージ）
       </p>
+      {delta !== null && (
+        <p className="text-[11px] text-slate-400 mb-2">
+          前回VAS {prevVas} → 今回VAS {report.vas}（{delta >= 0 ? "+" : ""}
+          {delta}）
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-3 mb-2">
-        <label className="flex items-center gap-1.5 text-xs text-slate-600">
-          <input type="checkbox" checked={tenderness} onChange={(e) => setTenderness(e.target.checked)} />
-          圧痛あり
-        </label>
         <label className="flex items-center gap-1.5 text-xs text-slate-600">
           <input type="checkbox" checked={compensation} onChange={(e) => setCompensation(e.target.checked)} />
           代償動作あり
+        </label>
+        <label className="flex items-center gap-1.5 text-xs text-slate-600">
+          <input type="checkbox" checked={severeSymptom} onChange={(e) => setSevereSymptom(e.target.checked)} />
+          歩行困難な鋭い痛みがある
         </label>
         <button
           onClick={handleAssess}
@@ -2531,7 +2654,7 @@ function TrainerAssessment({ report, onAssess }) {
       </div>
       {result && (
         <div className={`flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-bold ${TRIAGE_INFO[result].bg} ${TRIAGE_INFO[result].text}`}>
-          {TRIAGE_INFO[result].emoji} {TRIAGE_INFO[result].label}
+          {TRIAGE_INFO[result].label}
         </div>
       )}
     </div>
@@ -2616,7 +2739,7 @@ function TreatmentCard({ player, onAddTreatments, onDeleteTreatment }) {
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-5">
       <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
-        <Syringe size={16} className="text-blue-600" /> 治療介入の記録
+        <FlaskConical size={16} className="text-blue-600" /> 治療介入の記録
       </h4>
       <div className="grid grid-cols-2 gap-2 mb-3">
         {TREATMENT_TYPES.map((t) => (
@@ -3020,7 +3143,6 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
   const [name, setName] = useState("");
   const [protocolId, setProtocolId] = useState(masterProtocols[0]?.id ?? "");
   const [injuryDate, setInjuryDate] = useState("");
-  const [imagingFindings, setImagingFindings] = useState("");
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
   const [saving, setSaving] = useState(false);
@@ -3053,7 +3175,6 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
       sos: false,
       booked_slot_id: null,
       injury_date: injuryDate || null,
-      imaging_findings: imagingFindings.trim() || null,
       pin,
     };
     setSaving(true);
@@ -3111,15 +3232,6 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
           type="date"
           value={injuryDate}
           onChange={(e) => setInjuryDate(e.target.value)}
-          className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-1 mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
-
-        <label className="text-xs text-slate-500">画像診断所見（MRI・エコー等・任意）</label>
-        <textarea
-          value={imagingFindings}
-          onChange={(e) => setImagingFindings(e.target.value)}
-          rows={3}
-          placeholder="医師から伝えられた所見があれば入力してください（あとから追記・修正も可能です）"
           className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-1 mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
 
@@ -3445,6 +3557,28 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
       timestamp_note: extra.timestampNote || null,
     });
     setMyPlayer((prev) => ({ ...prev, messages: [...prev.messages, normalizeMessage(inserted)] }));
+    // 要件⑤：解決済みだった会話に新しいメッセージが来たら「未対応」に戻す
+    if (player.supportStatus === "resolved") {
+      await sbUpdate("players", player.id, { support_status: "unresolved", support_assignee_role: null });
+      setMyPlayer((prev) => ({ ...prev, supportStatus: "unresolved", supportAssigneeRole: null }));
+    }
+  };
+
+  const addPlayerTreatments = async (types, note, treatedDate) => {
+    const payload = types.map((type) => ({
+      player_id: player.id,
+      org_id: orgId,
+      type,
+      note: note || null,
+      treated_date: treatedDate || null,
+    }));
+    const inserted = await sbInsert("treatments", payload);
+    setMyPlayer((prev) => ({ ...prev, treatments: [...prev.treatments, ...inserted.map(normalizeTreatment)] }));
+  };
+
+  const deletePlayerTreatment = async (id) => {
+    await sbDelete("treatments", id);
+    setMyPlayer((prev) => ({ ...prev, treatments: prev.treatments.filter((t) => t.id !== id) }));
   };
 
   return (
@@ -3539,13 +3673,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
         <PhaseMenuCatalog menus={phaseMenus} protocolId={player.protocolId} phaseNumber={player.currentPhase} />
       </div>
 
-      <ImagingFindingsCard
-        player={player}
-        onSave={async (text) => {
-          await sbUpdate("players", player.id, { imaging_findings: text });
-          setMyPlayer((prev) => ({ ...prev, imagingFindings: text }));
-        }}
-      />
+      <TreatmentCard player={player} onAddTreatments={addPlayerTreatments} onDeleteTreatment={deletePlayerTreatment} />
 
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
         <p className="text-sm font-bold text-slate-700 mb-4">今日のコンディション報告</p>
@@ -3562,9 +3690,15 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
           onChange={(e) => setVas(Number(e.target.value))}
           className="w-full mt-2 accent-blue-600"
         />
-        <div className="flex justify-between text-[10px] text-slate-400 mb-4">
+        <div className="flex justify-between text-[10px] text-slate-400 mb-1">
           <span>0（痛みなし）</span>
           <span>10（最悪）</span>
+        </div>
+        <div className="bg-blue-50 rounded-lg px-3 py-2 mb-4 text-[10px] text-blue-700 space-y-0.5">
+          <p>0：無痛</p>
+          <p>3：プレー可能だが痛みあり</p>
+          <p>5：かばってフォームが崩れる</p>
+          <p>10：歩行困難・激痛</p>
         </div>
 
         <label className="text-xs text-slate-500 flex justify-between">
