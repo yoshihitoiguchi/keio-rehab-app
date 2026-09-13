@@ -32,6 +32,10 @@ import {
   Link as LinkIcon,
   Syringe,
   Printer,
+  Dumbbell,
+  ScanLine,
+  Stethoscope,
+  Layers,
 } from "lucide-react";
 
 // ============================================================
@@ -121,6 +125,9 @@ function normalizeMessage(row) {
     isRead: row.is_read,
     content: row.content,
     createdAt: row.created_at,
+    painType: row.pain_type || null,
+    videoUrl: row.video_url || null,
+    timestampNote: row.timestamp_note || null,
   };
 }
 function normalizeTreatment(row) {
@@ -130,6 +137,25 @@ function normalizeTreatment(row) {
     note: row.note,
     treatedDate: row.treated_date,
     createdAt: row.created_at,
+  };
+}
+function normalizePhaseHistoryEntry(row) {
+  return {
+    id: row.id,
+    phaseNumber: row.phase_number,
+    enteredAt: row.entered_at,
+    leftAt: row.left_at,
+  };
+}
+function normalizeMenu(row) {
+  return {
+    id: row.id,
+    protocolId: row.protocol_id,
+    phaseNumber: row.phase_number,
+    name: row.name,
+    youtubeUrl: row.youtube_url || null,
+    ngCompensation: row.ng_compensation || null,
+    alternativeMenu: row.alternative_menu || null,
   };
 }
 function normalizePlayer(row) {
@@ -143,16 +169,21 @@ function normalizePlayer(row) {
     bookedSlotId: row.booked_slot_id,
     injuryDate: row.injury_date,
     completedAt: row.completed_at,
+    imagingFindings: row.imaging_findings || "",
     reports: (row.reports || [])
       .slice()
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
       .map((r) => ({
+        id: r.id,
         date: r.date,
         vas: r.vas,
         mental: r.mental,
         honne: r.honne,
         fatigue: r.fatigue ?? null,
         sleepQuality: r.sleep_quality ?? null,
+        tenderness: r.tenderness ?? null,
+        compensation: r.compensation ?? null,
+        triage: r.triage ?? null,
       })),
     messages: (row.messages || [])
       .slice()
@@ -162,6 +193,10 @@ function normalizePlayer(row) {
       .slice()
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
       .map(normalizeTreatment),
+    phaseHistory: (row.phase_history || [])
+      .slice()
+      .sort((a, b) => new Date(a.entered_at) - new Date(b.entered_at))
+      .map(normalizePhaseHistoryEntry),
   };
 }
 function normalizeSlot(row) {
@@ -175,9 +210,9 @@ function normalizeSlot(row) {
 }
 
 const MENTAL_FACES = ["😞", "😕", "😐", "🙂", "😄"];
-const PLAYER_FIELDS = "*,reports(*),messages(*),treatments(*)";
+const PLAYER_FIELDS = "*,reports(*),messages(*),treatments(*),phase_history(*)";
 const PLAYER_EMBED_ORDER =
-  "&reports.order=created_at.asc&messages.order=created_at.asc&treatments.order=created_at.asc";
+  "&reports.order=created_at.asc&messages.order=created_at.asc&treatments.order=created_at.asc&phase_history.order=entered_at.asc";
 
 const TREATMENT_TYPES = [
   { value: "shockwave", label: "体外衝撃波" },
@@ -189,6 +224,27 @@ const TREATMENT_TYPES = [
   { value: "other", label: "その他" },
 ];
 const TREATMENT_LABELS = Object.fromEntries(TREATMENT_TYPES.map((t) => [t.value, t.label]));
+
+const PAIN_TYPES = [
+  { value: "sharp", label: "鋭い痛み（ズキッ）" },
+  { value: "dull", label: "鈍い痛み（重だるい）" },
+  { value: "tightness", label: "つっぱり感" },
+  { value: "numbness", label: "しびれ" },
+  { value: "other", label: "その他" },
+];
+const PAIN_TYPE_LABELS = Object.fromEntries(PAIN_TYPES.map((p) => [p.value, p.label]));
+
+// 要件⑥：日報の自動トリアージ判定ロジック
+function computeTriage(vas, tenderness, compensation) {
+  if (vas >= 6 || compensation) return "red";
+  if ((vas >= 3 && vas <= 5) || tenderness) return "yellow";
+  return "green";
+}
+const TRIAGE_INFO = {
+  red: { label: "中止/SOS", bg: "bg-red-100", text: "text-red-700", emoji: "🔴" },
+  yellow: { label: "負荷低下", bg: "bg-yellow-100", text: "text-yellow-700", emoji: "🟡" },
+  green: { label: "継続OK", bg: "bg-green-100", text: "text-green-700", emoji: "🟢" },
+};
 
 
 const SCHEDULING_ROLES = [
@@ -283,6 +339,16 @@ function computeAvgRecoveryFromPlayers(players, protocolId) {
     sampleSize: completed.length,
   };
 }
+// 要件②：選手自身のフェーズ滞在履歴から、各Phaseに何日いたか（現在進行中のPhaseは今日まで）を算出
+function computeOwnPhaseDurations(phaseHistory) {
+  const map = {};
+  (phaseHistory || []).forEach((entry) => {
+    const start = new Date(entry.enteredAt);
+    const end = entry.leftAt ? new Date(entry.leftAt) : new Date();
+    map[entry.phaseNumber] = Math.max(0, Math.round((end - start) / 86400000));
+  });
+  return map;
+}
 function getYouTubeEmbedUrl(url) {
   if (!url) return null;
   try {
@@ -310,6 +376,7 @@ export default function RehabApp() {
   const [masterProtocols, setMasterProtocols] = useState([]);
   const [slots, setSlots] = useState([]);
   const [playerDirectory, setPlayerDirectory] = useState([]);
+  const [phaseMenus, setPhaseMenus] = useState([]);
 
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
@@ -323,17 +390,22 @@ export default function RehabApp() {
     setLoading(true);
     setLoadError(null);
     try {
-      const [protocolRows, slotRows, dirRows] = await Promise.all([
+      const [protocolRows, slotRows, dirRows, menuRows] = await Promise.all([
         sbSelect("protocols", `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=name.asc`),
         sbSelect("slots", `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=datetime.asc`),
         sbSelect(
           "player_directory",
           `?org_id=eq.${encodeURIComponent(orgId)}&select=id,name&order=name.asc`
         ),
+        sbSelect(
+          "phase_menus",
+          `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=phase_number.asc`
+        ),
       ]);
       setMasterProtocols(protocolRows.map(normalizeProtocol));
       setSlots(slotRows.map(normalizeSlot));
       setPlayerDirectory(dirRows);
+      setPhaseMenus(menuRows.map(normalizeMenu));
     } catch (err) {
       setLoadError(err.message);
     } finally {
@@ -384,6 +456,7 @@ export default function RehabApp() {
     setMasterProtocols([]);
     setSlots([]);
     setPlayerDirectory([]);
+    setPhaseMenus([]);
   };
 
   if (!org) {
@@ -472,6 +545,8 @@ export default function RehabApp() {
             coachLoading={coachLoading}
             slots={slots}
             setSlots={setSlots}
+            phaseMenus={phaseMenus}
+            setPhaseMenus={setPhaseMenus}
           />
         )}
 
@@ -483,6 +558,7 @@ export default function RehabApp() {
             setPlayerDirectory={setPlayerDirectory}
             slots={slots}
             setSlots={setSlots}
+            phaseMenus={phaseMenus}
             myPlayer={myPlayer}
             setMyPlayer={setMyPlayer}
           />
@@ -819,13 +895,25 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions }) {
   const [text, setText] = useState("");
   const [role, setRole] = useState(roleOptions?.[0]?.value ?? null);
   const [sending, setSending] = useState(false);
+  const [showExtra, setShowExtra] = useState(false);
+  const [painType, setPainType] = useState("");
+  const [videoUrl, setVideoUrl] = useState("");
+  const [timestampNote, setTimestampNote] = useState("");
 
   const handleSend = async () => {
     if (!text.trim()) return;
     setSending(true);
     try {
-      await onSend(text.trim(), role);
+      await onSend(text.trim(), role, {
+        painType: painType || null,
+        videoUrl: videoUrl.trim() || null,
+        timestampNote: timestampNote.trim() || null,
+      });
       setText("");
+      setPainType("");
+      setVideoUrl("");
+      setTimestampNote("");
+      setShowExtra(false);
     } catch (err) {
       alert(`送信に失敗しました: ${err.message}`);
     } finally {
@@ -859,10 +947,68 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions }) {
                 </p>
               )}
               {m.content}
+              {(m.painType || m.videoUrl || m.timestampNote) && (
+                <div
+                  className={`mt-1.5 pt-1.5 border-t text-[11px] space-y-0.5 ${
+                    m.sender === myRole ? "border-blue-400 text-blue-100" : "border-slate-300 text-slate-500"
+                  }`}
+                >
+                  {m.painType && <p>痛みの種類：{PAIN_TYPE_LABELS[m.painType] || m.painType}</p>}
+                  {m.timestampNote && <p>該当箇所：{m.timestampNote}</p>}
+                  {m.videoUrl && (
+                    <a
+                      href={m.videoUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className={`flex items-center gap-1 underline ${
+                        m.sender === myRole ? "text-white" : "text-blue-600"
+                      }`}
+                    >
+                      <Video size={11} /> 動画を見る
+                    </a>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         ))}
       </div>
+
+      <button
+        onClick={() => setShowExtra((v) => !v)}
+        className="text-[11px] text-blue-600 hover:underline mb-2"
+      >
+        {showExtra ? "詳細入力を閉じる" : "＋ 痛みの種類・動画リンクなど詳細を追加"}
+      </button>
+      {showExtra && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
+          <select
+            value={painType}
+            onChange={(e) => setPainType(e.target.value)}
+            className="border border-slate-300 rounded-lg px-2 py-1.5 text-xs bg-white"
+          >
+            <option value="">痛みの種類（任意）</option>
+            {PAIN_TYPES.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+          <input
+            value={timestampNote}
+            onChange={(e) => setTimestampNote(e.target.value)}
+            placeholder="例：0:30の動きを見てほしい"
+            className="border border-slate-300 rounded-lg px-2 py-1.5 text-xs"
+          />
+          <input
+            value={videoUrl}
+            onChange={(e) => setVideoUrl(e.target.value)}
+            placeholder="動画リンク（URL）"
+            className="col-span-1 sm:col-span-2 border border-slate-300 rounded-lg px-2 py-1.5 text-xs"
+          />
+        </div>
+      )}
+
       <div className="flex gap-2">
         {roleOptions && (
           <select
@@ -908,12 +1054,15 @@ function CoachDashboard({
   coachLoading,
   slots,
   setSlots,
+  phaseMenus,
+  setPhaseMenus,
 }) {
   const [subTab, setSubTab] = useState("players");
 
   const tabs = [
     { key: "players", label: "選手管理", icon: Users },
     { key: "protocols", label: "プロトコル管理", icon: ClipboardList },
+    { key: "menus", label: "メニューライブラリ", icon: Dumbbell },
     { key: "scheduling", label: "日程調整", icon: CalendarRange },
     { key: "settings", label: "設定", icon: Settings },
   ];
@@ -942,6 +1091,14 @@ function CoachDashboard({
       {subTab === "protocols" && (
         <ProtocolManagement orgId={orgId} masterProtocols={masterProtocols} setMasterProtocols={setMasterProtocols} />
       )}
+      {subTab === "menus" && (
+        <MenuLibraryManagement
+          orgId={orgId}
+          masterProtocols={masterProtocols}
+          phaseMenus={phaseMenus}
+          setPhaseMenus={setPhaseMenus}
+        />
+      )}
       {subTab === "scheduling" && <CoachScheduling orgId={orgId} slots={slots} setSlots={setSlots} />}
       {subTab === "settings" && <CoachSettings orgId={orgId} />}
       {subTab === "players" &&
@@ -957,6 +1114,7 @@ function CoachDashboard({
             setCoachPlayers={setCoachPlayers}
             slots={slots}
             setSlots={setSlots}
+            phaseMenus={phaseMenus}
           />
         ))}
     </div>
@@ -1315,6 +1473,209 @@ function CoachScheduling({ orgId, slots, setSlots }) {
   );
 }
 
+// ---------- メニューライブラリ：Phaseごとの推奨メニュー・NG代償動作・代替メニュー ----------
+function MenuLibraryManagement({ orgId, masterProtocols, phaseMenus, setPhaseMenus }) {
+  const [protocolId, setProtocolId] = useState(masterProtocols[0]?.id ?? "");
+  const [phaseNumber, setPhaseNumber] = useState(1);
+  const [name, setName] = useState("");
+  const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [ngCompensation, setNgCompensation] = useState("");
+  const [alternativeMenu, setAlternativeMenu] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!protocolId && masterProtocols[0]) setProtocolId(masterProtocols[0].id);
+  }, [masterProtocols, protocolId]);
+
+  const handleAdd = async () => {
+    if (!protocolId || !name.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const payload = {
+        org_id: orgId,
+        protocol_id: protocolId,
+        phase_number: phaseNumber,
+        name: name.trim(),
+        youtube_url: youtubeUrl.trim() || null,
+        ng_compensation: ngCompensation.trim() || null,
+        alternative_menu: alternativeMenu.trim() || null,
+      };
+      const [inserted] = await sbInsert("phase_menus", payload);
+      setPhaseMenus((prev) => [...prev, normalizeMenu(inserted)]);
+      setName("");
+      setYoutubeUrl("");
+      setNgCompensation("");
+      setAlternativeMenu("");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (id) => {
+    try {
+      await sbDelete("phase_menus", id);
+      setPhaseMenus((prev) => prev.filter((m) => m.id !== id));
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const protocolName = (id) => masterProtocols.find((p) => p.id === id)?.name ?? "不明";
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="space-y-3">
+        <h3 className="font-bold text-slate-700 text-sm">登録済みメニュー ({phaseMenus.length})</h3>
+        {[1, 2, 3, 4, 5].map((n) => {
+          const menusForPhase = phaseMenus.filter((m) => m.phaseNumber === n);
+          if (menusForPhase.length === 0) return null;
+          return (
+            <div key={n} className="bg-white rounded-xl border border-slate-200 p-4">
+              <p className={`text-xs font-bold mb-2 ${PHASE_TEXT_COLORS[n]}`}>Phase {n}</p>
+              <div className="space-y-2">
+                {menusForPhase.map((m) => (
+                  <div key={m.id} className="bg-slate-50 rounded-lg p-3 text-xs">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <p className="font-bold text-slate-700">{m.name}</p>
+                        <p className="text-slate-400">{protocolName(m.protocolId)}</p>
+                      </div>
+                      <button onClick={() => handleDelete(m.id)} className="text-slate-400 hover:text-red-500">
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                    {m.youtubeUrl && (
+                      <p className="mt-1 text-blue-600 flex items-center gap-1">
+                        <Youtube size={12} /> {m.youtubeUrl}
+                      </p>
+                    )}
+                    {m.ngCompensation && (
+                      <p className="mt-1 text-red-500">⚠️ NG代償動作：{m.ngCompensation}</p>
+                    )}
+                    {m.alternativeMenu && (
+                      <p className="mt-1 text-slate-500">代替コソ練：{m.alternativeMenu}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+        {phaseMenus.length === 0 && <p className="text-sm text-slate-400">まだメニューが登録されていません。</p>}
+      </div>
+
+      <div className="bg-white rounded-xl border border-slate-200 p-5 h-fit">
+        <h3 className="font-bold text-slate-700 text-sm mb-4 flex items-center gap-1.5">
+          <Dumbbell size={16} className="text-blue-600" /> 新しいメニューを追加
+        </h3>
+        <label className="text-xs text-slate-500">対象プロトコル</label>
+        <select
+          value={protocolId}
+          onChange={(e) => setProtocolId(e.target.value)}
+          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3 bg-white"
+        >
+          {masterProtocols.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+          {masterProtocols.length === 0 && <option value="">プロトコル未登録</option>}
+        </select>
+        <label className="text-xs text-slate-500">対象Phase</label>
+        <select
+          value={phaseNumber}
+          onChange={(e) => setPhaseNumber(Number(e.target.value))}
+          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3 bg-white"
+        >
+          {[1, 2, 3, 4, 5].map((n) => (
+            <option key={n} value={n}>
+              Phase {n}
+            </option>
+          ))}
+        </select>
+        <label className="text-xs text-slate-500">メニュー名</label>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="例：チューブを使ったヒップヒンジ"
+          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3"
+        />
+        <label className="text-xs text-slate-500 flex items-center gap-1">
+          <Youtube size={12} className="text-red-500" /> YouTubeリンク（任意）
+        </label>
+        <input
+          value={youtubeUrl}
+          onChange={(e) => setYoutubeUrl(e.target.value)}
+          placeholder="https://www.youtube.com/watch?v=..."
+          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3"
+        />
+        <label className="text-xs text-slate-500">⚠️ 注意すべきNG代償動作</label>
+        <textarea
+          value={ngCompensation}
+          onChange={(e) => setNgCompensation(e.target.value)}
+          rows={2}
+          placeholder="例：骨盤が後傾して腰が丸まる代償動作に注意"
+          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3"
+        />
+        <label className="text-xs text-slate-500">患部外の代替コソ練メニュー（体幹等）</label>
+        <textarea
+          value={alternativeMenu}
+          onChange={(e) => setAlternativeMenu(e.target.value)}
+          rows={2}
+          placeholder="例：プランク、上半身の自重トレーニング"
+          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3"
+        />
+        {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
+        <button
+          onClick={handleAdd}
+          disabled={!protocolId || !name.trim() || saving}
+          className="w-full py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:bg-slate-300 flex items-center justify-center gap-2"
+        >
+          {saving && <Loader2 size={14} className="animate-spin" />}
+          {saving ? "保存中..." : "メニューを追加する"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- 選手・トレーナー共通：現在Phaseの推奨メニューカタログ表示 ----------
+function PhaseMenuCatalog({ menus, protocolId, phaseNumber }) {
+  const relevant = menus.filter((m) => m.protocolId === protocolId && m.phaseNumber === phaseNumber);
+  if (relevant.length === 0) {
+    return <p className="text-sm text-slate-400">このPhaseに登録されたメニューはまだありません。</p>;
+  }
+  return (
+    <div className="space-y-3">
+      {relevant.map((m) => (
+        <div key={m.id} className="bg-slate-50 rounded-lg p-3 text-sm">
+          <p className="font-bold text-slate-700">{m.name}</p>
+          {m.youtubeUrl && (
+            <a
+              href={m.youtubeUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 flex items-center gap-1 text-blue-600 text-xs hover:underline"
+            >
+              <Youtube size={13} /> 動画を見る
+            </a>
+          )}
+          {m.ngCompensation && (
+            <p className="mt-1 text-xs text-red-500">⚠️ NG代償動作：{m.ngCompensation}</p>
+          )}
+          {m.alternativeMenu && (
+            <p className="mt-1 text-xs text-slate-500">患部外の代替コソ練：{m.alternativeMenu}</p>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ---------- プロトコル管理(CMS) ----------
 function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
   const blankPhases = () =>
@@ -1524,7 +1885,7 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo }) {
 }
 
 // ---------- 選手管理（2ペイン） ----------
-function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayers, slots, setSlots }) {
+function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayers, slots, setSlots, phaseMenus }) {
   const [selectedId, setSelectedId] = useState(null);
   const [error, setError] = useState(null);
 
@@ -1560,6 +1921,7 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
     const nextPhase = Math.min(5, player.currentPhase + 1);
     const nextConditionsCount = protocol?.phases[nextPhase - 1]?.conditions.length ?? 0;
     const nextChecklist = Array(nextConditionsCount).fill(false);
+    const now = new Date().toISOString();
     setCoachPlayers((prev) =>
       prev.map((p) =>
         p.id === playerId ? { ...p, currentPhase: nextPhase, checklist: nextChecklist, sos: false } : p
@@ -1571,16 +1933,34 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
         checklist: nextChecklist,
         sos: false,
       });
+      // 要件②：フェーズ滞在履歴を記録（前のフェーズを閉じて、新しいフェーズを開始）
+      await sb(
+        `phase_history?player_id=eq.${encodeURIComponent(playerId)}&phase_number=eq.${player.currentPhase}&left_at=is.null`,
+        { method: "PATCH", body: JSON.stringify({ left_at: now }), prefer: "return=minimal" }
+      );
+      await sbInsert("phase_history", {
+        player_id: playerId,
+        protocol_id: player.protocolId,
+        phase_number: nextPhase,
+        entered_at: now,
+      });
     } catch (err) {
       setError(err.message);
     }
   };
 
   const markCompleted = async (playerId) => {
+    const player = coachPlayers.find((p) => p.id === playerId);
     const now = new Date().toISOString();
     setCoachPlayers((prev) => prev.map((p) => (p.id === playerId ? { ...p, completedAt: now } : p)));
     try {
       await sbUpdate("players", playerId, { completed_at: now });
+      if (player) {
+        await sb(
+          `phase_history?player_id=eq.${encodeURIComponent(playerId)}&phase_number=eq.${player.currentPhase}&left_at=is.null`,
+          { method: "PATCH", body: JSON.stringify({ left_at: now }), prefer: "return=minimal" }
+        );
+      }
     } catch (err) {
       setError(err.message);
     }
@@ -1600,18 +1980,43 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
     }
   };
 
-  const sendCoachMessage = async (playerId, content, staffRole) => {
+  const sendCoachMessage = async (playerId, content, staffRole, extra = {}) => {
     const [inserted] = await sbInsert("messages", {
       player_id: playerId,
       sender: "staff",
       staff_role: staffRole,
       content,
+      pain_type: extra.painType || null,
+      video_url: extra.videoUrl || null,
+      timestamp_note: extra.timestampNote || null,
     });
     setCoachPlayers((prev) =>
       prev.map((p) =>
         p.id === playerId ? { ...p, messages: [...p.messages, normalizeMessage(inserted)] } : p
       )
     );
+  };
+
+  const saveImagingFindings = async (playerId, text) => {
+    await sbUpdate("players", playerId, { imaging_findings: text });
+    setCoachPlayers((prev) => prev.map((p) => (p.id === playerId ? { ...p, imagingFindings: text } : p)));
+  };
+
+  // 要件⑥：トレーナーが圧痛・代償動作を評価し、自動トリアージを記録する
+  const assessReport = async (playerId, reportId, vas, tenderness, compensation) => {
+    const triage = computeTriage(vas, tenderness, compensation);
+    await sbUpdate("reports", reportId, { tenderness, compensation, triage });
+    setCoachPlayers((prev) =>
+      prev.map((p) =>
+        p.id === playerId
+          ? {
+              ...p,
+              reports: p.reports.map((r) => (r.id === reportId ? { ...r, tenderness, compensation, triage } : r)),
+            }
+          : p
+      )
+    );
+    return triage;
   };
 
   const saveZoomUrl = async (slotId, url) => {
@@ -1653,9 +2058,11 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
           <p className="text-sm font-bold text-slate-700">
             選手一覧 ({coachPlayers.length})・Phase昇順
           </p>
-          <p className="text-[10px] text-slate-400 mt-1">
-            🟡 受傷2週間・面談未実施　🔴 受傷3週間・面談未実施　🟢 完全復帰
-          </p>
+          <ul className="text-[10px] text-slate-400 mt-1.5 space-y-0.5">
+            <li>🟢 完全復帰</li>
+            <li>🟡 受傷2週間・面談未実施</li>
+            <li>🔴 受傷3週間・面談未実施</li>
+          </ul>
         </div>
         <ul className="divide-y divide-slate-100 max-h-[70vh] overflow-y-auto">
           {sortedPlayers.map((p) => {
@@ -1749,14 +2156,19 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
             protocol={protocolOf(selectedPlayer)}
             allPlayers={coachPlayers}
             slots={slots}
+            phaseMenus={phaseMenus}
             toggleChecklist={toggleChecklist}
             advancePhase={advancePhase}
             markCompleted={markCompleted}
             onDelete={() => deletePlayer(selectedPlayer.id, selectedPlayer.name)}
-            onSendMessage={(content, role) => sendCoachMessage(selectedPlayer.id, content, role)}
+            onSendMessage={(content, role, extra) => sendCoachMessage(selectedPlayer.id, content, role, extra)}
             onSaveZoomUrl={saveZoomUrl}
             onAddTreatments={(types, note, date) => addTreatments(selectedPlayer.id, types, note, date)}
             onDeleteTreatment={(id) => deleteTreatment(selectedPlayer.id, id)}
+            onSaveImagingFindings={(text) => saveImagingFindings(selectedPlayer.id, text)}
+            onAssessReport={(reportId, vas, tenderness, compensation) =>
+              assessReport(selectedPlayer.id, reportId, vas, tenderness, compensation)
+            }
             setCoachPlayers={setCoachPlayers}
           />
         )}
@@ -1770,6 +2182,7 @@ function PlayerDetailPanel({
   protocol,
   allPlayers,
   slots,
+  phaseMenus,
   toggleChecklist,
   advancePhase,
   markCompleted,
@@ -1778,6 +2191,8 @@ function PlayerDetailPanel({
   onSaveZoomUrl,
   onAddTreatments,
   onDeleteTreatment,
+  onSaveImagingFindings,
+  onAssessReport,
   setCoachPlayers,
 }) {
   const report = latestReport(player);
@@ -1922,6 +2337,9 @@ function PlayerDetailPanel({
               </div>
             </div>
           )}
+          {report && (
+            <TrainerAssessment key={report.id} report={report} onAssess={onAssessReport} />
+          )}
           {player.reports.length > 1 && (
             <div className="mt-4 pt-4 border-t border-slate-100">
               <p className="text-xs font-bold text-slate-600 mb-2">コンディション推移（直近14件）</p>
@@ -1977,6 +2395,15 @@ function PlayerDetailPanel({
               <Trophy size={16} /> 完全復帰 記録済み（{new Date(player.completedAt).toLocaleDateString("ja-JP")}）
             </div>
           )}
+        </div>
+
+        <ImagingFindingsCard player={player} onSave={onSaveImagingFindings} />
+
+        <div className="bg-white rounded-xl border border-slate-200 p-5">
+          <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+            <Dumbbell size={16} className="text-blue-600" /> 現在Phaseの推奨メニュー
+          </h4>
+          <PhaseMenuCatalog menus={phaseMenus} protocolId={player.protocolId} phaseNumber={player.currentPhase} />
         </div>
 
         <TreatmentCard player={player} onAddTreatments={onAddTreatments} onDeleteTreatment={onDeleteTreatment} />
@@ -2063,6 +2490,97 @@ function SimpleTrendChart({ reports }) {
 }
 
 // ---------- 治療介入の記録 ----------
+// ---------- トレーナーによる圧痛・代償動作の評価と自動トリアージ ----------
+function TrainerAssessment({ report, onAssess }) {
+  const [tenderness, setTenderness] = useState(Boolean(report.tenderness));
+  const [compensation, setCompensation] = useState(Boolean(report.compensation));
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState(report.triage || null);
+
+  const handleAssess = async () => {
+    setSaving(true);
+    try {
+      const triage = await onAssess(report.id, report.vas, tenderness, compensation);
+      setResult(triage);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 pt-3 border-t border-slate-100">
+      <p className="text-xs font-bold text-slate-600 mb-2 flex items-center gap-1.5">
+        <Stethoscope size={14} className="text-blue-600" /> トレーナー評価（自動トリアージ）
+      </p>
+      <div className="flex flex-wrap items-center gap-3 mb-2">
+        <label className="flex items-center gap-1.5 text-xs text-slate-600">
+          <input type="checkbox" checked={tenderness} onChange={(e) => setTenderness(e.target.checked)} />
+          圧痛あり
+        </label>
+        <label className="flex items-center gap-1.5 text-xs text-slate-600">
+          <input type="checkbox" checked={compensation} onChange={(e) => setCompensation(e.target.checked)} />
+          代償動作あり
+        </label>
+        <button
+          onClick={handleAssess}
+          disabled={saving}
+          className="ml-auto px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 disabled:bg-slate-300"
+        >
+          {saving ? "判定中..." : "評価して記録"}
+        </button>
+      </div>
+      {result && (
+        <div className={`flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-bold ${TRIAGE_INFO[result].bg} ${TRIAGE_INFO[result].text}`}>
+          {TRIAGE_INFO[result].emoji} {TRIAGE_INFO[result].label}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- 画像診断所見（MRI・エコー等）の記述フィールド ----------
+function ImagingFindingsCard({ player, onSave }) {
+  const [text, setText] = useState(player.imagingFindings || "");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await onSave(text);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-5">
+      <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+        <ScanLine size={16} className="text-blue-600" /> 画像診断所見（MRI・エコー等）
+      </h4>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={4}
+        placeholder="例：MRIにて大腿二頭筋長頭近位部に軽度の腱付着部損傷を認める。腱実質内の高信号変化は軽微。"
+        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+      <div className="flex items-center gap-2 mt-2">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="px-4 py-2 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 disabled:bg-slate-300"
+        >
+          {saving ? "保存中..." : "保存"}
+        </button>
+        {saved && <span className="text-xs text-green-600">保存しました</span>}
+      </div>
+    </div>
+  );
+}
+
 function TreatmentCard({ player, onAddTreatments, onDeleteTreatment }) {
   const [selected, setSelected] = useState([]);
   const [note, setNote] = useState("");
@@ -2340,6 +2858,7 @@ function PlayerMode({
   setPlayerDirectory,
   slots,
   setSlots,
+  phaseMenus,
   myPlayer,
   setMyPlayer,
 }) {
@@ -2363,6 +2882,7 @@ function PlayerMode({
       setMyPlayer={setMyPlayer}
       slots={slots}
       setSlots={setSlots}
+      phaseMenus={phaseMenus}
       onLogout={() => setMyPlayer(null)}
     />
   );
@@ -2500,6 +3020,7 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
   const [name, setName] = useState("");
   const [protocolId, setProtocolId] = useState(masterProtocols[0]?.id ?? "");
   const [injuryDate, setInjuryDate] = useState("");
+  const [imagingFindings, setImagingFindings] = useState("");
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
   const [saving, setSaving] = useState(false);
@@ -2532,14 +3053,22 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
       sos: false,
       booked_slot_id: null,
       injury_date: injuryDate || null,
+      imaging_findings: imagingFindings.trim() || null,
       pin,
     };
     setSaving(true);
     setError(null);
     try {
       const [inserted] = await sbInsert("players", payload);
+      // 要件②：フェーズ滞在履歴の記録を開始（Phase1に入った日時）
+      await sbInsert("phase_history", {
+        player_id: inserted.id,
+        protocol_id: protocolId,
+        phase_number: 1,
+        entered_at: new Date().toISOString(),
+      });
       setPlayerDirectory((prev) => [...prev, { id: inserted.id, name: inserted.name }]);
-      setMyPlayer(normalizePlayer({ ...inserted, reports: [], messages: [], treatments: [] }));
+      setMyPlayer(normalizePlayer({ ...inserted, reports: [], messages: [], treatments: [], phase_history: [] }));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -2582,6 +3111,15 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
           type="date"
           value={injuryDate}
           onChange={(e) => setInjuryDate(e.target.value)}
+          className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-1 mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+
+        <label className="text-xs text-slate-500">画像診断所見（MRI・エコー等・任意）</label>
+        <textarea
+          value={imagingFindings}
+          onChange={(e) => setImagingFindings(e.target.value)}
+          rows={3}
+          placeholder="医師から伝えられた所見があれば入力してください（あとから追記・修正も可能です）"
           className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-1 mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
 
@@ -2730,7 +3268,101 @@ function InjuryDateCard({ orgId, player, protocol, setMyPlayer }) {
   );
 }
 
-function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, setSlots, onLogout }) {
+// ---------- 要件②：全組織横断のPhase別タイムライン比較 ----------
+function PhaseTimelineComparison({ player, protocol }) {
+  const [globalAvg, setGlobalAvg] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    if (protocol?.name) {
+      sbSelect(
+        "protocol_phase_avg_duration",
+        `?protocol_name=eq.${encodeURIComponent(protocol.name)}&select=*&order=phase_number.asc`
+      )
+        .then((rows) => {
+          if (active) setGlobalAvg(rows);
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+    } else {
+      setLoading(false);
+    }
+    return () => {
+      active = false;
+    };
+  }, [protocol?.name]);
+
+  const ownDurations = computeOwnPhaseDurations(player.phaseHistory);
+  const maxDays = Math.max(
+    1,
+    ...[1, 2, 3, 4, 5].map((n) => Math.max(ownDurations[n] || 0, globalAvg.find((g) => g.phase_number === n)?.avg_days || 0))
+  );
+  const hasAnyGlobal = globalAvg.some((g) => g.sample_size > 0);
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+      <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+        <Layers size={16} className="text-blue-600" /> 先輩たちとのPhase別タイムライン比較
+      </p>
+      {loading ? (
+        <p className="text-xs text-slate-400">読み込み中...</p>
+      ) : (
+        <>
+          {!hasAnyGlobal && (
+            <p className="text-xs text-slate-400 mb-3">
+              全組織でこのプロトコルを完遂した実績がまだ十分ではないため、参考値として表示しています。
+            </p>
+          )}
+          <div className="space-y-3">
+            {[1, 2, 3, 4, 5].map((n) => {
+              const own = ownDurations[n];
+              const g = globalAvg.find((x) => x.phase_number === n);
+              return (
+                <div key={n}>
+                  <div className="flex items-center justify-between text-[10px] mb-1">
+                    <span className={`font-bold ${PHASE_TEXT_COLORS[n]}`}>Phase {n}</span>
+                    <span className="text-slate-400">
+                      {own !== undefined ? `あなた: ${own}日` : "未到達"}
+                      {g && g.sample_size > 0 ? ` ／ 全組織平均: ${g.avg_days}日（${g.sample_size}件）` : ""}
+                    </span>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full ${PHASE_BG_COLORS[n]}`}
+                        style={{ width: `${own !== undefined ? Math.min(100, (own / maxDays) * 100) : 0}%` }}
+                      />
+                    </div>
+                    <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-slate-400"
+                        style={{ width: `${g && g.sample_size > 0 ? Math.min(100, (g.avg_days / maxDays) * 100) : 0}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="flex gap-4 mt-3 text-[10px] text-slate-400">
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> あなた（上段）
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-slate-400 inline-block" /> 全組織平均（下段）
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, setSlots, phaseMenus, onLogout }) {
   const [vas, setVas] = useState(3);
   const [fatigue, setFatigue] = useState(3);
   const [sleepQuality, setSleepQuality] = useState(7);
@@ -2803,8 +3435,15 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
     }
   };
 
-  const sendPlayerMessage = async (content) => {
-    const [inserted] = await sbInsert("messages", { player_id: player.id, sender: "player", content });
+  const sendPlayerMessage = async (content, _role, extra = {}) => {
+    const [inserted] = await sbInsert("messages", {
+      player_id: player.id,
+      sender: "player",
+      content,
+      pain_type: extra.painType || null,
+      video_url: extra.videoUrl || null,
+      timestamp_note: extra.timestampNote || null,
+    });
     setMyPlayer((prev) => ({ ...prev, messages: [...prev.messages, normalizeMessage(inserted)] }));
   };
 
@@ -2890,6 +3529,23 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
       )}
 
       <InjuryDateCard orgId={orgId} player={player} protocol={protocol} setMyPlayer={setMyPlayer} />
+
+      <PhaseTimelineComparison player={player} protocol={protocol} />
+
+      <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+        <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+          <Dumbbell size={16} className="text-blue-600" /> 現在Phaseの推奨メニュー
+        </p>
+        <PhaseMenuCatalog menus={phaseMenus} protocolId={player.protocolId} phaseNumber={player.currentPhase} />
+      </div>
+
+      <ImagingFindingsCard
+        player={player}
+        onSave={async (text) => {
+          await sbUpdate("players", player.id, { imaging_findings: text });
+          setMyPlayer((prev) => ({ ...prev, imagingFindings: text }));
+        }}
+      />
 
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
         <p className="text-sm font-bold text-slate-700 mb-4">今日のコンディション報告</p>
