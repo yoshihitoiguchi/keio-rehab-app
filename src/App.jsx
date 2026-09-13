@@ -222,7 +222,6 @@ const TREATMENT_TYPES = [
   { value: "lipus", label: "超音波(LIPUS)" },
   { value: "prp", label: "PRP療法" },
   { value: "hydrorelease", label: "エコー下ハイドロリリース" },
-  { value: "injection", label: "注射(ステロイド/ヒアルロン酸等)" },
   { value: "insole", label: "インソール作成" },
   { value: "other", label: "その他" },
 ];
@@ -2144,6 +2143,8 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
               ? "bg-blue-50"
               : "";
             const nameColor = alert ? "text-red-700" : isCompleted ? "text-green-700" : "text-slate-800";
+            // 要件③：未対応のSOS・新着チャットを一目でわかるようにする
+            const needsAttention = p.sos || (unread > 0 && p.supportStatus !== "in_progress" && p.supportStatus !== "resolved");
             return (
               <li key={p.id}>
                 <button
@@ -2171,9 +2172,9 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
                     )}
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
-                    {p.treatments.length > 0 && (
-                      <span className="flex items-center gap-0.5 bg-purple-100 text-purple-700 text-[10px] font-bold px-1.5 py-0.5 rounded-full">
-                        <FlaskConical size={10} /> {p.treatments.length}
+                    {needsAttention && (
+                      <span className="bg-red-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">
+                        新着/未対応
                       </span>
                     )}
                     {unread > 0 && (
@@ -3475,6 +3476,7 @@ function PhaseTimelineComparison({ player, protocol }) {
 }
 
 function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, setSlots, phaseMenus, onLogout }) {
+  const [tab, setTab] = useState("dashboard"); // 'dashboard' | 'report'
   const [vas, setVas] = useState(3);
   const [fatigue, setFatigue] = useState(3);
   const [sleepQuality, setSleepQuality] = useState(7);
@@ -3593,248 +3595,280 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
         </button>
       </div>
 
-      <UsageGuide />
-
-      <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-sm font-bold text-slate-700">復帰ロードマップ</p>
-          <span className={`text-xs font-bold ${PHASE_TEXT_COLORS[player.currentPhase]}`}>
-            現在のステップ：{player.currentPhase}/5
-          </span>
-        </div>
-        <p className="text-2xl font-extrabold text-slate-800 mb-1">全体復帰まであと {remainingWeeks} 週間</p>
-        <p className="text-xs text-slate-400 mb-3">{protocol?.name}</p>
-
-        <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden flex">
-          {[1, 2, 3, 4, 5].map((n) => (
-            <div
-              key={n}
-              className={`h-full flex-1 ${n <= player.currentPhase ? PHASE_BG_COLORS[n] : "bg-transparent"}`}
-            />
-          ))}
-        </div>
-        <div className="flex justify-between mt-2">
-          {[1, 2, 3, 4, 5].map((n) => (
-            <span
-              key={n}
-              className={`text-[10px] font-bold ${n <= player.currentPhase ? PHASE_TEXT_COLORS[n] : "text-slate-300"}`}
-            >
-              P{n}
-            </span>
-          ))}
-        </div>
-
-        <div className="mt-4 bg-slate-50 rounded-lg p-3">
-          <p className="text-xs font-bold text-slate-600 mb-1">現在：{phaseInfo?.title}</p>
-          <ul className="text-xs text-slate-500 list-disc list-inside space-y-0.5">
-            {phaseInfo?.conditions.map((c, i) => (
-              <li key={i}>{c}</li>
-            ))}
-          </ul>
-        </div>
-      </div>
-
-      {protocol?.videoUrl && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-          <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
-            <Youtube size={16} className="text-red-500" /> リハビリ参考動画
-          </p>
-          {embedUrl ? (
-            <div className="aspect-video w-full rounded-lg overflow-hidden bg-slate-100">
-              <iframe
-                src={embedUrl}
-                title="リハビリ参考動画"
-                className="w-full h-full"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowFullScreen
-              />
-            </div>
-          ) : (
-            <a
-              href={protocol.videoUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center justify-center gap-2 py-3 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-blue-600 font-medium"
-            >
-              <LinkIcon size={14} /> 動画リンクを開く
-            </a>
-          )}
-        </div>
-      )}
-
-      <InjuryDateCard orgId={orgId} player={player} protocol={protocol} setMyPlayer={setMyPlayer} />
-
-      <PhaseTimelineComparison player={player} protocol={protocol} />
-
-      <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-        <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
-          <Dumbbell size={16} className="text-blue-600" /> 現在Phaseの推奨メニュー
-        </p>
-        <PhaseMenuCatalog menus={phaseMenus} protocolId={player.protocolId} phaseNumber={player.currentPhase} />
-      </div>
-
-      <TreatmentCard player={player} onAddTreatments={addPlayerTreatments} onDeleteTreatment={deletePlayerTreatment} />
-
-      <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-        <p className="text-sm font-bold text-slate-700 mb-4">今日のコンディション報告</p>
-
-        <label className="text-xs text-slate-500 flex justify-between">
-          <span>痛みの強さ（VAS）</span>
-          <span className="font-bold text-blue-600">{vas}</span>
-        </label>
-        <input
-          type="range"
-          min={0}
-          max={10}
-          value={vas}
-          onChange={(e) => setVas(Number(e.target.value))}
-          className="w-full mt-2 accent-blue-600"
-        />
-        <div className="flex justify-between text-[10px] text-slate-400 mb-1">
-          <span>0（痛みなし）</span>
-          <span>10（最悪）</span>
-        </div>
-        <div className="bg-blue-50 rounded-lg px-3 py-2 mb-4 text-[10px] text-blue-700 space-y-0.5">
-          <p>0：無痛</p>
-          <p>3：プレー可能だが痛みあり</p>
-          <p>5：かばってフォームが崩れる</p>
-          <p>10：歩行困難・激痛</p>
-        </div>
-
-        <label className="text-xs text-slate-500 flex justify-between">
-          <span>疲労度</span>
-          <span className="font-bold text-orange-500">{fatigue}</span>
-        </label>
-        <input
-          type="range"
-          min={0}
-          max={10}
-          value={fatigue}
-          onChange={(e) => setFatigue(Number(e.target.value))}
-          className="w-full mt-2 accent-orange-500"
-        />
-        <div className="flex justify-between text-[10px] text-slate-400 mb-4">
-          <span>0（疲労なし）</span>
-          <span>10（極度の疲労）</span>
-        </div>
-
-        <label className="text-xs text-slate-500 flex justify-between">
-          <span>睡眠の質</span>
-          <span className="font-bold text-blue-500">{sleepQuality}</span>
-        </label>
-        <input
-          type="range"
-          min={0}
-          max={10}
-          value={sleepQuality}
-          onChange={(e) => setSleepQuality(Number(e.target.value))}
-          className="w-full mt-2 accent-blue-500"
-        />
-        <div className="flex justify-between text-[10px] text-slate-400 mb-4">
-          <span>0（最悪）</span>
-          <span>10（最高）</span>
-        </div>
-
-        <label className="text-xs text-slate-500">今日の気分</label>
-        <div className="flex justify-between mt-2 mb-4">
-          {MENTAL_FACES.map((face, i) => (
-            <button
-              key={i}
-              onClick={() => setMental(i + 1)}
-              className={`w-11 h-11 rounded-full text-xl flex items-center justify-center border-2 transition-colors ${
-                mental === i + 1 ? "border-blue-500 bg-blue-50" : "border-transparent bg-slate-50"
-              }`}
-            >
-              {face}
-            </button>
-          ))}
-        </div>
-
-        <label className="text-xs text-slate-500">本音・言い訳（自由記述）</label>
-        <textarea
-          value={honne}
-          onChange={(e) => setHonne(e.target.value)}
-          rows={3}
-          placeholder="今日感じたことを正直に書いてください"
-          className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
-
+      {/* 要件①：閲覧用の「ダッシュボード」と入力用の「日報・SOS送信」をタブで分離 */}
+      <div className="flex bg-slate-200 rounded-full p-1 gap-1">
         <button
-          onClick={() => setSos((v) => !v)}
-          className={`w-full flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-bold mb-3 border-2 transition-colors ${
-            sos ? "border-red-500 bg-red-50 text-red-600" : "border-slate-200 text-slate-400"
+          onClick={() => setTab("dashboard")}
+          className={`flex-1 py-2 rounded-full text-sm font-bold transition-colors ${
+            tab === "dashboard" ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"
           }`}
         >
-          <AlertTriangle size={16} /> {sos ? "🆘 SOSを送信します" : "🆘 SOSを送る（緊急時）"}
+          ダッシュボード
         </button>
-
-        {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
-
         <button
-          onClick={handleSubmitReport}
-          disabled={sending}
-          className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-blue-600 text-white font-bold text-sm hover:bg-blue-700 disabled:bg-slate-300"
+          onClick={() => setTab("report")}
+          className={`flex-1 py-2 rounded-full text-sm font-bold transition-colors ${
+            tab === "report" ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"
+          }`}
         >
-          {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-          {sending ? "送信中..." : "指導者に送信する"}
+          日報・SOS送信
         </button>
-        {sent && (
-          <p className="text-xs text-green-600 text-center mt-2">
-            送信しました。指導者からの確認をお待ちください。
-          </p>
-        )}
       </div>
 
-      <ChatPanel messages={player.messages} myRole="player" title="指導者とのチャット" onSend={sendPlayerMessage} />
+      {tab === "dashboard" && (
+        <>
+          <UsageGuide />
 
-      <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-        <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
-          <CalendarClock size={16} className="text-blue-600" />
-          面談予約
-        </p>
-        <p className="text-xs text-slate-400 mb-3">
-          コーチ・トレーナーなどの日程調整により公開された枠から選べます。
-        </p>
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-sm font-bold text-slate-700">復帰ロードマップ</p>
+              <span className={`text-xs font-bold ${PHASE_TEXT_COLORS[player.currentPhase]}`}>
+                現在のステップ：{player.currentPhase}/5
+              </span>
+            </div>
+            <p className="text-2xl font-extrabold text-slate-800 mb-1">全体復帰まであと {remainingWeeks} 週間</p>
+            <p className="text-xs text-slate-400 mb-3">{protocol?.name}</p>
 
-        {bookedSlot ? (
-          <div className="bg-blue-50 rounded-lg px-4 py-3 space-y-2">
-            <p className="text-sm text-blue-700 font-bold">予約済み：{bookedSlot.datetime}</p>
-            {bookedSlot.zoomUrl ? (
-              <a
-                href={bookedSlot.zoomUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="flex items-center justify-center gap-2 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-bold hover:bg-blue-700"
-              >
-                <Video size={16} /> 面談に参加
-              </a>
-            ) : (
-              <p className="text-xs text-blue-500">オンライン会議URLは指導者側で準備中です。</p>
-            )}
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {availableSlots.length === 0 && (
-              <p className="text-xs text-slate-400">現在予約可能な枠がありません。</p>
-            )}
-            {availableSlots.map((s) => (
-              <button
-                key={s.id}
-                onClick={() => handleBookSlot(s.id)}
-                className="w-full flex items-center justify-between px-4 py-2.5 rounded-lg border border-slate-200 hover:border-blue-400 hover:bg-blue-50 text-sm"
-              >
-                <span className="text-left">
-                  <span className="block text-slate-600">{s.datetime}</span>
-                  <span className="block text-[10px] text-slate-400">
-                    {(s.matchedRoles || []).map((r) => SCHEDULING_ROLE_LABELS[r]).join("・")}
-                  </span>
+            <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden flex">
+              {[1, 2, 3, 4, 5].map((n) => (
+                <div
+                  key={n}
+                  className={`h-full flex-1 ${n <= player.currentPhase ? PHASE_BG_COLORS[n] : "bg-transparent"}`}
+                />
+              ))}
+            </div>
+            <div className="flex justify-between mt-2">
+              {[1, 2, 3, 4, 5].map((n) => (
+                <span
+                  key={n}
+                  className={`text-[10px] font-bold ${n <= player.currentPhase ? PHASE_TEXT_COLORS[n] : "text-slate-300"}`}
+                >
+                  P{n}
                 </span>
-                <span className="text-blue-600 font-bold text-xs shrink-0">この枠で予約</span>
-              </button>
-            ))}
+              ))}
+            </div>
+
+            <div className="mt-4 bg-slate-50 rounded-lg p-3">
+              <p className="text-xs font-bold text-slate-600 mb-1">現在：{phaseInfo?.title}</p>
+              <ul className="text-xs text-slate-500 list-disc list-inside space-y-0.5">
+                {phaseInfo?.conditions.map((c, i) => (
+                  <li key={i}>{c}</li>
+                ))}
+              </ul>
+            </div>
           </div>
-        )}
-      </div>
+
+          {protocol?.videoUrl && (
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+              <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+                <Youtube size={16} className="text-red-500" /> リハビリ参考動画
+              </p>
+              {embedUrl ? (
+                <div className="aspect-video w-full rounded-lg overflow-hidden bg-slate-100">
+                  <iframe
+                    src={embedUrl}
+                    title="リハビリ参考動画"
+                    className="w-full h-full"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                    allowFullScreen
+                  />
+                </div>
+              ) : (
+                <a
+                  href={protocol.videoUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center justify-center gap-2 py-3 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-blue-600 font-medium"
+                >
+                  <LinkIcon size={14} /> 動画リンクを開く
+                </a>
+              )}
+            </div>
+          )}
+
+          <InjuryDateCard orgId={orgId} player={player} protocol={protocol} setMyPlayer={setMyPlayer} />
+
+          <PhaseTimelineComparison player={player} protocol={protocol} />
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+              <Dumbbell size={16} className="text-blue-600" /> 現在Phaseの推奨メニュー
+            </p>
+            <PhaseMenuCatalog menus={phaseMenus} protocolId={player.protocolId} phaseNumber={player.currentPhase} />
+          </div>
+
+          <TreatmentCard player={player} onAddTreatments={addPlayerTreatments} onDeleteTreatment={deletePlayerTreatment} />
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+              <CalendarClock size={16} className="text-blue-600" />
+              面談予約
+            </p>
+            <p className="text-xs text-slate-400 mb-3">
+              コーチ・トレーナーなどの日程調整により公開された枠から選べます。
+            </p>
+
+            {bookedSlot ? (
+              <div className="bg-blue-50 rounded-lg px-4 py-3 space-y-2">
+                <p className="text-sm text-blue-700 font-bold">予約済み：{bookedSlot.datetime}</p>
+                {bookedSlot.zoomUrl ? (
+                  <a
+                    href={bookedSlot.zoomUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center justify-center gap-2 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-bold hover:bg-blue-700"
+                  >
+                    <Video size={16} /> 面談に参加
+                  </a>
+                ) : (
+                  <p className="text-xs text-blue-500">オンライン会議URLは指導者側で準備中です。</p>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {availableSlots.length === 0 && (
+                  <p className="text-xs text-slate-400">現在予約可能な枠がありません。</p>
+                )}
+                {availableSlots.map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => handleBookSlot(s.id)}
+                    className="w-full flex items-center justify-between px-4 py-2.5 rounded-lg border border-slate-200 hover:border-blue-400 hover:bg-blue-50 text-sm"
+                  >
+                    <span className="text-left">
+                      <span className="block text-slate-600">{s.datetime}</span>
+                      <span className="block text-[10px] text-slate-400">
+                        {(s.matchedRoles || []).map((r) => SCHEDULING_ROLE_LABELS[r]).join("・")}
+                      </span>
+                    </span>
+                    <span className="text-blue-600 font-bold text-xs shrink-0">この枠で予約</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {tab === "report" && (
+        <>
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <p className="text-sm font-bold text-slate-700 mb-4">今日のコンディション報告</p>
+
+            <label className="text-xs text-slate-500 flex justify-between">
+              <span>痛みの強さ（VAS）</span>
+              <span className="font-bold text-blue-600">{vas}</span>
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={10}
+              value={vas}
+              onChange={(e) => setVas(Number(e.target.value))}
+              className="w-full mt-2 accent-blue-600"
+            />
+            <div className="grid grid-cols-5 gap-1 text-center mt-2 mb-4">
+              {[
+                { v: 0, label: "完全に無痛・全く気にならない" },
+                { v: 3, label: "痛みはあるが、練習には集中できる（許容範囲）" },
+                { v: 5, label: "痛みが気になって思い通りの動きができない（代償動作が出る）" },
+                { v: 8, label: "これ以上やると確実に悪化する・かばうことすらできない" },
+                { v: 10, label: "これまで経験した最大の痛み・激痛" },
+              ].map((a) => (
+                <div key={a.v}>
+                  <p className="text-xs font-bold text-blue-600">{a.v}</p>
+                  <p className="text-[8px] leading-tight text-blue-700 mt-0.5">{a.label}</p>
+                </div>
+              ))}
+            </div>
+
+            <label className="text-xs text-slate-500 flex justify-between">
+              <span>疲労度</span>
+              <span className="font-bold text-orange-500">{fatigue}</span>
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={10}
+              value={fatigue}
+              onChange={(e) => setFatigue(Number(e.target.value))}
+              className="w-full mt-2 accent-orange-500"
+            />
+            <div className="flex justify-between text-[10px] text-slate-400 mb-4">
+              <span>0（疲労なし）</span>
+              <span>10（極度の疲労）</span>
+            </div>
+
+            <label className="text-xs text-slate-500 flex justify-between">
+              <span>睡眠の質</span>
+              <span className="font-bold text-blue-500">{sleepQuality}</span>
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={10}
+              value={sleepQuality}
+              onChange={(e) => setSleepQuality(Number(e.target.value))}
+              className="w-full mt-2 accent-blue-500"
+            />
+            <div className="flex justify-between text-[10px] text-slate-400 mb-4">
+              <span>0（最悪）</span>
+              <span>10（最高）</span>
+            </div>
+
+            <label className="text-xs text-slate-500">今日の気分</label>
+            <div className="flex justify-between mt-2 mb-4">
+              {MENTAL_FACES.map((face, i) => (
+                <button
+                  key={i}
+                  onClick={() => setMental(i + 1)}
+                  className={`w-11 h-11 rounded-full text-xl flex items-center justify-center border-2 transition-colors ${
+                    mental === i + 1 ? "border-blue-500 bg-blue-50" : "border-transparent bg-slate-50"
+                  }`}
+                >
+                  {face}
+                </button>
+              ))}
+            </div>
+
+            <label className="text-xs text-slate-500">本音・言い訳（自由記述）</label>
+            <textarea
+              value={honne}
+              onChange={(e) => setHonne(e.target.value)}
+              rows={3}
+              placeholder="今日感じたことを正直に書いてください"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+
+            <button
+              onClick={() => setSos((v) => !v)}
+              className={`w-full flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-bold mb-3 border-2 transition-colors ${
+                sos ? "border-red-500 bg-red-50 text-red-600" : "border-slate-200 text-slate-400"
+              }`}
+            >
+              <AlertTriangle size={16} /> {sos ? "🆘 SOSを送信します" : "🆘 SOSを送る（緊急時）"}
+            </button>
+
+            {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
+
+            <button
+              onClick={handleSubmitReport}
+              disabled={sending}
+              className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-blue-600 text-white font-bold text-sm hover:bg-blue-700 disabled:bg-slate-300"
+            >
+              {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+              {sending ? "送信中..." : "指導者に送信する"}
+            </button>
+            {sent && (
+              <p className="text-xs text-green-600 text-center mt-2">
+                送信しました。指導者からの確認をお待ちください。
+              </p>
+            )}
+          </div>
+
+          <ChatPanel messages={player.messages} myRole="player" title="指導者とのチャット" onSend={sendPlayerMessage} />
+        </>
+      )}
     </div>
   );
 }
