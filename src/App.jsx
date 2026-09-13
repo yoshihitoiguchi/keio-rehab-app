@@ -30,6 +30,8 @@ import {
   Building2,
   Trophy,
   Link as LinkIcon,
+  Syringe,
+  Printer,
 } from "lucide-react";
 
 // ============================================================
@@ -121,6 +123,15 @@ function normalizeMessage(row) {
     createdAt: row.created_at,
   };
 }
+function normalizeTreatment(row) {
+  return {
+    id: row.id,
+    type: row.type,
+    note: row.note,
+    treatedDate: row.treated_date,
+    createdAt: row.created_at,
+  };
+}
 function normalizePlayer(row) {
   return {
     id: row.id,
@@ -135,11 +146,22 @@ function normalizePlayer(row) {
     reports: (row.reports || [])
       .slice()
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      .map((r) => ({ date: r.date, vas: r.vas, mental: r.mental, honne: r.honne })),
+      .map((r) => ({
+        date: r.date,
+        vas: r.vas,
+        mental: r.mental,
+        honne: r.honne,
+        fatigue: r.fatigue ?? null,
+        sleepQuality: r.sleep_quality ?? null,
+      })),
     messages: (row.messages || [])
       .slice()
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
       .map(normalizeMessage),
+    treatments: (row.treatments || [])
+      .slice()
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+      .map(normalizeTreatment),
   };
 }
 function normalizeSlot(row) {
@@ -153,8 +175,21 @@ function normalizeSlot(row) {
 }
 
 const MENTAL_FACES = ["😞", "😕", "😐", "🙂", "😄"];
-const PLAYER_FIELDS = "*,reports(*),messages(*)";
-const PLAYER_EMBED_ORDER = "&reports.order=created_at.asc&messages.order=created_at.asc";
+const PLAYER_FIELDS = "*,reports(*),messages(*),treatments(*)";
+const PLAYER_EMBED_ORDER =
+  "&reports.order=created_at.asc&messages.order=created_at.asc&treatments.order=created_at.asc";
+
+const TREATMENT_TYPES = [
+  { value: "shockwave", label: "体外衝撃波" },
+  { value: "lipus", label: "超音波(LIPUS)" },
+  { value: "prp", label: "PRP療法" },
+  { value: "hydrorelease", label: "エコー下ハイドロリリース" },
+  { value: "injection", label: "注射(ステロイド/ヒアルロン酸等)" },
+  { value: "insole", label: "インソール作成" },
+  { value: "other", label: "その他" },
+];
+const TREATMENT_LABELS = Object.fromEntries(TREATMENT_TYPES.map((t) => [t.value, t.label]));
+
 
 const SCHEDULING_ROLES = [
   { value: "coach", label: "コーチ" },
@@ -356,8 +391,8 @@ export default function RehabApp() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col">
-      <header className="bg-slate-900 text-white sticky top-0 z-20 shadow-md">
+    <div className="min-h-screen bg-slate-100 flex flex-col print:bg-white print:block">
+      <header className="bg-slate-900 text-white sticky top-0 z-20 shadow-md print:hidden">
         <div className="max-w-6xl mx-auto flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-2">
             <Flame className="text-orange-400" size={22} />
@@ -407,7 +442,7 @@ export default function RehabApp() {
       </header>
 
       {loadError && (
-        <div className="bg-red-50 border-b border-red-200 text-red-600 text-xs px-4 py-2 flex items-center justify-between">
+        <div className="bg-red-50 border-b border-red-200 text-red-600 text-xs px-4 py-2 flex items-center justify-between print:hidden">
           <span>データの取得に失敗しました: {loadError}</span>
           <button onClick={() => loadPublicData(org.id)} className="font-bold underline shrink-0 ml-3">
             再試行
@@ -885,7 +920,7 @@ function CoachDashboard({
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
-      <div className="flex gap-2 mb-6 border-b border-slate-300 flex-wrap">
+      <div className="flex gap-2 mb-6 border-b border-slate-300 flex-wrap print:hidden">
         {tabs.map((t) => {
           const Icon = t.icon;
           return (
@@ -916,6 +951,7 @@ function CoachDashboard({
           </div>
         ) : (
           <PlayerManagement
+            orgId={orgId}
             masterProtocols={masterProtocols}
             coachPlayers={coachPlayers}
             setCoachPlayers={setCoachPlayers}
@@ -1488,7 +1524,7 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo }) {
 }
 
 // ---------- 選手管理（2ペイン） ----------
-function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slots, setSlots }) {
+function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayers, slots, setSlots }) {
   const [selectedId, setSelectedId] = useState(null);
   const [error, setError] = useState(null);
 
@@ -1583,9 +1619,36 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
     setSlots((prev) => prev.map((s) => (s.id === slotId ? { ...s, zoomUrl: url.trim() || null } : s)));
   };
 
+  const addTreatments = async (playerId, types, note, treatedDate) => {
+    const payload = types.map((type) => ({
+      player_id: playerId,
+      org_id: orgId,
+      type,
+      note: note || null,
+      treated_date: treatedDate || null,
+    }));
+    const inserted = await sbInsert("treatments", payload);
+    setCoachPlayers((prev) =>
+      prev.map((p) =>
+        p.id === playerId
+          ? { ...p, treatments: [...p.treatments, ...inserted.map(normalizeTreatment)] }
+          : p
+      )
+    );
+  };
+
+  const deleteTreatment = async (playerId, treatmentId) => {
+    await sbDelete("treatments", treatmentId);
+    setCoachPlayers((prev) =>
+      prev.map((p) =>
+        p.id === playerId ? { ...p, treatments: p.treatments.filter((t) => t.id !== treatmentId) } : p
+      )
+    );
+  };
+
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6">
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden h-fit">
+    <div className="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6 print:block">
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden h-fit print:hidden">
         <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
           <p className="text-sm font-bold text-slate-700">
             選手一覧 ({coachPlayers.length})・Phase昇順
@@ -1639,6 +1702,11 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
                     </div>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
+                    {p.treatments.length > 0 && (
+                      <span className="flex items-center gap-0.5 bg-purple-100 text-purple-700 text-[10px] font-bold px-1.5 py-0.5 rounded-full">
+                        <Syringe size={10} /> {p.treatments.length}
+                      </span>
+                    )}
                     {unread > 0 && (
                       <span className="flex items-center gap-0.5 bg-blue-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
                         <MessageCircle size={10} /> {unread}
@@ -1687,6 +1755,8 @@ function PlayerManagement({ masterProtocols, coachPlayers, setCoachPlayers, slot
             onDelete={() => deletePlayer(selectedPlayer.id, selectedPlayer.name)}
             onSendMessage={(content, role) => sendCoachMessage(selectedPlayer.id, content, role)}
             onSaveZoomUrl={saveZoomUrl}
+            onAddTreatments={(types, note, date) => addTreatments(selectedPlayer.id, types, note, date)}
+            onDeleteTreatment={(id) => deleteTreatment(selectedPlayer.id, id)}
             setCoachPlayers={setCoachPlayers}
           />
         )}
@@ -1706,6 +1776,8 @@ function PlayerDetailPanel({
   onDelete,
   onSendMessage,
   onSaveZoomUrl,
+  onAddTreatments,
+  onDeleteTreatment,
   setCoachPlayers,
 }) {
   const report = latestReport(player);
@@ -1761,156 +1833,455 @@ function PlayerDetailPanel({
     .sort((a, b) => a.datetime.localeCompare(b.datetime));
 
   return (
-    <div className="space-y-5">
-      <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center justify-between">
-        <div>
-          <h3 className="font-bold text-lg text-slate-800">{player.name}</h3>
-          <p className="text-sm text-slate-400">
-            {protocol?.name ?? "未設定"} ・ 現在{" "}
-            <span className={`font-bold ${PHASE_TEXT_COLORS[player.currentPhase]}`}>
-              Phase {player.currentPhase}/5
-            </span>
-            ：{phaseInfo?.title}
+    <>
+      <div className="space-y-5 print:hidden">
+        <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center justify-between">
+          <div>
+            <h3 className="font-bold text-lg text-slate-800">{player.name}</h3>
+            <p className="text-sm text-slate-400">
+              {protocol?.name ?? "未設定"} ・ 現在{" "}
+              <span className={`font-bold ${PHASE_TEXT_COLORS[player.currentPhase]}`}>
+                Phase {player.currentPhase}/5
+              </span>
+              ：{phaseInfo?.title}
+            </p>
+            {player.injuryDate && (
+              <p className="text-xs text-slate-400 mt-1">
+                受傷日：{player.injuryDate}（受傷から{daysSince(player.injuryDate)}日経過）
+                {avg && (
+                  <span className="text-blue-500"> ・ 過去{avg.sampleSize}人の平均完遂日数：{avg.avgDays}日</span>
+                )}
+              </p>
+            )}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {player.completedAt ? (
+              <span className="flex items-center gap-1 bg-green-100 text-green-700 text-xs font-bold px-3 py-1.5 rounded-full">
+                <Trophy size={14} /> 完全復帰
+              </span>
+            ) : (
+              isAlert(player) && (
+                <span className="flex items-center gap-1 bg-red-100 text-red-600 text-xs font-bold px-3 py-1.5 rounded-full">
+                  <AlertTriangle size={14} /> 要確認
+                </span>
+              )
+            )}
+            <button
+              onClick={() => window.print()}
+              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 border border-blue-200 hover:border-blue-300 rounded-full px-3 py-1.5"
+              title="レポートを印刷 / PDF出力"
+            >
+              <Printer size={14} /> レポート出力
+            </button>
+            <button
+              onClick={onDelete}
+              className="flex items-center gap-1 text-xs text-slate-400 hover:text-red-500 border border-slate-200 hover:border-red-300 rounded-full px-3 py-1.5"
+              title="選手をデータベースから完全に削除する"
+            >
+              <Trash2 size={14} /> 削除
+            </button>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl border border-slate-200 p-5">
+          <h4 className="text-sm font-bold text-slate-700 mb-3">本日の日報</h4>
+          {!report && <p className="text-sm text-slate-400">まだ報告がありません。</p>}
+          {report && (
+            <div className="grid grid-cols-3 gap-3">
+              <div className="bg-slate-50 rounded-lg p-3 text-center">
+                <p className="text-xs text-slate-400 mb-1">痛み(VAS)</p>
+                <p
+                  className={`text-2xl font-bold ${
+                    report.vas >= 7 ? "text-red-500" : report.vas >= 4 ? "text-orange-500" : "text-green-600"
+                  }`}
+                >
+                  {report.vas}
+                </p>
+              </div>
+              <div className="bg-slate-50 rounded-lg p-3 text-center">
+                <p className="text-xs text-slate-400 mb-1">メンタル</p>
+                <p className="text-2xl">{MENTAL_FACES[report.mental - 1]}</p>
+              </div>
+              <div className="bg-slate-50 rounded-lg p-3 text-center flex flex-col justify-center">
+                <p className="text-xs text-slate-400 mb-1">SOS</p>
+                <p className={`text-sm font-bold ${player.sos ? "text-red-500" : "text-slate-400"}`}>
+                  {player.sos ? "あり" : "なし"}
+                </p>
+              </div>
+              <div className="bg-slate-50 rounded-lg p-3 text-center">
+                <p className="text-xs text-slate-400 mb-1">疲労度</p>
+                <p className="text-2xl font-bold text-orange-500">{report.fatigue ?? "-"}</p>
+              </div>
+              <div className="bg-slate-50 rounded-lg p-3 text-center">
+                <p className="text-xs text-slate-400 mb-1">睡眠の質</p>
+                <p className="text-2xl font-bold text-blue-500">{report.sleepQuality ?? "-"}</p>
+              </div>
+              <div className="col-span-3 bg-slate-50 rounded-lg p-3">
+                <p className="text-xs text-slate-400 mb-1">本音・言い訳</p>
+                <p className="text-sm text-slate-700">{report.honne || "（未記入）"}</p>
+              </div>
+            </div>
+          )}
+          {player.reports.length > 1 && (
+            <div className="mt-4 pt-4 border-t border-slate-100">
+              <p className="text-xs font-bold text-slate-600 mb-2">コンディション推移（直近14件）</p>
+              <SimpleTrendChart reports={player.reports} />
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white rounded-xl border border-slate-200 p-5">
+          <h4 className="text-sm font-bold text-slate-700 mb-3">
+            Phase {player.currentPhase} クリア条件の確認
+          </h4>
+          <div className="space-y-2">
+            {phaseInfo?.conditions.map((c, idx) => (
+              <button
+                key={idx}
+                onClick={() => toggleChecklist(player.id, idx)}
+                className="w-full flex items-center gap-2.5 text-left px-3 py-2.5 rounded-lg border border-slate-200 hover:bg-slate-50"
+              >
+                {player.checklist[idx] ? (
+                  <CheckCircle2 size={18} className="text-green-600 shrink-0" />
+                ) : (
+                  <Circle size={18} className="text-slate-300 shrink-0" />
+                )}
+                <span className={`text-sm ${player.checklist[idx] ? "text-slate-800" : "text-slate-500"}`}>{c}</span>
+              </button>
+            ))}
+            {(!phaseInfo || phaseInfo.conditions.length === 0) && (
+              <p className="text-sm text-slate-400">このフェーズに条件は設定されていません。</p>
+            )}
+          </div>
+
+          {player.currentPhase < 5 && (
+            <button
+              onClick={() => advancePhase(player.id)}
+              disabled={!allChecked}
+              className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-blue-600 text-white font-bold text-sm hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
+            >
+              次のフェーズへ進める <ArrowRight size={16} />
+            </button>
+          )}
+          {player.currentPhase >= 5 && !player.completedAt && (
+            <button
+              onClick={() => markCompleted(player.id)}
+              disabled={!allChecked}
+              className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-green-600 text-white font-bold text-sm hover:bg-green-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
+            >
+              <ShieldCheck size={16} /> 完全復帰として記録する
+            </button>
+          )}
+          {player.completedAt && (
+            <div className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-green-50 text-green-700 font-bold text-sm">
+              <Trophy size={16} /> 完全復帰 記録済み（{new Date(player.completedAt).toLocaleDateString("ja-JP")}）
+            </div>
+          )}
+        </div>
+
+        <TreatmentCard player={player} onAddTreatments={onAddTreatments} onDeleteTreatment={onDeleteTreatment} />
+
+        <ChatPanel
+          messages={player.messages}
+          myRole="staff"
+          title={`${player.name} さんとのチャット`}
+          roleOptions={CHAT_STAFF_ROLES}
+          onSend={onSendMessage}
+        />
+
+        <div className="bg-white rounded-xl border border-slate-200 p-5">
+          <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+            <History size={16} className="text-blue-600" /> 面談履歴（{myMeetings.length}件）
+          </h4>
+          {myMeetings.length === 0 && (
+            <p className="text-sm text-slate-400">まだ面談の予約・実施履歴がありません。</p>
+          )}
+          <ul className="space-y-2">
+            {myMeetings.map((s) => {
+              const held = parseDatetime(s.datetime) <= new Date();
+              const daysAfter = player.injuryDate ? diffDaysBetween(player.injuryDate, s.datetime) : null;
+              return <MeetingRow key={s.id} slot={s} held={held} daysAfter={daysAfter} onSaveZoomUrl={onSaveZoomUrl} />;
+            })}
+          </ul>
+          <p className="text-[10px] text-slate-400 mt-3">
+            面談枠の登録・公開は「日程調整」タブから行えます。
           </p>
-          {player.injuryDate && (
-            <p className="text-xs text-slate-400 mt-1">
-              受傷日：{player.injuryDate}（受傷から{daysSince(player.injuryDate)}日経過）
-              {avg && (
-                <span className="text-blue-500"> ・ 過去{avg.sampleSize}人の平均完遂日数：{avg.avgDays}日</span>
-              )}
+        </div>
+      </div>
+
+      <PrintSummary player={player} protocol={protocol} phaseInfo={phaseInfo} avg={avg} myMeetings={myMeetings} />
+    </>
+  );
+}
+
+// ---------- コンディション推移の簡易折れ線グラフ（外部ライブラリ不使用） ----------
+function SimpleTrendChart({ reports }) {
+  const width = 320;
+  const height = 110;
+  const padding = 8;
+  const recent = reports.slice(-14);
+  if (recent.length < 2) return <p className="text-xs text-slate-400">グラフ表示には2件以上のデータが必要です。</p>;
+
+  const xStep = (width - padding * 2) / (recent.length - 1);
+  const toX = (i) => padding + i * xStep;
+  const toY = (v) => height - padding - (v / 10) * (height - padding * 2);
+
+  const series = [
+    { key: "vas", color: "#ef4444", label: "痛み(VAS)" },
+    { key: "fatigue", color: "#f97316", label: "疲労度" },
+    { key: "sleepQuality", color: "#3b82f6", label: "睡眠の質" },
+  ];
+
+  const buildPath = (key) => {
+    const points = recent
+      .map((r, i) => ({ x: toX(i), y: r[key] === null || r[key] === undefined ? null : toY(r[key]) }))
+      .filter((p) => p.y !== null);
+    if (points.length === 0) return null;
+    return points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
+  };
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-28">
+        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke="#e2e8f0" strokeWidth="1" />
+        <line x1={padding} y1={padding} x2={width - padding} y2={padding} stroke="#e2e8f0" strokeWidth="1" strokeDasharray="2,2" />
+        {series.map((s) => {
+          const d = buildPath(s.key);
+          return d ? <path key={s.key} d={d} fill="none" stroke={s.color} strokeWidth="2" /> : null;
+        })}
+      </svg>
+      <div className="flex gap-3 mt-1 flex-wrap">
+        {series.map((s) => (
+          <span key={s.key} className="flex items-center gap-1 text-[10px] text-slate-500">
+            <span className="w-2 h-2 rounded-full inline-block" style={{ background: s.color }} />
+            {s.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------- 治療介入の記録 ----------
+function TreatmentCard({ player, onAddTreatments, onDeleteTreatment }) {
+  const [selected, setSelected] = useState([]);
+  const [note, setNote] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const toggle = (val) => setSelected((prev) => (prev.includes(val) ? prev.filter((v) => v !== val) : [...prev, val]));
+
+  const handleSubmit = async () => {
+    if (selected.length === 0) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await onAddTreatments(selected, note.trim(), date);
+      setSelected([]);
+      setNote("");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (id) => {
+    try {
+      await onDeleteTreatment(id);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-5">
+      <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+        <Syringe size={16} className="text-blue-600" /> 治療介入の記録
+      </h4>
+      <div className="grid grid-cols-2 gap-2 mb-3">
+        {TREATMENT_TYPES.map((t) => (
+          <button
+            key={t.value}
+            onClick={() => toggle(t.value)}
+            className={`flex items-center gap-2 text-left px-3 py-2 rounded-lg border text-xs transition-colors ${
+              selected.includes(t.value)
+                ? "border-blue-500 bg-blue-50 text-blue-700 font-bold"
+                : "border-slate-200 text-slate-600 hover:bg-slate-50"
+            }`}
+          >
+            {selected.includes(t.value) ? (
+              <CheckCircle2 size={14} className="shrink-0" />
+            ) : (
+              <Circle size={14} className="shrink-0 text-slate-300" />
+            )}
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div className="flex gap-2 mb-2">
+        <input
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="border border-slate-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="メモ（任意）"
+          className="flex-1 border border-slate-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+      </div>
+      {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
+      <button
+        onClick={handleSubmit}
+        disabled={selected.length === 0 || saving}
+        className="w-full py-2 rounded-lg bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 disabled:bg-slate-300"
+      >
+        {saving ? "記録中..." : "選択した処置を記録する"}
+      </button>
+
+      {player.treatments.length > 0 && (
+        <div className="mt-4 pt-4 border-t border-slate-100 space-y-1.5">
+          <p className="text-xs text-slate-400 mb-1">介入履歴（{player.treatments.length}件）</p>
+          {player.treatments
+            .slice()
+            .reverse()
+            .map((t) => (
+              <div key={t.id} className="flex items-center justify-between text-xs bg-slate-50 rounded-lg px-3 py-1.5">
+                <span>
+                  {t.treatedDate || "日付未記録"} ・{" "}
+                  <span className="font-bold text-blue-600">{TREATMENT_LABELS[t.type] || t.type}</span>
+                  {t.note ? ` ・ ${t.note}` : ""}
+                </span>
+                <button onClick={() => handleDelete(t.id)} className="text-slate-400 hover:text-red-500 shrink-0 ml-2">
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- 印刷/PDF出力用サマリー（画面には表示されず、印刷時のみ表示） ----------
+function PrintSummary({ player, protocol, phaseInfo, avg, myMeetings }) {
+  const recentReports = player.reports.slice(-10);
+  return (
+    <div className="hidden print:block p-6 text-black text-sm">
+      <style>{"@media print { @page { size: A4; margin: 14mm; } }"}</style>
+      <div className="flex items-center justify-between border-b-2 border-black pb-2 mb-4">
+        <h1 className="text-xl font-bold">リハビリ進捗レポート</h1>
+        <p className="text-xs">出力日: {new Date().toLocaleDateString("ja-JP")}</p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 mb-4 text-xs">
+        <div className="space-y-1">
+          <p>
+            <span className="font-bold">氏名：</span>
+            {player.name}
+          </p>
+          <p>
+            <span className="font-bold">プロトコル：</span>
+            {protocol?.name ?? "未設定"}
+          </p>
+          <p>
+            <span className="font-bold">現在フェーズ：</span>
+            Phase {player.currentPhase}/5（{phaseInfo?.title}）
+          </p>
+        </div>
+        <div className="space-y-1">
+          <p>
+            <span className="font-bold">受傷日：</span>
+            {player.injuryDate || "未登録"}
+          </p>
+          <p>
+            <span className="font-bold">完全復帰：</span>
+            {player.completedAt ? new Date(player.completedAt).toLocaleDateString("ja-JP") : "未完遂"}
+          </p>
+          {avg && (
+            <p>
+              <span className="font-bold">過去の平均完遂日数：</span>
+              {avg.avgDays}日（サンプル{avg.sampleSize}人）
             </p>
           )}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {player.completedAt ? (
-            <span className="flex items-center gap-1 bg-green-100 text-green-700 text-xs font-bold px-3 py-1.5 rounded-full">
-              <Trophy size={14} /> 完全復帰
-            </span>
-          ) : (
-            isAlert(player) && (
-              <span className="flex items-center gap-1 bg-red-100 text-red-600 text-xs font-bold px-3 py-1.5 rounded-full">
-                <AlertTriangle size={14} /> 要確認
-              </span>
-            )
-          )}
-          <button
-            onClick={onDelete}
-            className="flex items-center gap-1 text-xs text-slate-400 hover:text-red-500 border border-slate-200 hover:border-red-300 rounded-full px-3 py-1.5"
-            title="選手をデータベースから完全に削除する"
-          >
-            <Trash2 size={14} /> 削除
-          </button>
-        </div>
       </div>
 
-      <div className="bg-white rounded-xl border border-slate-200 p-5">
-        <h4 className="text-sm font-bold text-slate-700 mb-3">本日の日報</h4>
-        {!report && <p className="text-sm text-slate-400">まだ報告がありません。</p>}
-        {report && (
-          <div className="grid grid-cols-3 gap-3">
-            <div className="bg-slate-50 rounded-lg p-3 text-center">
-              <p className="text-xs text-slate-400 mb-1">痛み(VAS)</p>
-              <p
-                className={`text-2xl font-bold ${
-                  report.vas >= 7 ? "text-red-500" : report.vas >= 4 ? "text-orange-500" : "text-green-600"
-                }`}
-              >
-                {report.vas}
-              </p>
-            </div>
-            <div className="bg-slate-50 rounded-lg p-3 text-center">
-              <p className="text-xs text-slate-400 mb-1">メンタル</p>
-              <p className="text-2xl">{MENTAL_FACES[report.mental - 1]}</p>
-            </div>
-            <div className="bg-slate-50 rounded-lg p-3 text-center flex flex-col justify-center">
-              <p className="text-xs text-slate-400 mb-1">SOS</p>
-              <p className={`text-sm font-bold ${player.sos ? "text-red-500" : "text-slate-400"}`}>
-                {player.sos ? "あり" : "なし"}
-              </p>
-            </div>
-            <div className="col-span-3 bg-slate-50 rounded-lg p-3">
-              <p className="text-xs text-slate-400 mb-1">本音・言い訳</p>
-              <p className="text-sm text-slate-700">{report.honne || "（未記入）"}</p>
-            </div>
-          </div>
-        )}
-      </div>
+      <h2 className="font-bold border-b border-black mb-1 mt-3 text-sm">治療介入歴</h2>
+      {player.treatments.length === 0 ? (
+        <p className="text-xs mb-2">記録なし</p>
+      ) : (
+        <table className="w-full text-xs mb-2 border-collapse">
+          <thead>
+            <tr className="text-left border-b border-slate-400">
+              <th className="py-0.5 pr-2">日付</th>
+              <th className="py-0.5 pr-2">種別</th>
+              <th className="py-0.5">メモ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {player.treatments.map((t) => (
+              <tr key={t.id} className="border-b border-slate-200">
+                <td className="py-0.5 pr-2">{t.treatedDate || "-"}</td>
+                <td className="py-0.5 pr-2">{TREATMENT_LABELS[t.type] || t.type}</td>
+                <td className="py-0.5">{t.note || ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
-      <div className="bg-white rounded-xl border border-slate-200 p-5">
-        <h4 className="text-sm font-bold text-slate-700 mb-3">
-          Phase {player.currentPhase} クリア条件の確認
-        </h4>
-        <div className="space-y-2">
-          {phaseInfo?.conditions.map((c, idx) => (
-            <button
-              key={idx}
-              onClick={() => toggleChecklist(player.id, idx)}
-              className="w-full flex items-center gap-2.5 text-left px-3 py-2.5 rounded-lg border border-slate-200 hover:bg-slate-50"
-            >
-              {player.checklist[idx] ? (
-                <CheckCircle2 size={18} className="text-green-600 shrink-0" />
-              ) : (
-                <Circle size={18} className="text-slate-300 shrink-0" />
-              )}
-              <span className={`text-sm ${player.checklist[idx] ? "text-slate-800" : "text-slate-500"}`}>{c}</span>
-            </button>
-          ))}
-          {(!phaseInfo || phaseInfo.conditions.length === 0) && (
-            <p className="text-sm text-slate-400">このフェーズに条件は設定されていません。</p>
-          )}
-        </div>
+      <h2 className="font-bold border-b border-black mb-1 mt-3 text-sm">最近のコンディション推移</h2>
+      {recentReports.length === 0 ? (
+        <p className="text-xs mb-2">記録なし</p>
+      ) : (
+        <table className="w-full text-xs mb-2 border-collapse">
+          <thead>
+            <tr className="text-left border-b border-slate-400">
+              <th className="py-0.5 pr-2">日付</th>
+              <th className="py-0.5 pr-2">VAS</th>
+              <th className="py-0.5 pr-2">疲労度</th>
+              <th className="py-0.5">睡眠の質</th>
+            </tr>
+          </thead>
+          <tbody>
+            {recentReports.map((r, i) => (
+              <tr key={i} className="border-b border-slate-200">
+                <td className="py-0.5 pr-2">{r.date}</td>
+                <td className="py-0.5 pr-2">{r.vas}</td>
+                <td className="py-0.5 pr-2">{r.fatigue ?? "-"}</td>
+                <td className="py-0.5">{r.sleepQuality ?? "-"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
-        {player.currentPhase < 5 && (
-          <button
-            onClick={() => advancePhase(player.id)}
-            disabled={!allChecked}
-            className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-blue-600 text-white font-bold text-sm hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
-          >
-            次のフェーズへ進める <ArrowRight size={16} />
-          </button>
-        )}
-        {player.currentPhase >= 5 && !player.completedAt && (
-          <button
-            onClick={() => markCompleted(player.id)}
-            disabled={!allChecked}
-            className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-green-600 text-white font-bold text-sm hover:bg-green-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
-          >
-            <ShieldCheck size={16} /> 完全復帰として記録する
-          </button>
-        )}
-        {player.completedAt && (
-          <div className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-green-50 text-green-700 font-bold text-sm">
-            <Trophy size={16} /> 完全復帰 記録済み（{new Date(player.completedAt).toLocaleDateString("ja-JP")}）
-          </div>
-        )}
-      </div>
-
-      <ChatPanel
-        messages={player.messages}
-        myRole="staff"
-        title={`${player.name} さんとのチャット`}
-        roleOptions={CHAT_STAFF_ROLES}
-        onSend={onSendMessage}
-      />
-
-      <div className="bg-white rounded-xl border border-slate-200 p-5">
-        <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
-          <History size={16} className="text-blue-600" /> 面談履歴（{myMeetings.length}件）
-        </h4>
-        {myMeetings.length === 0 && (
-          <p className="text-sm text-slate-400">まだ面談の予約・実施履歴がありません。</p>
-        )}
-        <ul className="space-y-2">
-          {myMeetings.map((s) => {
-            const held = parseDatetime(s.datetime) <= new Date();
-            const daysAfter = player.injuryDate ? diffDaysBetween(player.injuryDate, s.datetime) : null;
-            return <MeetingRow key={s.id} slot={s} held={held} daysAfter={daysAfter} onSaveZoomUrl={onSaveZoomUrl} />;
-          })}
-        </ul>
-        <p className="text-[10px] text-slate-400 mt-3">
-          面談枠の登録・公開は「日程調整」タブから行えます。
-        </p>
-      </div>
+      <h2 className="font-bold border-b border-black mb-1 mt-3 text-sm">面談履歴</h2>
+      {myMeetings.length === 0 ? (
+        <p className="text-xs">記録なし</p>
+      ) : (
+        <table className="w-full text-xs border-collapse">
+          <thead>
+            <tr className="text-left border-b border-slate-400">
+              <th className="py-0.5 pr-2">日時</th>
+              <th className="py-0.5">状態</th>
+            </tr>
+          </thead>
+          <tbody>
+            {myMeetings.map((s) => (
+              <tr key={s.id} className="border-b border-slate-200">
+                <td className="py-0.5 pr-2">{s.datetime}</td>
+                <td className="py-0.5">{parseDatetime(s.datetime) <= new Date() ? "実施済み" : "予定"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }
@@ -2168,7 +2539,7 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
     try {
       const [inserted] = await sbInsert("players", payload);
       setPlayerDirectory((prev) => [...prev, { id: inserted.id, name: inserted.name }]);
-      setMyPlayer(normalizePlayer({ ...inserted, reports: [], messages: [] }));
+      setMyPlayer(normalizePlayer({ ...inserted, reports: [], messages: [], treatments: [] }));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -2361,6 +2732,8 @@ function InjuryDateCard({ orgId, player, protocol, setMyPlayer }) {
 
 function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, setSlots, onLogout }) {
   const [vas, setVas] = useState(3);
+  const [fatigue, setFatigue] = useState(3);
+  const [sleepQuality, setSleepQuality] = useState(7);
   const [mental, setMental] = useState(3);
   const [honne, setHonne] = useState("");
   const [sos, setSos] = useState(false);
@@ -2394,7 +2767,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
   const handleSubmitReport = async () => {
     setSending(true);
     setError(null);
-    const newReport = { date: todayStr(), vas, mental, honne: honne.trim() };
+    const newReport = { date: todayStr(), vas, mental, honne: honne.trim(), fatigue, sleepQuality };
     try {
       await sbInsert("reports", {
         player_id: player.id,
@@ -2402,6 +2775,8 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
         vas: newReport.vas,
         mental: newReport.mental,
         honne: newReport.honne,
+        fatigue: newReport.fatigue,
+        sleep_quality: newReport.sleepQuality,
       });
       await sbUpdate("players", player.id, { sos });
       setMyPlayer((prev) => ({ ...prev, sos, reports: [...prev.reports, newReport] }));
@@ -2534,6 +2909,40 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
         <div className="flex justify-between text-[10px] text-slate-400 mb-4">
           <span>0（痛みなし）</span>
           <span>10（最悪）</span>
+        </div>
+
+        <label className="text-xs text-slate-500 flex justify-between">
+          <span>疲労度</span>
+          <span className="font-bold text-orange-500">{fatigue}</span>
+        </label>
+        <input
+          type="range"
+          min={0}
+          max={10}
+          value={fatigue}
+          onChange={(e) => setFatigue(Number(e.target.value))}
+          className="w-full mt-2 accent-orange-500"
+        />
+        <div className="flex justify-between text-[10px] text-slate-400 mb-4">
+          <span>0（疲労なし）</span>
+          <span>10（極度の疲労）</span>
+        </div>
+
+        <label className="text-xs text-slate-500 flex justify-between">
+          <span>睡眠の質</span>
+          <span className="font-bold text-blue-500">{sleepQuality}</span>
+        </label>
+        <input
+          type="range"
+          min={0}
+          max={10}
+          value={sleepQuality}
+          onChange={(e) => setSleepQuality(Number(e.target.value))}
+          className="w-full mt-2 accent-blue-500"
+        />
+        <div className="flex justify-between text-[10px] text-slate-400 mb-4">
+          <span>0（最悪）</span>
+          <span>10（最高）</span>
         </div>
 
         <label className="text-xs text-slate-500">今日の気分</label>
