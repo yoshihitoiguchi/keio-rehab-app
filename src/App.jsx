@@ -111,7 +111,7 @@ async function fetchSetting(orgId, key) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v11 (分類分岐・可変フェーズ)";
+const APP_BUILD = "v12 (基準提示・人が確認)";
 
 // ---- DBの行(snake_case) <-> アプリ内部表現(camelCase) の変換 ----
 function normalizeProtocol(row) {
@@ -225,7 +225,9 @@ function normalizePlayer(row) {
         fear: r.fear ?? null,
         giveWayFootstrike: r.give_way_footstrike ?? null,
         rpe: r.rpe ?? null,
-        triage: r.triage ?? null,
+        selfCompensation: r.self_compensation ?? null,
+        selfSevereSymptom: r.self_severe_symptom ?? null,
+        observedBy: r.observed_by ?? null,
       })),
     messages: (row.messages || [])
       .slice()
@@ -277,18 +279,94 @@ const PAIN_TYPES = [
 ];
 const PAIN_TYPE_LABELS = Object.fromEntries(PAIN_TYPES.map((p) => [p.value, p.label]));
 
-// 要件②：実務的なトリアージ判定ロジック（前日比VAS急増・VAS7以上・歩行困難な鋭い痛みでSOS）
-function computeTriage(vas, prevVas, compensation, severeSymptom) {
-  const delta = prevVas === null || prevVas === undefined ? 0 : vas - prevVas;
-  if (delta >= 3 || vas >= 7 || severeSymptom) return "red";
-  if (compensation || (vas >= 4 && vas <= 6)) return "yellow";
-  return "green";
+// ============================================================
+// アプリは判定しない。入力と、それに当てはまるプロトコルの基準を並べて示す。
+// 文言は医師・コーチが定めた原文のまま使う（言い換えない）。
+// ============================================================
+const STOP_CRITERIA = [
+  {
+    id: "vas7",
+    text: "痛みが7以上の日は、その日のメニューを中止する",
+    match: (r) => r.vas >= 7,
+    fact: (r) => `痛み ${r.vas}`,
+  },
+  {
+    id: "vas_jump",
+    text: "痛みが前日から3以上増えた日は、その日のメニューを中止する",
+    match: (r) => r.prevVas !== null && r.prevVas !== undefined && r.vas - r.prevVas >= 3,
+    fact: (r) => `前日 ${r.prevVas} → 今日 ${r.vas}`,
+  },
+  {
+    id: "severe",
+    text: "歩行が困難な鋭い痛みがある日は、その日のメニューを中止する",
+    match: (r) => Boolean(r.severeSymptom),
+    fact: () => "歩行が困難な鋭い痛み あり",
+  },
+];
+const REDUCE_CRITERIA = [
+  {
+    id: "vas46",
+    text: "痛みが4〜6の日は、負荷・メニューを下げる",
+    match: (r) => r.vas >= 4 && r.vas <= 6,
+    fact: (r) => `痛み ${r.vas}`,
+  },
+  {
+    id: "comp",
+    text: "代償動作がある日は、負荷・メニューを下げる",
+    match: (r) => Boolean(r.compensation),
+    fact: () => "代償動作 あり",
+  },
+];
+// 中止の基準を先に置く
+function matchedCriteria(r) {
+  return [...STOP_CRITERIA, ...REDUCE_CRITERIA]
+    .filter((c) => c.match(r))
+    .map((c) => ({ id: c.id, text: c.text, fact: c.fact(r) }));
 }
-const TRIAGE_INFO = {
-  red: { label: "中止/SOS", bg: "bg-red-100", text: "text-red-700" },
-  yellow: { label: "負荷・メニュー変更", bg: "bg-yellow-100", text: "text-yellow-700" },
-  green: { label: "継続OK", bg: "bg-green-100", text: "text-green-700" },
-};
+
+// 入力内容に関係なく常に出す注記（出し分けない）
+const DISCLAIMER_MAIN =
+  "このアプリは診断を行いません。表示される基準は、医師とコーチが定めた目安です。診断と治療方針は診断した医師に従ってください。";
+const DISCLAIMER_SYMPTOM =
+  "しびれ、安静時や夜間の痛み、練習中の急な強い痛みなど、気になる症状があるときは医療機関に相談してください。";
+
+function StandingNotice() {
+  return (
+    <div className="bg-slate-100 border border-slate-200 rounded-xl p-3 space-y-1">
+      <p className="text-[11px] text-slate-600 leading-relaxed">{DISCLAIMER_MAIN}</p>
+      <p className="text-[11px] text-slate-600 leading-relaxed">{DISCLAIMER_SYMPTOM}</p>
+    </div>
+  );
+}
+
+// 「今日の入力に当てはまる基準」を並べて示すだけのコンポーネント
+function CriteriaResult({ report }) {
+  const matched = matchedCriteria(report);
+  return (
+    <div className="space-y-2">
+      <div className="bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
+        <p className="text-xs text-blue-700 font-bold">入力はチーム全員に共有されました</p>
+      </div>
+      <div>
+        <p className="text-xs font-bold text-slate-700 mb-1.5">今日の入力に当てはまる基準</p>
+        {matched.length === 0 ? (
+          <div className="border border-slate-200 rounded-lg px-3 py-2">
+            <p className="text-sm text-slate-700">継続</p>
+          </div>
+        ) : (
+          <ul className="space-y-1.5">
+            {matched.map((c) => (
+              <li key={c.id} className="border border-slate-200 rounded-lg px-3 py-2">
+                <p className="text-sm text-slate-800">{c.text}</p>
+                <p className="text-[11px] text-slate-500 mt-0.5">— {c.fact}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
 
 
 const SCHEDULING_ROLES = [
@@ -344,10 +422,9 @@ function latestReport(player) {
   if (!player.reports.length) return null;
   return player.reports[player.reports.length - 1];
 }
+// SOSは「選手からスタッフへの連絡」。判定ではない。
 function isAlert(player) {
-  const r = latestReport(player);
-  if (!r) return player.sos;
-  return player.sos || r.triage === "red";
+  return Boolean(player.sos);
 }
 // 分類バリアントの短縮ラベル（例：BAMIC 2b / 大腿二頭筋 / 近位）
 function classificationLabel(player) {
@@ -745,6 +822,7 @@ function OrgLogin({ onAuthed }) {
         <p className="text-xs text-slate-400 text-center mt-4">
           初めての場合は組織ID「default」・初期パスワード「1234」でログインできます。
         </p>
+        <p className="text-[10px] text-slate-300 text-center mt-2">{APP_BUILD}</p>
       </div>
     </div>
   );
@@ -2099,7 +2177,8 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
     }
   };
 
-  const advancePhase = async (playerId) => {
+  // 自動では進めない。人が確認したときだけ呼ばれ、確認者と日時を残す。
+  const advancePhase = async (playerId, confirmedByRole = "staff", confirmedByName = "") => {
     const player = coachPlayers.find((p) => p.id === playerId);
     if (!player) return;
     const protocol = masterProtocols.find((mp) => mp.id === player.protocolId);
@@ -2128,6 +2207,14 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
         protocol_id: player.protocolId,
         phase_number: nextPhase,
         entered_at: now,
+      });
+      await sbInsert("phase_advances", {
+        player_id: playerId,
+        from_phase: player.currentPhase,
+        to_phase: nextPhase,
+        confirmed_by_role: confirmedByRole,
+        confirmed_by_name: confirmedByName || null,
+        confirmed_at: now,
       });
     } catch (err) {
       setError(err.message);
@@ -2208,23 +2295,27 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
     setCoachPlayers((prev) => prev.map((p) => (p.id === playerId ? { ...p, imagingFindings: text } : p)));
   };
 
-  // 要件②：前日比VAS急増・代償動作・歩行困難な鋭い痛みから自動トリアージを記録する
-  const assessReport = async (playerId, reportId, vas, prevVas, compensation, severeSymptom) => {
-    const triage = computeTriage(vas, prevVas, compensation, severeSymptom);
-    await sbUpdate("reports", reportId, { compensation, severe_symptom: severeSymptom, triage });
+  // 判定はしない。観察した事実だけを記録する。
+  const assessReport = async (playerId, reportId, compensation, severeSymptom, observerName) => {
+    await sbUpdate("reports", reportId, {
+      compensation,
+      severe_symptom: severeSymptom,
+      observed_by: observerName || null,
+    });
     setCoachPlayers((prev) =>
       prev.map((p) =>
         p.id === playerId
           ? {
               ...p,
               reports: p.reports.map((r) =>
-                r.id === reportId ? { ...r, compensation, severeSymptom, triage } : r
+                r.id === reportId
+                  ? { ...r, compensation, severeSymptom, observedBy: observerName || null }
+                  : r
               ),
             }
           : p
       )
     );
-    return triage;
   };
 
   const saveZoomUrl = async (slotId, url) => {
@@ -2356,16 +2447,8 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
                       </span>
                     )}
                     {r && (
-                      <span
-                        className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                          r.vas >= 7
-                            ? "bg-red-100 text-red-600"
-                            : r.vas >= 4
-                            ? "bg-orange-100 text-orange-600"
-                            : "bg-green-100 text-green-600"
-                        }`}
-                      >
-                        VAS {r.vas}
+                      <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+                        痛み {r.vas}
                       </span>
                     )}
                   </div>
@@ -2405,8 +2488,8 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
             onAddTreatments={(types, note, date) => addTreatments(selectedPlayer.id, types, note, date)}
             onDeleteTreatment={(id) => deleteTreatment(selectedPlayer.id, id)}
             onSaveImagingFindings={(text) => saveImagingFindings(selectedPlayer.id, text)}
-            onAssessReport={(reportId, vas, prevVas, compensation, severeSymptom) =>
-              assessReport(selectedPlayer.id, reportId, vas, prevVas, compensation, severeSymptom)
+            onAssessReport={(reportId, compensation, severeSymptom, observerName) =>
+              assessReport(selectedPlayer.id, reportId, compensation, severeSymptom, observerName)
             }
             onResolveSos={() => resolveSos(selectedPlayer.id)}
             onResolveChatStatus={() => resolveChatStatus(selectedPlayer.id)}
@@ -2441,7 +2524,6 @@ function PlayerDetailPanel({
 }) {
   const report = latestReport(player);
   const phaseInfo = protocol?.phases[player.currentPhase - 1];
-  const allChecked = player.checklist.length > 0 && player.checklist.every(Boolean);
 
   // 要件⑤：同一組織内の実データ（injury_date・completed_at）から直接JavaScriptで算出。
   // モックではなく、指導者が読み込んでいる実際の選手一覧が計算元になる。
@@ -2558,13 +2640,7 @@ function PlayerDetailPanel({
             <div className="grid grid-cols-3 gap-3">
               <div className="bg-slate-50 rounded-lg p-3 text-center">
                 <p className="text-xs text-slate-400 mb-1">痛み(VAS)</p>
-                <p
-                  className={`text-2xl font-bold ${
-                    report.vas >= 7 ? "text-red-500" : report.vas >= 4 ? "text-orange-500" : "text-green-600"
-                  }`}
-                >
-                  {report.vas}
-                </p>
+                <p className="text-2xl font-bold text-slate-800">{report.vas}</p>
               </div>
               <div className="bg-slate-50 rounded-lg p-3 text-center">
                 <p className="text-xs text-slate-400 mb-1">メンタル</p>
@@ -2591,10 +2667,13 @@ function PlayerDetailPanel({
             </div>
           )}
           {report && (
-            <TrainerAssessment
+            <ObservationRecord
               key={report.id}
-              report={report}
-              prevVas={player.reports.length > 1 ? player.reports[player.reports.length - 2].vas : null}
+              report={{
+                ...report,
+                prevVas:
+                  player.reports.length > 1 ? player.reports[player.reports.length - 2].vas : null,
+              }}
               onAssess={onAssessReport}
             />
           )}
@@ -2606,54 +2685,16 @@ function PlayerDetailPanel({
           )}
         </div>
 
-        <div className="bg-white rounded-xl border border-slate-200 p-5">
-          <h4 className="text-sm font-bold text-slate-700 mb-3">
-            Phase {player.currentPhase} クリア条件の確認
-          </h4>
-          <div className="space-y-2">
-            {phaseInfo?.conditions.map((c, idx) => (
-              <button
-                key={idx}
-                onClick={() => toggleChecklist(player.id, idx)}
-                className="w-full flex items-center gap-2.5 text-left px-3 py-2.5 rounded-lg border border-slate-200 hover:bg-slate-50"
-              >
-                {player.checklist[idx] ? (
-                  <CheckCircle2 size={18} className="text-green-600 shrink-0" />
-                ) : (
-                  <Circle size={18} className="text-slate-300 shrink-0" />
-                )}
-                <span className={`text-sm ${player.checklist[idx] ? "text-slate-800" : "text-slate-500"}`}>{c}</span>
-              </button>
-            ))}
-            {(!phaseInfo || phaseInfo.conditions.length === 0) && (
-              <p className="text-sm text-slate-400">このフェーズに条件は設定されていません。</p>
-            )}
-          </div>
+        <GatePanel
+          player={player}
+          protocol={protocol}
+          phaseInfo={phaseInfo}
+          viewerRole="staff"
+          onAdvance={(role, nm) => advancePhase(player.id, role, nm)}
+          onComplete={() => markCompleted(player.id)}
+        />
 
-          {player.currentPhase < phaseCountOf(protocol) && (
-            <button
-              onClick={() => advancePhase(player.id)}
-              disabled={!allChecked}
-              className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-blue-600 text-white font-bold text-sm hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
-            >
-              次のフェーズへ進める <ArrowRight size={16} />
-            </button>
-          )}
-          {player.currentPhase >= phaseCountOf(protocol) && !player.completedAt && (
-            <button
-              onClick={() => markCompleted(player.id)}
-              disabled={!allChecked}
-              className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-green-600 text-white font-bold text-sm hover:bg-green-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
-            >
-              <ShieldCheck size={16} /> 完全復帰として記録する
-            </button>
-          )}
-          {player.completedAt && (
-            <div className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-green-50 text-green-700 font-bold text-sm">
-              <Trophy size={16} /> 完全復帰 記録済み（{new Date(player.completedAt).toLocaleDateString("ja-JP")}）
-            </div>
-          )}
-        </div>
+        <GateAgreementPanel player={player} />
 
         <ImagingFindingsCard player={player} onSave={onSaveImagingFindings} />
 
@@ -2801,36 +2842,442 @@ function SimpleTrendChart({ reports }) {
 }
 
 // ---------- 治療介入の記録 ----------
-// ---------- トレーナーによる圧痛・代償動作の評価と自動トリアージ ----------
-function TrainerAssessment({ report, prevVas, onAssess }) {
+// ---------- 観察の記録（代償動作・歩行が困難な鋭い痛み） ----------
+// ============================================================
+// GATE：項目ごとに「できた／できていない」を本人・スタッフが記録する。
+//   ・文言は原案のまま表示する（言い換えない・条件を足さない）
+//   ・誰か一人が「できた」とチェックすれば満たしたものとして扱う
+//   ・「できていない」の記録も消さずに残して見えるようにする
+//   ・「実施後〜翌日に症状増悪なし」は翌日の日報から自動で見る
+//   ・フェーズは自動で進めない。条件がそろったら人が確認して進める
+// ============================================================
+function isNextDayItem(text) {
+  return text.includes("実施後") && text.includes("翌日");
+}
+
+// 本人とスタッフの一致率（「選手だけで回せるか」を確かめるための指標）
+// 「方針に迷ったとき」の面談申し込み（受付のみ。決済は後）
+// 医師との面談は実装だけ用意し、まだ公開しない。
+const CONSULTATION_KINDS = [
+  { value: "coach", label: "コーチと話す" },
+  { value: "trainer", label: "トレーナーと話す" },
+  { value: "video_review", label: "動画を送って評価してもらう" },
+  // { value: "doctor", label: "医師と話す" },  ← 公開範囲が決まるまで出さない
+];
+
+function ConsultationRequestCard({ orgId, player }) {
+  const [open, setOpen] = useState(false);
+  const [kind, setKind] = useState("coach");
+  const [note, setNote] = useState("");
+  const [sending, setSending] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState(null);
+
+  const submit = async () => {
+    setSending(true);
+    setError(null);
+    try {
+      await sbInsert("consultation_requests", {
+        player_id: player.id,
+        org_id: orgId,
+        kind,
+        note: note.trim() || null,
+      });
+      setDone(true);
+      setNote("");
+      setOpen(false);
+      setTimeout(() => setDone(false), 3000);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+      <p className="text-sm font-bold text-slate-700 mb-1">方針に迷ったとき</p>
+      <p className="text-[11px] text-slate-400 mb-3">
+        進め方に迷ったら、面談を申し込めます。申し込みを受け付けるところまでの対応です。
+      </p>
+      {done && <p className="text-xs text-green-600 mb-2">申し込みを受け付けました。</p>}
+      {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
+      {!open ? (
+        <button
+          onClick={() => setOpen(true)}
+          className="w-full py-2.5 rounded-lg border border-slate-300 text-slate-600 text-sm font-medium hover:bg-slate-50"
+        >
+          面談を申し込む
+        </button>
+      ) : (
+        <div className="space-y-2">
+          <select
+            value={kind}
+            onChange={(e) => setKind(e.target.value)}
+            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
+          >
+            {CONSULTATION_KINDS.map((k) => (
+              <option key={k.value} value={k.value}>
+                {k.label}
+              </option>
+            ))}
+          </select>
+          <textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            rows={3}
+            placeholder="相談したいこと（任意）"
+            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={() => setOpen(false)}
+              className="flex-1 py-2 rounded-lg border border-slate-300 text-slate-600 text-sm"
+            >
+              やめる
+            </button>
+            <button
+              onClick={submit}
+              disabled={sending}
+              className="flex-1 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium disabled:bg-slate-300"
+            >
+              {sending ? "送信中..." : "申し込む"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GateAgreementPanel({ player }) {
+  const [rows, setRows] = useState([]);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    sbSelect(
+      "gate_check_agreement",
+      `?player_id=eq.${encodeURIComponent(player.id)}&select=*&order=phase_number.asc`
+    )
+      .then((r) => active && setRows(r || []))
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [player.id]);
+
+  if (rows.length === 0) return null;
+  const agreed = rows.filter((r) => r.agreed).length;
+  const rate = Math.round((agreed / rows.length) * 100);
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-5">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between text-sm font-bold text-slate-700"
+      >
+        <span>本人とスタッフの一致率：{rate}%（{agreed}/{rows.length}項目）</span>
+        <span className="text-xs font-normal text-slate-400">{open ? "閉じる" : "詳細"}</span>
+      </button>
+      {open && (
+        <table className="w-full text-[11px] mt-3 border-collapse">
+          <thead>
+            <tr className="text-left border-b border-slate-200 text-slate-500">
+              <th className="py-1 pr-2">PHASE</th>
+              <th className="py-1 pr-2">項目</th>
+              <th className="py-1 pr-2">本人</th>
+              <th className="py-1 pr-2">スタッフ</th>
+              <th className="py-1">一致</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i} className="border-b border-slate-100 text-slate-600">
+                <td className="py-1 pr-2">{r.phase_number}</td>
+                <td className="py-1 pr-2">{r.item_index + 1}</td>
+                <td className="py-1 pr-2">{r.self_result ? "できた" : "できていない"}</td>
+                <td className="py-1 pr-2">{r.staff_result ? "できた" : "できていない"}</td>
+                <td className={`py-1 ${r.agreed ? "text-green-600" : "text-orange-600"}`}>
+                  {r.agreed ? "一致" : "不一致"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function GatePanel({
+  player,
+  protocol,
+  phaseInfo,
+  viewerRole, // 'self' | 'staff'
+  onAdvance,
+  onComplete,
+}) {
+  const [checks, setChecks] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busyIdx, setBusyIdx] = useState(null);
+  const [videoFor, setVideoFor] = useState(null);
+  const [videoUrl, setVideoUrl] = useState("");
+  const [checkerName, setCheckerName] = useState("");
+  const [error, setError] = useState(null);
+
+  const items = phaseInfo?.conditions ?? [];
+  const phase = player.currentPhase;
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const rows = await sbSelect(
+        "gate_item_checks",
+        `?player_id=eq.${encodeURIComponent(player.id)}&phase_number=eq.${phase}` +
+          `&select=*&order=created_at.desc`
+      );
+      setChecks(rows || []);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    load();
+  }, [player.id, phase]);
+
+  const latestFor = (idx, role) =>
+    checks.find((c) => c.item_index === idx && c.checker_role === role) || null;
+
+  // 翌日の日報：このフェーズで最初にチェックした日より後の日報を探す
+  const firstCheckDate = checks.length
+    ? checks.map((c) => c.created_at).sort()[0].slice(0, 10)
+    : null;
+  const nextDayReport = firstCheckDate
+    ? player.reports.slice().reverse().find((r) => r.date > firstCheckDate) || null
+    : null;
+  const nextDayStop = nextDayReport
+    ? matchedCriteria({
+        vas: nextDayReport.vas,
+        prevVas: null,
+        compensation: nextDayReport.compensation || nextDayReport.selfCompensation,
+        severeSymptom: nextDayReport.severeSymptom || nextDayReport.selfSevereSymptom,
+      }).filter((c) => STOP_CRITERIA.some((sc) => sc.id === c.id))
+    : [];
+
+  const itemState = (idx, text) => {
+    if (isNextDayItem(text)) {
+      if (!nextDayReport) return { ok: false, note: "翌日の日報を待っています", auto: true };
+      if (nextDayStop.length > 0)
+        return {
+          ok: false,
+          note: `翌日の日報が中止の基準に当てはまりました（${nextDayStop[0].fact}）`,
+          auto: true,
+        };
+      return { ok: true, note: `翌日の日報（${nextDayReport.date}）を確認`, auto: true };
+    }
+    const self = latestFor(idx, "self");
+    const staff = latestFor(idx, "staff");
+    const ok = self?.result === true || staff?.result === true;
+    const notes = [];
+    if (self) notes.push(`本人：${self.result ? "できた" : "できていない"}`);
+    if (staff)
+      notes.push(`スタッフ：${staff.result ? "できた" : "できていない"}${staff.checker_name ? `（${staff.checker_name}）` : ""}`);
+    return { ok, note: notes.join(" / "), auto: false, self, staff };
+  };
+
+  const states = items.map((t, i) => itemState(i, t));
+  const satisfied = states.filter((st) => st.ok).length;
+  const allOk = items.length > 0 && states.every((st) => st.ok);
+  const missing = states
+    .map((st, i) => (st.ok ? null : st.auto ? st.note : items[i]))
+    .filter(Boolean);
+
+  const record = async (idx, result) => {
+    setBusyIdx(idx);
+    setError(null);
+    try {
+      const [row] = await sbInsert("gate_item_checks", {
+        player_id: player.id,
+        phase_number: phase,
+        item_index: idx,
+        checker_role: viewerRole,
+        checker_name: checkerName.trim() || null,
+        result,
+        video_url: videoFor === idx && videoUrl.trim() ? videoUrl.trim() : null,
+      });
+      setChecks((prev) => [row, ...prev]);
+      if (videoFor === idx) {
+        setVideoFor(null);
+        setVideoUrl("");
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusyIdx(null);
+    }
+  };
+
+  const isLastPhase = phase >= phaseCountOf(protocol);
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-5">
+      <h4 className="text-sm font-bold text-slate-700 mb-1">
+        PHASE {phase} の GATE（{satisfied}/{items.length}）
+      </h4>
+      <p className="text-[10px] text-slate-400 mb-3">
+        項目ごとに「できた／できていない」を記録します。誰か一人が「できた」とすれば満たしたものとして扱います。
+      </p>
+
+      {loading && <p className="text-xs text-slate-400">読み込み中...</p>}
+      {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
+
+      <div className="space-y-2">
+        {items.map((text, idx) => {
+          const st = states[idx];
+          return (
+            <div
+              key={idx}
+              className={`rounded-lg border px-3 py-2.5 ${
+                st.ok ? "border-green-200 bg-green-50" : "border-slate-200"
+              }`}
+            >
+              <div className="flex items-start gap-2">
+                {st.ok ? (
+                  <CheckCircle2 size={18} className="text-green-600 shrink-0 mt-0.5" />
+                ) : (
+                  <Circle size={18} className="text-slate-300 shrink-0 mt-0.5" />
+                )}
+                <div className="flex-1">
+                  {/* 原案の文言をそのまま表示する */}
+                  <p className="text-sm text-slate-800">{text}</p>
+                  {st.note && <p className="text-[10px] text-slate-500 mt-0.5">{st.note}</p>}
+                  {st.self?.video_url && (
+                    <a
+                      href={st.self.video_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[10px] text-blue-600 underline"
+                    >
+                      添付動画を開く
+                    </a>
+                  )}
+                </div>
+              </div>
+
+              {!st.auto && (
+                <div className="flex flex-wrap items-center gap-1.5 mt-2 ml-6">
+                  <button
+                    onClick={() => record(idx, true)}
+                    disabled={busyIdx === idx}
+                    className="text-[11px] px-2.5 py-1 rounded-full border border-green-300 text-green-700 hover:bg-green-50 disabled:opacity-40"
+                  >
+                    できた
+                  </button>
+                  <button
+                    onClick={() => record(idx, false)}
+                    disabled={busyIdx === idx}
+                    className="text-[11px] px-2.5 py-1 rounded-full border border-slate-300 text-slate-500 hover:bg-slate-50 disabled:opacity-40"
+                  >
+                    できていない
+                  </button>
+                  <button
+                    onClick={() => setVideoFor(videoFor === idx ? null : idx)}
+                    className="text-[11px] text-slate-400 hover:text-blue-600 underline"
+                  >
+                    動画を添付（任意）
+                  </button>
+                </div>
+              )}
+              {videoFor === idx && (
+                <input
+                  value={videoUrl}
+                  onChange={(e) => setVideoUrl(e.target.value)}
+                  placeholder="動画URL（任意・次のチェックに添付されます）"
+                  className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-xs mt-2 ml-6"
+                />
+              )}
+            </div>
+          );
+        })}
+        {items.length === 0 && (
+          <p className="text-sm text-slate-400">このフェーズに条件は設定されていません。</p>
+        )}
+      </div>
+
+      <input
+        value={checkerName}
+        onChange={(e) => setCheckerName(e.target.value)}
+        placeholder={viewerRole === "self" ? "あなたの名前（任意）" : "確認した人（任意）"}
+        className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-xs mt-3"
+      />
+
+      {!allOk && missing.length > 0 && (
+        <div className="mt-3 bg-slate-50 rounded-lg px-3 py-2">
+          <p className="text-[11px] font-bold text-slate-600 mb-1">足りないもの</p>
+          <ul className="text-[11px] text-slate-500 list-disc list-inside space-y-0.5">
+            {missing.map((m, i) => (
+              <li key={i}>{m}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {!isLastPhase && (
+        <button
+          onClick={() => onAdvance(viewerRole, checkerName.trim())}
+          disabled={!allOk}
+          className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-blue-600 text-white font-bold text-sm hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
+        >
+          確認して次のPHASEへ進む <ArrowRight size={16} />
+        </button>
+      )}
+      {isLastPhase && !player.completedAt && onComplete && (
+        <button
+          onClick={() => onComplete()}
+          disabled={!allOk}
+          className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-green-600 text-white font-bold text-sm hover:bg-green-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
+        >
+          <ShieldCheck size={16} /> 確認して復帰を記録する
+        </button>
+      )}
+      {player.completedAt && (
+        <div className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-green-50 text-green-700 font-bold text-sm">
+          <Trophy size={16} /> 復帰 記録済み（{new Date(player.completedAt).toLocaleDateString("ja-JP")}）
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ObservationRecord({ report, onAssess }) {
   const [compensation, setCompensation] = useState(Boolean(report.compensation));
   const [severeSymptom, setSevereSymptom] = useState(Boolean(report.severeSymptom));
+  const [observer, setObserver] = useState(report.observedBy || "");
   const [saving, setSaving] = useState(false);
-  const [result, setResult] = useState(report.triage || null);
+  const [saved, setSaved] = useState(false);
 
-  const handleAssess = async () => {
+  const handleSave = async () => {
     setSaving(true);
     try {
-      const triage = await onAssess(report.id, report.vas, prevVas, compensation, severeSymptom);
-      setResult(triage);
+      await onAssess(report.id, compensation, severeSymptom, observer.trim());
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
     } finally {
       setSaving(false);
     }
   };
 
-  const delta = prevVas === null || prevVas === undefined ? null : report.vas - prevVas;
-
   return (
     <div className="mt-3 pt-3 border-t border-slate-100">
-      <p className="text-xs font-bold text-slate-600 mb-2 flex items-center gap-1.5">
-        <Stethoscope size={14} className="text-blue-600" /> トレーナー評価（自動トリアージ）
+      <p className="text-xs font-bold text-slate-600 mb-1 flex items-center gap-1.5">
+        <Stethoscope size={14} className="text-blue-600" /> 基準チェック（観察の記録）
       </p>
-      {delta !== null && (
-        <p className="text-[11px] text-slate-400 mb-2">
-          前回VAS {prevVas} → 今回VAS {report.vas}（{delta >= 0 ? "+" : ""}
-          {delta}）
-        </p>
-      )}
+      <p className="text-[10px] text-slate-400 mb-2">
+        観察した事実を記録します。選手本人の申告とは別に保存されます。
+      </p>
       <div className="flex flex-wrap items-center gap-3 mb-2">
         <label className="flex items-center gap-1.5 text-xs text-slate-600">
           <input type="checkbox" checked={compensation} onChange={(e) => setCompensation(e.target.checked)} />
@@ -2838,21 +3285,37 @@ function TrainerAssessment({ report, prevVas, onAssess }) {
         </label>
         <label className="flex items-center gap-1.5 text-xs text-slate-600">
           <input type="checkbox" checked={severeSymptom} onChange={(e) => setSevereSymptom(e.target.checked)} />
-          歩行困難な鋭い痛みがある
+          歩行が困難な鋭い痛みあり
         </label>
-        <button
-          onClick={handleAssess}
-          disabled={saving}
-          className="ml-auto px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 disabled:bg-slate-300"
-        >
-          {saving ? "判定中..." : "評価して記録"}
-        </button>
       </div>
-      {result && (
-        <div className={`flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-bold ${TRIAGE_INFO[result].bg} ${TRIAGE_INFO[result].text}`}>
-          {TRIAGE_INFO[result].label}
-        </div>
-      )}
+      <div className="flex items-center gap-2">
+        <input
+          value={observer}
+          onChange={(e) => setObserver(e.target.value)}
+          placeholder="観察した人（任意）"
+          className="flex-1 border border-slate-300 rounded-lg px-2 py-1.5 text-xs"
+        />
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 disabled:bg-slate-300 shrink-0"
+        >
+          {saving ? "記録中..." : "観察を記録"}
+        </button>
+        {saved && <span className="text-xs text-green-600 shrink-0">記録しました</span>}
+      </div>
+
+      <div className="mt-3">
+        <p className="text-[10px] text-slate-400 mb-1">この日の入力に当てはまる基準</p>
+        <CriteriaResult
+          report={{
+            vas: report.vas,
+            prevVas: report.prevVas ?? null,
+            compensation: compensation || report.selfCompensation,
+            severeSymptom: severeSymptom || report.selfSevereSymptom,
+          }}
+        />
+      </div>
     </div>
   );
 }
@@ -3564,7 +4027,7 @@ function UsageGuide() {
         <ul className="mt-3 text-xs text-blue-700 space-y-1.5 list-disc list-inside">
           <li>「今日のコンディション報告」で毎日、痛みの強さ・気分・本音を入力して送信してください。</li>
           <li>
-            強い不安や痛みがあるときは「🆘SOSを送る」をオンにしてから送信すると、指導者に赤いアラートで通知されます。
+            強い不安や痛みがあるときは「スタッフに連絡する（SOS）」をオンにして送信すると、スタッフに届きます。
           </li>
           <li>「面談予約」から公開されている枠をタップするだけで、面談を予約できます。</li>
           <li>予約後にZoom等のURLが設定されると「面談に参加」ボタンから直接参加できます。</li>
@@ -3636,6 +4099,7 @@ function InjuryDateCard({ orgId, player, protocol, setMyPlayer }) {
       {avg && avg.sample_size > 0 ? (
         <p className="text-xs text-blue-600 mt-2 flex items-start gap-1">
           <TrendingUp size={14} className="shrink-0 mt-0.5" />
+          {avg.sample_size < 3 && "（件数が少ないため参考値）"}
           過去に同じ怪我を完遂した{avg.sample_size}人の平均は、受傷から約
           {Math.round((avg.avg_days / 7) * 10) / 10}週間（{avg.avg_days}日）でした。目安にしてください。
         </p>
@@ -3707,7 +4171,11 @@ function PhaseTimelineComparison({ player, protocol }) {
                     <span className={`font-bold ${PHASE_TEXT_COLORS[n]}`}>Phase {n}</span>
                     <span className="text-slate-400">
                       {own !== undefined ? `あなた: ${own}日` : "未到達"}
-                      {g && g.sample_size > 0 ? ` ／ 全組織平均: ${g.avg_days}日（${g.sample_size}件）` : ""}
+                      {g && g.sample_size > 0
+                        ? ` ／ 平均: ${g.avg_days}日（${g.sample_size}件${
+                            g.sample_size < 3 ? "・件数が少ないため参考値" : ""
+                          }）`
+                        : ""}
                     </span>
                   </div>
                   <div className="space-y-1">
@@ -3750,6 +4218,15 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
   const [mental, setMental] = useState(3);
   const [honne, setHonne] = useState("");
   const [sos, setSos] = useState(false);
+  // 本人の申告（スタッフがいない選手でも基準を出せるように）
+  const [selfCompensation, setSelfCompensation] = useState(false);
+  const [selfSevereSymptom, setSelfSevereSymptom] = useState(false);
+  // PHASEで出し分ける項目
+  const [fearLevel, setFearLevel] = useState(0);
+  const [slippingContact, setSlippingContact] = useState(false);
+  const [rpe, setRpe] = useState(70);
+  // 送信結果（基準の提示に使う）
+  const [submitted, setSubmitted] = useState(null);
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
   const [error, setError] = useState(null);
@@ -3780,7 +4257,17 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
   const handleSubmitReport = async () => {
     setSending(true);
     setError(null);
-    const newReport = { date: todayStr(), vas, mental, honne: honne.trim(), fatigue, sleepQuality };
+    const prevVas = player.reports.length ? player.reports[player.reports.length - 1].vas : null;
+    const newReport = {
+      date: todayStr(),
+      vas,
+      mental,
+      honne: honne.trim(),
+      fatigue,
+      sleepQuality,
+      selfCompensation,
+      selfSevereSymptom,
+    };
     try {
       await sbInsert("reports", {
         player_id: player.id,
@@ -3790,13 +4277,26 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
         honne: newReport.honne,
         fatigue: newReport.fatigue,
         sleep_quality: newReport.sleepQuality,
+        self_compensation: selfCompensation,
+        self_severe_symptom: selfSevereSymptom,
+        fear_level: player.currentPhase >= 5 ? fearLevel : null,
+        slipping_contact: player.currentPhase >= 6 ? slippingContact : null,
+        rpe: player.currentPhase >= 7 ? rpe : null,
       });
       await sbUpdate("players", player.id, { sos });
       setMyPlayer((prev) => ({ ...prev, sos, reports: [...prev.reports, newReport] }));
+      // 判定はしない。当てはまる基準を並べて示すためのデータだけ保持する。
+      setSubmitted({
+        vas,
+        prevVas,
+        compensation: selfCompensation,
+        severeSymptom: selfSevereSymptom,
+      });
       setSent(true);
       setHonne("");
       setSos(false);
-      setTimeout(() => setSent(false), 2500);
+      setSelfCompensation(false);
+      setSelfSevereSymptom(false);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -3811,6 +4311,50 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
       await sbUpdate("players", player.id, { booked_slot_id: slotId });
       setSlots((prev) => prev.map((s) => (s.id === slotId ? { ...s, bookedBy: player.id } : s)));
       setMyPlayer((prev) => ({ ...prev, bookedSlotId: slotId }));
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  // 本人が確認してフェーズを進める（自動では進めない）
+  const advanceOwnPhase = async (role, nm) => {
+    const nextPhase = Math.min(phaseCountOf(protocol), player.currentPhase + 1);
+    const nextCount = protocol?.phases[nextPhase - 1]?.conditions.length ?? 0;
+    const now = new Date().toISOString();
+    try {
+      await sbUpdate("players", player.id, {
+        current_phase: nextPhase,
+        checklist: Array(nextCount).fill(false),
+      });
+      await sb(
+        `phase_history?player_id=eq.${encodeURIComponent(player.id)}&phase_number=eq.${player.currentPhase}&left_at=is.null`,
+        { method: "PATCH", body: JSON.stringify({ left_at: now }), prefer: "return=minimal" }
+      );
+      await sbInsert("phase_history", {
+        player_id: player.id,
+        protocol_id: player.protocolId,
+        phase_number: nextPhase,
+        entered_at: now,
+      });
+      await sbInsert("phase_advances", {
+        player_id: player.id,
+        from_phase: player.currentPhase,
+        to_phase: nextPhase,
+        confirmed_by_role: role,
+        confirmed_by_name: nm || null,
+        confirmed_at: now,
+      });
+      setMyPlayer((prev) => ({ ...prev, currentPhase: nextPhase, checklist: Array(nextCount).fill(false) }));
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const completeOwn = async () => {
+    const now = new Date().toISOString();
+    try {
+      await sbUpdate("players", player.id, { completed_at: now });
+      setMyPlayer((prev) => ({ ...prev, completedAt: now }));
     } catch (err) {
       setError(err.message);
     }
@@ -3884,6 +4428,8 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
       {tab === "dashboard" && (
         <>
+          <StandingNotice />
+
           <UsageGuide />
 
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
@@ -3954,6 +4500,17 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
           )}
 
           <InjuryDateCard orgId={orgId} player={player} protocol={protocol} setMyPlayer={setMyPlayer} />
+
+          <GatePanel
+            player={player}
+            protocol={protocol}
+            phaseInfo={phaseInfo}
+            viewerRole="self"
+            onAdvance={(role, nm) => advanceOwnPhase(role, nm)}
+            onComplete={completeOwn}
+          />
+
+          <ConsultationRequestCard orgId={orgId} player={player} />
 
           <PhaseTimelineComparison player={player} protocol={protocol} />
 
@@ -4031,7 +4588,11 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
       {tab === "report" && (
         <>
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-            <p className="text-sm font-bold text-slate-700 mb-4">今日のコンディション報告</p>
+            <p className="text-sm font-bold text-slate-700 mb-3">今日のコンディション報告</p>
+
+            <div className="mb-4">
+              <StandingNotice />
+            </div>
 
             <label className="text-xs text-slate-500 flex justify-between">
               <span>痛みの強さ（VAS）</span>
@@ -4118,13 +4679,92 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
               className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
 
+            <div className="border border-slate-200 rounded-lg p-3 mb-3 space-y-2">
+              <p className="text-xs font-bold text-slate-600">今日の状態</p>
+              <label className="flex items-start gap-2 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={selfSevereSymptom}
+                  onChange={(e) => setSelfSevereSymptom(e.target.checked)}
+                  className="mt-0.5"
+                />
+                歩行が困難な鋭い痛みがある
+              </label>
+              <label className="flex items-start gap-2 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={selfCompensation}
+                  onChange={(e) => setSelfCompensation(e.target.checked)}
+                  className="mt-0.5"
+                />
+                かばう動き（代償動作）が出ている
+              </label>
+
+              {player.currentPhase >= 5 && (
+                <div className="pt-2 border-t border-slate-100">
+                  <label className="text-xs text-slate-500 flex justify-between">
+                    <span>恐怖心</span>
+                    <span className="font-bold text-slate-600">{fearLevel}</span>
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={10}
+                    value={fearLevel}
+                    onChange={(e) => setFearLevel(Number(e.target.value))}
+                    className="w-full mt-1 accent-slate-600"
+                  />
+                  <div className="flex justify-between text-[10px] text-slate-400">
+                    <span>0（なし）</span>
+                    <span>10（強い）</span>
+                  </div>
+                </div>
+              )}
+
+              {player.currentPhase >= 6 && (
+                <div className="pt-2 border-t border-slate-100">
+                  <label className="flex items-start gap-2 text-xs text-slate-600">
+                    <input
+                      type="checkbox"
+                      checked={slippingContact}
+                      onChange={(e) => setSlippingContact(e.target.checked)}
+                      className="mt-0.5"
+                    />
+                    抜ける接地が出た
+                  </label>
+                  <p className="text-[10px] text-slate-400 mt-1 ml-5">
+                    抜ける接地＝地面を蹴る → 脚が流れる → 前接地になる接地。
+                  </p>
+                </div>
+              )}
+
+              {player.currentPhase >= 7 && (
+                <div className="pt-2 border-t border-slate-100">
+                  <label className="text-xs text-slate-500 flex justify-between">
+                    <span>主観的努力度</span>
+                    <span className="font-bold text-slate-600">{rpe}</span>
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={rpe}
+                    onChange={(e) => setRpe(Number(e.target.value))}
+                    className="w-full mt-1 accent-slate-600"
+                  />
+                </div>
+              )}
+            </div>
+
             <button
               onClick={() => setSos((v) => !v)}
               className={`w-full flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-bold mb-3 border-2 transition-colors ${
                 sos ? "border-red-500 bg-red-50 text-red-600" : "border-slate-200 text-slate-400"
               }`}
             >
-              <AlertTriangle size={16} /> {sos ? "🆘 SOSを送信します" : "🆘 SOSを送る（緊急時）"}
+              <AlertTriangle size={16} />
+              {sos ? "スタッフに連絡します" : "スタッフに連絡する（SOS）"}
             </button>
 
             {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
@@ -4137,10 +4777,10 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
               {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
               {sending ? "送信中..." : "指導者に送信する"}
             </button>
-            {sent && (
-              <p className="text-xs text-green-600 text-center mt-2">
-                送信しました。指導者からの確認をお待ちください。
-              </p>
+            {sent && submitted && (
+              <div className="mt-4 pt-4 border-t border-slate-200">
+                <CriteriaResult report={submitted} />
+              </div>
             )}
           </div>
 
@@ -4241,6 +4881,13 @@ function AthleteMetricsCard({ player, onSaved }) {
         baseline_distance_m: dist === "" ? null : Number(dist),
       };
       await sbUpdate("players", player.id, patch);
+      // 変更の履歴を残す
+      await sbInsert("player_metric_history", {
+        player_id: player.id,
+        body_weight_kg: patch.body_weight_kg,
+        baseline_time_sec: patch.baseline_time_sec,
+        baseline_distance_m: patch.baseline_distance_m,
+      });
       onSaved?.({
         bodyWeightKg: patch.body_weight_kg,
         baselineTimeSec: patch.baseline_time_sec,
@@ -4481,6 +5128,7 @@ function HamstringClassificationCard({ orgId, player, protocol, readOnly, onSave
             <TrendingUp size={14} className="shrink-0 mt-0.5" />
             同じ分類（{summary}）で完遂した過去{stats.sample_size}人の受傷〜完遂日数は
             平均 {stats.avg_days}日（最短 {stats.min_days}日 / 最長 {stats.max_days}日）でした。
+            {stats.sample_size < 3 && "件数が少ないため参考値です。"}
           </p>
         </div>
       )}
@@ -4531,7 +5179,12 @@ function HamstringClassificationCard({ orgId, player, protocol, readOnly, onSave
                         <td className="py-1 pr-2 text-right">
                           {c.min_days}〜{c.max_days}
                         </td>
-                        <td className="py-1 text-right">{c.sample_size}</td>
+                        <td className="py-1 text-right">
+                          {c.sample_size}
+                          {c.sample_size < 3 && (
+                            <span className="block text-[9px] text-slate-400">参考値</span>
+                          )}
+                        </td>
                       </tr>
                     );
                   })}
@@ -4773,6 +5426,64 @@ async function sb_deleteSelection(playerId, itemId) {
 //   「PHASEが進んでも前PHASEのTrainingを終了するわけではない」
 //   今日のメニュー = intro_phase <= 現在PHASE かつ 未終了 の和集合
 // ============================================================
+const CATEGORY_LABELS = {
+  isometric: "等尺性収縮",
+  strength: "Strength",
+  eccentric: "Eccentric",
+  jump: "Jump / Hop",
+  sprint_drill: "Sprint Drill",
+  running: "Running",
+};
+
+// PHASE 10 では37種目になるため、カテゴリでまとめる。
+// その段階で追加された種目は開き、継続中のものは畳む。
+function MenuByCategory({ exercises, currentPhase, renderExercise }) {
+  const [openKeys, setOpenKeys] = useState(null);
+
+  const groups = {};
+  exercises.forEach((e) => {
+    const key = e.category || "other";
+    (groups[key] = groups[key] || []).push(e);
+  });
+  const keys = Object.keys(groups);
+
+  // 初期状態：今のPHASEで追加された種目を含むカテゴリだけ開く
+  const defaultOpen = keys.filter((k) => groups[k].some((e) => e.intro_phase === currentPhase));
+  const open = openKeys ?? defaultOpen;
+  const toggle = (k) =>
+    setOpenKeys(open.includes(k) ? open.filter((x) => x !== k) : [...open, k]);
+
+  return (
+    <div className="space-y-2">
+      {keys.map((k) => {
+        const list = groups[k];
+        const newCount = list.filter((e) => e.intro_phase === currentPhase).length;
+        const isOpen = open.includes(k);
+        return (
+          <div key={k} className="border border-slate-200 rounded-lg">
+            <button
+              onClick={() => toggle(k)}
+              className="w-full flex items-center justify-between px-3 py-2 text-left"
+            >
+              <span className="text-xs font-bold text-slate-700">
+                {CATEGORY_LABELS[k] ?? "その他"}
+                <span className="font-normal text-slate-400 ml-1.5">{list.length}種目</span>
+                {newCount > 0 && (
+                  <span className="ml-1.5 text-[10px] font-bold text-blue-600">
+                    今回追加 {newCount}
+                  </span>
+                )}
+              </span>
+              <span className="text-[10px] text-slate-400">{isOpen ? "畳む" : "開く"}</span>
+            </button>
+            {isOpen && <div className="px-3 pb-3 space-y-2">{list.map(renderExercise)}</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
   const [exercises, setExercises] = useState([]);
   const [steps, setSteps] = useState([]);
@@ -4887,22 +5598,26 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
                 </p>
                 <p className="text-xs text-slate-700">{step?.label ?? "—"}</p>
                 {step?.target && <p className="text-[10px] text-slate-500">{step.target}</p>}
-                {loadKg !== null && (
+                {step?.load_percent_bw != null && (
                   <p className="text-[10px] text-blue-600">
-                    {step.load_percent_bw}%BW → 約 {loadKg}kg
+                    {loadKg !== null
+                      ? `${step.load_percent_bw}%BW（${loadKg}kg）`
+                      : `${step.load_percent_bw}%BW`}
                   </p>
                 )}
-                {timeSec !== null && (
+                {step?.speed_percent != null && (
                   <p className="text-[10px] text-blue-600">
-                    {step.speed_percent}% → {player.baselineDistanceM ?? 100}m 約 {timeSec}秒
+                    {timeSec !== null
+                      ? `${step.speed_percent}%（${player.baselineDistanceM ?? 100}m ${timeSec}秒）`
+                      : `${step.speed_percent}%`}
                   </p>
                 )}
-                {(step?.load_percent_bw && !player.bodyWeightKg) ||
-                (step?.speed_percent && !player.baselineTimeSec) ? (
+                {((step?.load_percent_bw != null && !player.bodyWeightKg) ||
+                  (step?.speed_percent != null && !player.baselineTimeSec)) && (
                   <p className="text-[10px] text-slate-400">
-                    体重・基準タイムを入力すると実数に換算されます
+                    体重・基準タイムを入力すると実数で表示されます
                   </p>
-                ) : null}
+                )}
               </div>
               {!readOnly && (
                 <div className="flex gap-1 shrink-0">
@@ -4951,7 +5666,11 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
         <p className="text-[11px] text-slate-400 mb-3">
           PHASEが進んでも前PHASEのTrainingは終了しません。解禁済みの種目がすべて表示されます。
         </p>
-        <div className="space-y-2">{current.map(renderExercise)}</div>
+        <MenuByCategory
+          exercises={current}
+          currentPhase={player.currentPhase}
+          renderExercise={renderExercise}
+        />
       </div>
 
       {upcoming.length > 0 && (
