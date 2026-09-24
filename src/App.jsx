@@ -12,6 +12,7 @@ import {
   CalendarClock,
   CalendarDays,
   ArrowRight,
+  ArrowLeft,
   Flame,
   ShieldCheck,
   Trash2,
@@ -36,6 +37,11 @@ import {
   ScanLine,
   Stethoscope,
   Layers,
+  Ban,
+  Scale,
+  Gauge,
+  ChevronUp,
+  ChevronDown,
 } from "lucide-react";
 
 // ============================================================
@@ -45,7 +51,6 @@ const SUPABASE_URL = "https://akvfrihatvfkrjzpxtcw.supabase.co";
 const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFrdmZyaWhhdHZma3JqenB4dGN3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxMjk4NDEsImV4cCI6MjEwNDcwNTg0MX0.LUUpqkDo61LfV6vK5RSfYGyb7is93WrvQeikTiV1uIg";
 
-// ---- Supabase REST(PostgREST) 薄いラッパー ----
 async function sb(path, options = {}) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     method: options.method || "GET",
@@ -72,7 +77,6 @@ const sbUpdate = (table, id, body) =>
   sb(`${table}?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) });
 const sbDelete = (table, id) =>
   sb(`${table}?id=eq.${encodeURIComponent(id)}`, { method: "DELETE", prefer: "return=minimal" });
-// on_conflict列（カンマ区切り可）でINSERT/UPDATEを自動判定するupsert
 const sbUpsert = (table, body, onConflictColumns) =>
   sb(`${table}?on_conflict=${encodeURIComponent(onConflictColumns)}`, {
     method: "POST",
@@ -80,7 +84,6 @@ const sbUpsert = (table, body, onConflictColumns) =>
     prefer: "resolution=merge-duplicates,return=representation",
   });
 
-// ---- パスワードのハッシュ化（SHA-256、平文は保存・送信しない） ----
 async function sha256Hex(text) {
   if (!window.crypto || !window.crypto.subtle) {
     throw new Error(
@@ -96,7 +99,6 @@ async function sha256Hex(text) {
     .toLowerCase();
 }
 
-// 組織スコープのapp_settingsから指定キーの値を1件取得（無ければnull）
 async function fetchSetting(orgId, key) {
   const rows = await sbSelect(
     "app_settings",
@@ -107,6 +109,10 @@ async function fetchSetting(orgId, key) {
   return value === null || value === undefined ? null : String(value).trim().toLowerCase();
 }
 
+// 画面右上に表示するビルド識別子。
+// デプロイが反映されているかを一目で確認するためのもの。
+const APP_BUILD = "v11 (分類分岐・可変フェーズ)";
+
 // ---- DBの行(snake_case) <-> アプリ内部表現(camelCase) の変換 ----
 function normalizeProtocol(row) {
   return {
@@ -115,6 +121,9 @@ function normalizeProtocol(row) {
     totalWeeks: row.total_weeks,
     phases: row.phases || [],
     videoUrl: row.video_url || null,
+    // PHASE数はプロトコルごとに可変（ハムストリングは10 PHASE）
+    phaseCount: (row.phases || []).length || 5,
+    classificationScheme: row.classification_scheme || null,
   };
 }
 function normalizeMessage(row) {
@@ -158,6 +167,27 @@ function normalizeMenu(row) {
     alternativeMenu: row.alternative_menu || null,
   };
 }
+// 要件①②⑥⑦：種目マスター（導入フェーズ〜終了フェーズ・進行ステップ・GATE対象可否）
+function normalizeExercise(row) {
+  return {
+    id: row.id,
+    protocolId: row.protocol_id,
+    name: row.name,
+    introducedPhase: row.introduced_phase,
+    endPhase: row.end_phase, // null = 終了しない（継続）
+    isGateExercise: row.is_gate_exercise,
+    youtubeUrl: row.youtube_url || null,
+    ngCompensation: row.ng_compensation || null,
+    sessionNote: row.session_note || null,
+    steps: row.steps || [], // [{label}] 順序=進行順
+  };
+}
+function normalizeForbidden(row) {
+  return { id: row.id, protocolId: row.protocol_id, phaseNumber: row.phase_number, name: row.name };
+}
+function normalizeExerciseProgress(row) {
+  return { exerciseId: row.exercise_id, currentStep: row.current_step };
+}
 function normalizePlayer(row) {
   return {
     id: row.id,
@@ -170,6 +200,12 @@ function normalizePlayer(row) {
     injuryDate: row.injury_date,
     completedAt: row.completed_at,
     imagingFindings: row.imaging_findings || "",
+    bamicGrade: row.bamic_grade || null,
+    hamstringMuscle: row.hamstring_muscle || null,
+    hamstringLocation: row.hamstring_location || null,
+    bodyWeightKg: row.body_weight_kg ?? null,
+    baselineTimeSec: row.baseline_time_sec ?? null,
+    baselineDistanceM: row.baseline_distance_m ?? null,
     supportStatus: row.support_status || "unresolved",
     supportAssigneeRole: row.support_assignee_role || null,
     reports: (row.reports || [])
@@ -186,6 +222,9 @@ function normalizePlayer(row) {
         tenderness: r.tenderness ?? null,
         compensation: r.compensation ?? null,
         severeSymptom: r.severe_symptom ?? null,
+        fear: r.fear ?? null,
+        giveWayFootstrike: r.give_way_footstrike ?? null,
+        rpe: r.rpe ?? null,
         triage: r.triage ?? null,
       })),
     messages: (row.messages || [])
@@ -200,6 +239,7 @@ function normalizePlayer(row) {
       .slice()
       .sort((a, b) => new Date(a.entered_at) - new Date(b.entered_at))
       .map(normalizePhaseHistoryEntry),
+    exerciseProgress: (row.player_exercise_progress || []).map(normalizeExerciseProgress),
   };
 }
 function normalizeSlot(row) {
@@ -213,7 +253,8 @@ function normalizeSlot(row) {
 }
 
 const MENTAL_FACES = ["😞", "😕", "😐", "🙂", "😄"];
-const PLAYER_FIELDS = "*,reports(*),messages(*),treatments(*),phase_history(*)";
+const PLAYER_FIELDS =
+  "*,reports(*),messages(*),treatments(*),phase_history(*),player_exercise_progress(*)";
 const PLAYER_EMBED_ORDER =
   "&reports.order=created_at.asc&messages.order=created_at.asc&treatments.order=created_at.asc&phase_history.order=entered_at.asc";
 
@@ -270,20 +311,30 @@ const CHAT_STAFF_ROLE_LABELS = {
   doctor: "医師",
 };
 
-// フェーズごとの色分け（赤→オレンジ→黄→黄緑→青）
+// フェーズごとの色分け（赤→オレンジ→黄→黄緑→青→紫、最大10フェーズまで対応）
 const PHASE_TEXT_COLORS = {
   1: "text-red-600",
   2: "text-orange-500",
   3: "text-amber-500",
-  4: "text-lime-600",
-  5: "text-blue-600",
+  4: "text-yellow-600",
+  5: "text-lime-600",
+  6: "text-green-600",
+  7: "text-teal-600",
+  8: "text-cyan-600",
+  9: "text-blue-600",
+  10: "text-indigo-600",
 };
 const PHASE_BG_COLORS = {
   1: "bg-red-500",
   2: "bg-orange-500",
   3: "bg-amber-500",
-  4: "bg-lime-500",
-  5: "bg-blue-500",
+  4: "bg-yellow-500",
+  5: "bg-lime-500",
+  6: "bg-green-500",
+  7: "bg-teal-500",
+  8: "bg-cyan-500",
+  9: "bg-blue-500",
+  10: "bg-indigo-500",
 };
 
 function todayStr() {
@@ -298,10 +349,24 @@ function isAlert(player) {
   if (!r) return player.sos;
   return player.sos || r.triage === "red";
 }
+// 分類バリアントの短縮ラベル（例：BAMIC 2b / 大腿二頭筋 / 近位）
+function classificationLabel(player) {
+  if (!player?.bamicGrade || !player?.hamstringMuscle || !player?.hamstringLocation) return null;
+  const m = { semimembranosus: "半膜様筋", semitendinosus: "半腱様筋", biceps_femoris: "大腿二頭筋" };
+  const l = { proximal: "近位", mid_distal: "中間位〜遠位" };
+  return `BAMIC ${player.bamicGrade} / ${m[player.hamstringMuscle]} / ${l[player.hamstringLocation]}`;
+}
+function phaseCountOf(protocol) {
+  return protocol?.phaseCount || 5;
+}
+function phaseRange(protocol) {
+  return Array.from({ length: phaseCountOf(protocol) }, (_, i) => i + 1);
+}
 function weeksRemaining(protocol, currentPhase) {
   if (!protocol) return 0;
-  const perPhase = protocol.totalWeeks / 5;
-  return Math.max(0, Math.round(perPhase * (5 - currentPhase + 1)));
+  const n = phaseCountOf(protocol);
+  const perPhase = protocol.totalWeeks / n;
+  return Math.max(0, Math.round(perPhase * (n - currentPhase + 1)));
 }
 function daysSince(dateStr) {
   if (!dateStr) return null;
@@ -483,6 +548,7 @@ export default function RehabApp() {
             <span className="hidden sm:flex items-center gap-1 ml-2 text-xs text-slate-400 border-l border-slate-700 pl-3">
               <Building2 size={12} /> {org.name}
             </span>
+            <span className="hidden md:inline text-[10px] text-slate-500 ml-2">{APP_BUILD}</span>
           </div>
           <div className="flex items-center gap-3">
             {loadError && (
@@ -1540,7 +1606,7 @@ function MenuLibraryManagement({ orgId, masterProtocols, phaseMenus, setPhaseMen
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <div className="space-y-3">
         <h3 className="font-bold text-slate-700 text-sm">登録済みメニュー ({phaseMenus.length})</h3>
-        {[1, 2, 3, 4, 5].map((n) => {
+        {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
           const menusForPhase = phaseMenus.filter((m) => m.phaseNumber === n);
           if (menusForPhase.length === 0) return null;
           return (
@@ -1590,7 +1656,7 @@ function MenuLibraryManagement({ orgId, masterProtocols, phaseMenus, setPhaseMen
         >
           {masterProtocols.map((p) => (
             <option key={p.id} value={p.id}>
-              {p.name}
+              {p.name}（全{p.phaseCount}段階）
             </option>
           ))}
           {masterProtocols.length === 0 && <option value="">プロトコル未登録</option>}
@@ -1601,7 +1667,7 @@ function MenuLibraryManagement({ orgId, masterProtocols, phaseMenus, setPhaseMen
           onChange={(e) => setPhaseNumber(Number(e.target.value))}
           className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3 bg-white"
         >
-          {[1, 2, 3, 4, 5].map((n) => (
+          {phaseRange(masterProtocols.find((p) => p.id === protocolId)).map((n) => (
             <option key={n} value={n}>
               Phase {n}
             </option>
@@ -1688,19 +1754,24 @@ function PhaseMenuCatalog({ menus, protocolId, phaseNumber }) {
 
 // ---------- プロトコル管理(CMS) ----------
 function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
-  const blankPhases = () =>
-    Array.from({ length: 5 }, (_, i) => ({ title: `フェーズ${i + 1}`, conditionsText: "" }));
+  // フェーズ数はプロトコルごとに自由（5段階でも10段階でもよい）
+  const makePhase = (i) => ({ title: `フェーズ${i + 1}`, conditionsText: "" });
+  const blankPhases = (n = 5) => Array.from({ length: n }, (_, i) => makePhase(i));
 
   const [name, setName] = useState("");
   const [totalWeeks, setTotalWeeks] = useState(8);
   const [videoUrl, setVideoUrl] = useState("");
-  const [phaseForms, setPhaseForms] = useState(blankPhases());
+  const [scheme, setScheme] = useState("");
+  const [phaseForms, setPhaseForms] = useState(blankPhases(5));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
   const updatePhaseForm = (idx, field, value) => {
     setPhaseForms((prev) => prev.map((p, i) => (i === idx ? { ...p, [field]: value } : p)));
   };
+  const addPhase = () => setPhaseForms((prev) => [...prev, makePhase(prev.length)]);
+  const removePhase = (idx) =>
+    setPhaseForms((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx)));
 
   const handleAddProtocol = async () => {
     if (!name.trim()) return;
@@ -1714,6 +1785,7 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
       name: name.trim(),
       total_weeks: Number(totalWeeks) || 8,
       video_url: videoUrl.trim() || null,
+      classification_scheme: scheme || null,
       phases,
     };
     setSaving(true);
@@ -1724,7 +1796,8 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
       setName("");
       setTotalWeeks(8);
       setVideoUrl("");
-      setPhaseForms(blankPhases());
+      setScheme("");
+      setPhaseForms(blankPhases(5));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1732,10 +1805,36 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
     }
   };
 
-  const handleDeleteProtocol = async (id) => {
+  const handleDeleteProtocol = async (id, protoName) => {
+    setError(null);
     try {
+      const users = await sbSelect(
+        "players",
+        `?protocol_id=eq.${encodeURIComponent(id)}&org_id=eq.${encodeURIComponent(orgId)}&select=id,name`
+      );
+      const n = users?.length ?? 0;
+      const warn =
+        n > 0
+          ? `\n\n注意：このプロトコルは現在 ${n}名 の選手が使用中です（${users
+              .slice(0, 5)
+              .map((u) => u.name)
+              .join("、")}${n > 5 ? " ほか" : ""}）。\n削除すると、その選手のプロトコルは未設定になります。`
+          : "";
+      if (!window.confirm(`プロトコル「${protoName}」を削除しますか？${warn}\n\nこの操作は取り消せません。`)) return;
       await sbDelete("protocols", id);
       setMasterProtocols((prev) => prev.filter((p) => p.id !== id));
+    } catch (err) {
+      setError(`削除できませんでした: ${err.message}`);
+    }
+  };
+
+  const handleUpdateScheme = async (id, value) => {
+    setError(null);
+    try {
+      await sbUpdate("protocols", id, { classification_scheme: value || null });
+      setMasterProtocols((prev) =>
+        prev.map((p) => (p.id === id ? { ...p, classificationScheme: value || null } : p))
+      );
     } catch (err) {
       setError(err.message);
     }
@@ -1759,11 +1858,18 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
           登録済みプロトコル ({masterProtocols.length})
         </h3>
         {masterProtocols.map((p) => (
-          <ProtocolCard key={p.id} protocol={p} onDelete={handleDeleteProtocol} onSaveVideo={handleUpdateVideoUrl} />
+          <ProtocolCard
+            key={p.id}
+            protocol={p}
+            onDelete={handleDeleteProtocol}
+            onSaveVideo={handleUpdateVideoUrl}
+            onSaveScheme={handleUpdateScheme}
+          />
         ))}
         {masterProtocols.length === 0 && (
           <p className="text-sm text-slate-400">まだプロトコルが登録されていません。</p>
         )}
+        {error && <p className="text-xs text-red-500">{error}</p>}
       </div>
 
       <div className="bg-white rounded-xl border border-slate-200 p-5 h-fit">
@@ -1800,10 +1906,48 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
               className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
+          <div>
+            <label className="text-xs text-slate-500">分類の分岐（任意）</label>
+            <select
+              value={scheme}
+              onChange={(e) => setScheme(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 bg-white"
+            >
+              <option value="">なし</option>
+              <option value="hamstring">ハムストリング（BAMIC × 損傷筋 × 部位）</option>
+            </select>
+            <p className="text-[10px] text-slate-400 mt-1">
+              設定すると、このプロトコルを選んだ選手の詳細画面に分類の入力欄が出ます。
+            </p>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-slate-500">
+              フェーズ構成（全 {phaseForms.length} 段階）
+            </label>
+            <button
+              onClick={addPhase}
+              className="text-[11px] px-2.5 py-1 rounded-full border border-blue-200 text-blue-600 hover:bg-blue-50"
+            >
+              ＋ フェーズを追加
+            </button>
+          </div>
+
           <div className="max-h-72 overflow-y-auto space-y-3 pr-1">
             {phaseForms.map((p, idx) => (
               <div key={idx} className="border border-slate-200 rounded-lg p-3">
-                <label className="text-xs text-slate-500">Phase {idx + 1} 名称</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs text-slate-500">Phase {idx + 1} 名称</label>
+                  {phaseForms.length > 1 && (
+                    <button
+                      onClick={() => removePhase(idx)}
+                      className="text-slate-400 hover:text-red-500"
+                      title="このフェーズを削除"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
                 <input
                   value={p.title}
                   onChange={(e) => updatePhaseForm(idx, "title", e.target.value)}
@@ -1835,7 +1979,7 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
   );
 }
 
-function ProtocolCard({ protocol, onDelete, onSaveVideo }) {
+function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme }) {
   const [videoUrl, setVideoUrl] = useState(protocol.videoUrl || "");
   const [savingVideo, setSavingVideo] = useState(false);
 
@@ -1851,8 +1995,22 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo }) {
         <div>
           <p className="font-bold text-slate-800">{protocol.name}</p>
           <p className="text-xs text-slate-400">標準復帰期間: 約{protocol.totalWeeks}週間</p>
+          <div className="flex items-center gap-1.5 mt-1">
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600">
+              全 {protocol.phaseCount} 段階
+            </span>
+            {protocol.classificationScheme === "hamstring" && (
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700">
+                分類分岐あり
+              </span>
+            )}
+          </div>
         </div>
-        <button onClick={() => onDelete(protocol.id)} className="text-slate-400 hover:text-red-500 p-1" title="削除">
+        <button
+          onClick={() => onDelete(protocol.id, protocol.name)}
+          className="text-slate-400 hover:text-red-500 p-1"
+          title="このプロトコルを削除"
+        >
           <Trash2 size={16} />
         </button>
       </div>
@@ -1870,6 +2028,18 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo }) {
           </div>
         ))}
       </div>
+      <div className="mt-3 pt-3 border-t border-slate-100">
+        <label className="text-xs text-slate-500">分類の分岐</label>
+        <select
+          value={protocol.classificationScheme || ""}
+          onChange={(e) => onSaveScheme(protocol.id, e.target.value)}
+          className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-xs mt-1 bg-white"
+        >
+          <option value="">なし</option>
+          <option value="hamstring">ハムストリング（BAMIC × 損傷筋 × 部位）</option>
+        </select>
+      </div>
+
       <div className="mt-3 pt-3 border-t border-slate-100">
         <label className="text-xs text-slate-500 flex items-center gap-1">
           <Youtube size={12} className="text-red-500" /> 参考動画URL
@@ -1933,7 +2103,7 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
     const player = coachPlayers.find((p) => p.id === playerId);
     if (!player) return;
     const protocol = masterProtocols.find((mp) => mp.id === player.protocolId);
-    const nextPhase = Math.min(5, player.currentPhase + 1);
+    const nextPhase = Math.min(phaseCountOf(protocol), player.currentPhase + 1);
     const nextConditionsCount = protocol?.phases[nextPhase - 1]?.conditions.length ?? 0;
     const nextChecklist = Array(nextConditionsCount).fill(false);
     const now = new Date().toISOString();
@@ -2156,9 +2326,12 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
                     <p className="text-xs text-slate-400">
                       {protocolOf(p)?.name ?? "未設定"} ・{" "}
                       <span className={`font-bold ${PHASE_TEXT_COLORS[p.currentPhase]}`}>
-                        Phase {p.currentPhase}/5
+                        Phase {p.currentPhase}/{phaseCountOf(protocolOf(p))}
                       </span>
                     </p>
+                    {classificationLabel(p) && (
+                      <p className="text-[10px] text-blue-600 mt-0.5">{classificationLabel(p)}</p>
+                    )}
                     {p.supportStatus && p.supportStatus !== "unresolved" && (
                       <p
                         className={`text-[10px] font-bold mt-0.5 ${
@@ -2217,6 +2390,7 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
         )}
         {selectedPlayer && (
           <PlayerDetailPanel
+            orgId={orgId}
             player={selectedPlayer}
             protocol={protocolOf(selectedPlayer)}
             allPlayers={coachPlayers}
@@ -2245,6 +2419,7 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
 }
 
 function PlayerDetailPanel({
+  orgId,
   player,
   protocol,
   allPlayers,
@@ -2325,7 +2500,7 @@ function PlayerDetailPanel({
             <p className="text-sm text-slate-400">
               {protocol?.name ?? "未設定"} ・ 現在{" "}
               <span className={`font-bold ${PHASE_TEXT_COLORS[player.currentPhase]}`}>
-                Phase {player.currentPhase}/5
+                Phase {player.currentPhase}/{phaseCountOf(protocol)}
               </span>
               ：{phaseInfo?.title}
             </p>
@@ -2455,7 +2630,7 @@ function PlayerDetailPanel({
             )}
           </div>
 
-          {player.currentPhase < 5 && (
+          {player.currentPhase < phaseCountOf(protocol) && (
             <button
               onClick={() => advancePhase(player.id)}
               disabled={!allChecked}
@@ -2464,7 +2639,7 @@ function PlayerDetailPanel({
               次のフェーズへ進める <ArrowRight size={16} />
             </button>
           )}
-          {player.currentPhase >= 5 && !player.completedAt && (
+          {player.currentPhase >= phaseCountOf(protocol) && !player.completedAt && (
             <button
               onClick={() => markCompleted(player.id)}
               disabled={!allChecked}
@@ -2481,6 +2656,26 @@ function PlayerDetailPanel({
         </div>
 
         <ImagingFindingsCard player={player} onSave={onSaveImagingFindings} />
+
+        <AthleteMetricsCard
+          player={player}
+          onSaved={(patch) =>
+            setCoachPlayers((prev) => prev.map((p) => (p.id === player.id ? { ...p, ...patch } : p)))
+          }
+        />
+
+        <HamstringClassificationCard
+          orgId={orgId}
+          player={player}
+          protocol={protocol}
+          onSaved={(patch) =>
+            setCoachPlayers((prev) => prev.map((p) => (p.id === player.id ? { ...p, ...patch } : p)))
+          }
+        />
+
+        <CumulativeMenuPanel player={player} protocol={protocol} />
+
+        <OffsiteTrainingPanel orgId={orgId} player={player} />
 
         <div className="bg-white rounded-xl border border-slate-200 p-5">
           <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
@@ -2832,7 +3027,7 @@ function PrintSummary({ player, protocol, phaseInfo, avg, myMeetings }) {
           </p>
           <p>
             <span className="font-bold">現在フェーズ：</span>
-            Phase {player.currentPhase}/5（{phaseInfo?.title}）
+            Phase {player.currentPhase}/{phaseCountOf(protocol)}（{phaseInfo?.title}）
           </p>
         </div>
         <div className="space-y-1">
@@ -3146,15 +3341,33 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
   const [injuryDate, setInjuryDate] = useState("");
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
+  // 分類の分岐（プロトコル選択に応じて出す）
+  const [bamic, setBamic] = useState("");
+  const [muscle, setMuscle] = useState("");
+  const [location, setLocation] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+
+  const selectedProtocol = masterProtocols.find((p) => p.id === protocolId) ?? null;
+  const needsHamstring = selectedProtocol?.classificationScheme === "hamstring";
 
   useEffect(() => {
     if (!protocolId && masterProtocols[0]) setProtocolId(masterProtocols[0].id);
   }, [masterProtocols, protocolId]);
 
+  // プロトコルを変えたら分類をリセット（前の選択が残らないように）
+  useEffect(() => {
+    setBamic("");
+    setMuscle("");
+    setLocation("");
+  }, [protocolId]);
+
   const handleRegister = async () => {
     if (!name.trim() || !protocolId) return;
+    if (needsHamstring && (!bamic || !muscle || !location)) {
+      setError("BAMIC分類・損傷筋・部位をすべて選択してください");
+      return;
+    }
     if (pin.length !== 4) {
       setError("暗証番号は4桁の数字で設定してください");
       return;
@@ -3176,6 +3389,9 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
       sos: false,
       booked_slot_id: null,
       injury_date: injuryDate || null,
+      bamic_grade: needsHamstring ? bamic : null,
+      hamstring_muscle: needsHamstring ? muscle : null,
+      hamstring_location: needsHamstring ? location : null,
       pin,
     };
     setSaving(true);
@@ -3222,11 +3438,62 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
         >
           {masterProtocols.map((p) => (
             <option key={p.id} value={p.id}>
-              {p.name}
+              {p.name}（全{p.phaseCount}段階）
             </option>
           ))}
           {masterProtocols.length === 0 && <option value="">プロトコル未登録</option>}
         </select>
+
+        {needsHamstring && (
+          <div className="border border-blue-200 bg-blue-50 rounded-lg p-3 mb-4">
+            <p className="text-xs font-bold text-blue-700 mb-1">損傷の分類</p>
+            <p className="text-[10px] text-blue-600 mb-2">
+              リハビリの内容は共通ですが、ここで分けた分類ごとに復帰期間を比較します。
+            </p>
+            <label className="text-[10px] text-slate-600">BAMIC分類</label>
+            <select
+              value={bamic}
+              onChange={(e) => setBamic(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm mt-0.5 mb-2 bg-white"
+            >
+              <option value="">選択してください</option>
+              {BAMIC_GRADES.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+            </select>
+            <label className="text-[10px] text-slate-600">損傷筋</label>
+            <select
+              value={muscle}
+              onChange={(e) => setMuscle(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm mt-0.5 mb-2 bg-white"
+            >
+              <option value="">選択してください</option>
+              {HAMSTRING_MUSCLES.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+            <label className="text-[10px] text-slate-600">部位</label>
+            <select
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm mt-0.5 bg-white"
+            >
+              <option value="">選択してください</option>
+              {HAMSTRING_LOCATIONS.map((l) => (
+                <option key={l.value} value={l.value}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+            <p className="text-[10px] text-slate-500 mt-2">
+              {BAMIC_NOTES.a}／{BAMIC_NOTES.b}／{BAMIC_NOTES.c}
+            </p>
+          </div>
+        )}
 
         <label className="text-xs text-slate-500">受傷日（あとから登録・変更も可能です）</label>
         <input
@@ -3412,7 +3679,7 @@ function PhaseTimelineComparison({ player, protocol }) {
   const ownDurations = computeOwnPhaseDurations(player.phaseHistory);
   const maxDays = Math.max(
     1,
-    ...[1, 2, 3, 4, 5].map((n) => Math.max(ownDurations[n] || 0, globalAvg.find((g) => g.phase_number === n)?.avg_days || 0))
+    ...phaseRange(protocol).map((n) => Math.max(ownDurations[n] || 0, globalAvg.find((g) => g.phase_number === n)?.avg_days || 0))
   );
   const hasAnyGlobal = globalAvg.some((g) => g.sample_size > 0);
 
@@ -3431,7 +3698,7 @@ function PhaseTimelineComparison({ player, protocol }) {
             </p>
           )}
           <div className="space-y-3">
-            {[1, 2, 3, 4, 5].map((n) => {
+            {phaseRange(protocol).map((n) => {
               const own = ownDurations[n];
               const g = globalAvg.find((x) => x.phase_number === n);
               return (
@@ -3489,7 +3756,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
   const phaseInfo = protocol?.phases[player.currentPhase - 1];
   const remainingWeeks = weeksRemaining(protocol, player.currentPhase);
-  const progressPct = ((player.currentPhase - 1) / 5) * 100;
+  const progressPct = ((player.currentPhase - 1) / phaseCountOf(protocol)) * 100;
   const bookedSlot = slots.find((s) => s.id === player.bookedSlotId);
   const availableSlots = slots.filter((s) => !s.bookedBy);
   const embedUrl = getYouTubeEmbedUrl(protocol?.videoUrl);
@@ -3623,14 +3890,14 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
             <div className="flex items-center justify-between mb-2">
               <p className="text-sm font-bold text-slate-700">復帰ロードマップ</p>
               <span className={`text-xs font-bold ${PHASE_TEXT_COLORS[player.currentPhase]}`}>
-                現在のステップ：{player.currentPhase}/5
+                現在のステップ：{player.currentPhase}/{phaseCountOf(protocol)}
               </span>
             </div>
             <p className="text-2xl font-extrabold text-slate-800 mb-1">全体復帰まであと {remainingWeeks} 週間</p>
             <p className="text-xs text-slate-400 mb-3">{protocol?.name}</p>
 
             <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden flex">
-              {[1, 2, 3, 4, 5].map((n) => (
+              {phaseRange(protocol).map((n) => (
                 <div
                   key={n}
                   className={`h-full flex-1 ${n <= player.currentPhase ? PHASE_BG_COLORS[n] : "bg-transparent"}`}
@@ -3638,7 +3905,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
               ))}
             </div>
             <div className="flex justify-between mt-2">
-              {[1, 2, 3, 4, 5].map((n) => (
+              {phaseRange(protocol).map((n) => (
                 <span
                   key={n}
                   className={`text-[10px] font-bold ${n <= player.currentPhase ? PHASE_TEXT_COLORS[n] : "text-slate-300"}`}
@@ -3689,6 +3956,17 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
           <InjuryDateCard orgId={orgId} player={player} protocol={protocol} setMyPlayer={setMyPlayer} />
 
           <PhaseTimelineComparison player={player} protocol={protocol} />
+
+          <CumulativeMenuPanel player={player} protocol={protocol} readOnly />
+
+          <OffsiteTrainingPanel orgId={orgId} player={player} readOnly />
+
+          <HamstringClassificationCard orgId={orgId} player={player} protocol={protocol} readOnly />
+
+          <AthleteMetricsCard
+            player={player}
+            onSaved={(patch) => setMyPlayer((prev) => ({ ...prev, ...patch }))}
+          />
 
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
             <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
@@ -3869,6 +4147,842 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
           <ChatPanel messages={player.messages} myRole="player" title="指導者とのチャット" onSend={sendPlayerMessage} />
         </>
       )}
+    </div>
+  );
+}
+
+// ============================================================
+// 患部外トレーニング / ハムストリング分類 / 累積メニュー
+// （元 RehabModules.jsx。単一ファイルで動かすため統合）
+// ============================================================
+// ============================================================
+// 定数
+// ============================================================
+const LOAD_LABELS = {
+  unloaded: "免荷で可",
+  partial: "部分荷重",
+  full: "全荷重",
+};
+const LOAD_BADGE = {
+  unloaded: "bg-green-100 text-green-700",
+  partial: "bg-amber-100 text-amber-700",
+  full: "bg-red-100 text-red-700",
+};
+const REGION_LABELS = {
+  whole_body: "全身",
+  upper_body: "上半身",
+  hip: "股関節",
+  trunk: "体幹",
+  spine: "脊柱・骨盤",
+  thorax: "胸椎・胸郭",
+  knee: "膝",
+  foot_ankle: "足部・足関節",
+  calf: "下腿・ふくらはぎ",
+  single_leg: "片脚支持",
+  sprint: "スプリント",
+};
+
+// 傷害別プリセット（高野さんの「疲労骨折は免荷だけ、ふくらはぎはカーフ系」という運用をそのまま形に）
+const OFFSITE_PRESETS = [
+  { key: "all", label: "すべて表示", load: "all", region: "all" },
+  { key: "stress_fracture", label: "疲労骨折（免荷のみ）", load: "unloaded", region: "all" },
+  { key: "calf", label: "下腿・ふくらはぎ", load: "all", region: "calf" },
+  { key: "foot_ankle", label: "足部・足関節", load: "all", region: "foot_ankle" },
+  { key: "knee", label: "膝", load: "all", region: "knee" },
+  { key: "hamstring", label: "ハムストリング（患部ライン優先）", load: "all", region: "all" },
+];
+
+const BAMIC_GRADES = ["0a", "0b", "1a", "1b", "1c", "2a", "2b", "2c", "3a", "3b", "3c", "4"];
+const BAMIC_NOTES = {
+  a: "a：筋膜／筋周膜",
+  b: "b：筋腱移行部",
+  c: "c：腱内（intratendinous）",
+};
+const HAMSTRING_MUSCLES = [
+  { value: "semimembranosus", label: "半膜様筋" },
+  { value: "semitendinosus", label: "半腱様筋" },
+  { value: "biceps_femoris", label: "大腿二頭筋" },
+];
+const HAMSTRING_LOCATIONS = [
+  { value: "proximal", label: "近位" },
+  { value: "mid_distal", label: "中間位〜遠位" },
+];
+const MUSCLE_LABELS = Object.fromEntries(HAMSTRING_MUSCLES.map((m) => [m.value, m.label]));
+const LOCATION_LABELS = Object.fromEntries(HAMSTRING_LOCATIONS.map((l) => [l.value, l.label]));
+
+// ============================================================
+// 換算ヘルパー（DBに換算結果は持たず、表示のたびに計算する）
+// ============================================================
+function toActualLoadKg(percentBw, bodyWeightKg) {
+  if (!percentBw || !bodyWeightKg) return null;
+  return Math.round(((Number(bodyWeightKg) * Number(percentBw)) / 100) * 10) / 10;
+}
+function toActualTimeSec(percentSpeed, baselineTimeSec) {
+  if (!percentSpeed || !baselineTimeSec) return null;
+  return Math.round((Number(baselineTimeSec) / (Number(percentSpeed) / 100)) * 100) / 100;
+}
+
+// ============================================================
+// 選手の基準値（体重・基準タイム）— 本人も指導者も編集できる
+// ============================================================
+function AthleteMetricsCard({ player, onSaved }) {
+  const [weight, setWeight] = useState(player.bodyWeightKg ?? "");
+  const [time, setTime] = useState(player.baselineTimeSec ?? "");
+  const [dist, setDist] = useState(player.baselineDistanceM ?? 100);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const patch = {
+        body_weight_kg: weight === "" ? null : Number(weight),
+        baseline_time_sec: time === "" ? null : Number(time),
+        baseline_distance_m: dist === "" ? null : Number(dist),
+      };
+      await sbUpdate("players", player.id, patch);
+      onSaved?.({
+        bodyWeightKg: patch.body_weight_kg,
+        baselineTimeSec: patch.baseline_time_sec,
+        baselineDistanceM: patch.baseline_distance_m,
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      alert(`保存に失敗しました: ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+      <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+        <Scale size={16} className="text-blue-600" /> 基準値（%BW・走速度%の換算に使用）
+      </p>
+      <p className="text-[11px] text-slate-400 mb-3">
+        ここを更新すると、メニューの「+10%BW」「@82%」などが自動で実数に変換されます。
+      </p>
+      <div className="grid grid-cols-3 gap-2">
+        <div>
+          <label className="text-[10px] text-slate-500">体重 (kg)</label>
+          <input
+            type="number"
+            step="0.1"
+            value={weight}
+            onChange={(e) => setWeight(e.target.value)}
+            className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm mt-0.5"
+          />
+        </div>
+        <div>
+          <label className="text-[10px] text-slate-500">基準タイム (秒)</label>
+          <input
+            type="number"
+            step="0.01"
+            value={time}
+            onChange={(e) => setTime(e.target.value)}
+            className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm mt-0.5"
+          />
+        </div>
+        <div>
+          <label className="text-[10px] text-slate-500">その距離 (m)</label>
+          <input
+            type="number"
+            value={dist}
+            onChange={(e) => setDist(e.target.value)}
+            className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm mt-0.5"
+          />
+        </div>
+      </div>
+      <div className="flex items-center gap-2 mt-3">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="px-4 py-2 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 disabled:bg-slate-300"
+        >
+          {saving ? "保存中..." : "保存"}
+        </button>
+        {saved && <span className="text-xs text-green-600">保存しました</span>}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// ハムストリング分類の分岐（BAMIC × 筋 × 部位）
+//   プロトコル一覧は増やさず、ハムストリングを選んだ選手にだけ出す
+// ============================================================
+function HamstringClassificationCard({ orgId, player, protocol, readOnly, onSaved }) {
+  const [grade, setGrade] = useState(player.bamicGrade ?? "");
+  const [muscle, setMuscle] = useState(player.hamstringMuscle ?? "");
+  const [location, setLocation] = useState(player.hamstringLocation ?? "");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [stats, setStats] = useState(null);
+
+  const isHamstring = protocol?.classificationScheme === "hamstring";
+
+  const [cohorts, setCohorts] = useState([]);
+  const [showCohorts, setShowCohorts] = useState(false);
+
+  // 組織内の全分類バリアントの実績（比較用）
+  useEffect(() => {
+    let active = true;
+    if (!isHamstring) {
+      setCohorts([]);
+      return;
+    }
+    sbSelect(
+      "hamstring_recovery_by_classification",
+      `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=avg_days.asc`
+    )
+      .then((rows) => {
+        if (active) setCohorts(rows || []);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [orgId, isHamstring, player.completedAt]);
+
+  useEffect(() => {
+    let active = true;
+    if (!isHamstring || !player.bamicGrade || !player.hamstringMuscle || !player.hamstringLocation) {
+      setStats(null);
+      return;
+    }
+    sbSelect(
+      "hamstring_recovery_by_classification",
+      `?org_id=eq.${encodeURIComponent(orgId)}` +
+        `&bamic_grade=eq.${encodeURIComponent(player.bamicGrade)}` +
+        `&hamstring_muscle=eq.${encodeURIComponent(player.hamstringMuscle)}` +
+        `&hamstring_location=eq.${encodeURIComponent(player.hamstringLocation)}&select=*`
+    )
+      .then((rows) => {
+        if (active) setStats(rows?.[0] ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [orgId, isHamstring, player.bamicGrade, player.hamstringMuscle, player.hamstringLocation]);
+
+  if (!isHamstring) return null;
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const patch = {
+        bamic_grade: grade || null,
+        hamstring_muscle: muscle || null,
+        hamstring_location: location || null,
+      };
+      await sbUpdate("players", player.id, patch);
+      onSaved?.({
+        bamicGrade: patch.bamic_grade,
+        hamstringMuscle: patch.hamstring_muscle,
+        hamstringLocation: patch.hamstring_location,
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      alert(`保存に失敗しました: ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const summary =
+    player.bamicGrade && player.hamstringMuscle && player.hamstringLocation
+      ? `BAMIC ${player.bamicGrade}／${MUSCLE_LABELS[player.hamstringMuscle]}／${
+          LOCATION_LABELS[player.hamstringLocation]
+        }`
+      : null;
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+      <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+        <Activity size={16} className="text-blue-600" /> ハムストリング損傷の分類
+      </p>
+      <p className="text-[11px] text-slate-400 mb-3">
+        プロトコルの中身は共通です。部位・重症度別に復帰期間を追跡するために記録します。
+      </p>
+
+      {readOnly ? (
+        <p className="text-sm text-slate-700">{summary ?? "未登録（指導者が入力します）"}</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-3 gap-2">
+            <div>
+              <label className="text-[10px] text-slate-500">BAMIC</label>
+              <select
+                value={grade}
+                onChange={(e) => setGrade(e.target.value)}
+                className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm mt-0.5 bg-white"
+              >
+                <option value="">未選択</option>
+                {BAMIC_GRADES.map((g) => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-500">損傷筋</label>
+              <select
+                value={muscle}
+                onChange={(e) => setMuscle(e.target.value)}
+                className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm mt-0.5 bg-white"
+              >
+                <option value="">未選択</option>
+                {HAMSTRING_MUSCLES.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-500">部位</label>
+              <select
+                value={location}
+                onChange={(e) => setLocation(e.target.value)}
+                className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm mt-0.5 bg-white"
+              >
+                <option value="">未選択</option>
+                {HAMSTRING_LOCATIONS.map((l) => (
+                  <option key={l.value} value={l.value}>
+                    {l.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <p className="text-[10px] text-slate-400 mt-2">
+            {BAMIC_NOTES.a}／{BAMIC_NOTES.b}／{BAMIC_NOTES.c}
+          </p>
+          <div className="flex items-center gap-2 mt-3">
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="px-4 py-2 rounded-lg bg-slate-800 text-white text-xs font-medium hover:bg-slate-700 disabled:bg-slate-300"
+            >
+              {saving ? "保存中..." : "分類を保存"}
+            </button>
+            {saved && <span className="text-xs text-green-600">保存しました</span>}
+          </div>
+        </>
+      )}
+
+      {stats && stats.sample_size > 0 && (
+        <div className="mt-3 pt-3 border-t border-slate-100">
+          <p className="text-xs text-blue-600 flex items-start gap-1">
+            <TrendingUp size={14} className="shrink-0 mt-0.5" />
+            同じ分類（{summary}）で完遂した過去{stats.sample_size}人の受傷〜完遂日数は
+            平均 {stats.avg_days}日（最短 {stats.min_days}日 / 最長 {stats.max_days}日）でした。
+          </p>
+        </div>
+      )}
+      {summary && (!stats || stats.sample_size === 0) && (
+        <p className="text-[11px] text-slate-400 mt-3 pt-3 border-t border-slate-100">
+          この分類で完遂した選手のデータはまだありません。蓄積されると平均復帰期間が表示されます。
+        </p>
+      )}
+
+      {cohorts.length > 0 && (
+        <div className="mt-3 pt-3 border-t border-slate-100">
+          <button
+            onClick={() => setShowCohorts((v) => !v)}
+            className="text-[11px] text-blue-600 hover:underline"
+          >
+            {showCohorts ? "分類別の比較を閉じる" : `分類別の比較を見る（${cohorts.length}分類）`}
+          </button>
+          {showCohorts && (
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full text-[10px] border-collapse">
+                <thead>
+                  <tr className="text-left border-b border-slate-200 text-slate-500">
+                    <th className="py-1 pr-2">BAMIC</th>
+                    <th className="py-1 pr-2">損傷筋</th>
+                    <th className="py-1 pr-2">部位</th>
+                    <th className="py-1 pr-2 text-right">平均</th>
+                    <th className="py-1 pr-2 text-right">範囲</th>
+                    <th className="py-1 text-right">n</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cohorts.map((c, i) => {
+                    const isMine =
+                      c.bamic_grade === player.bamicGrade &&
+                      c.hamstring_muscle === player.hamstringMuscle &&
+                      c.hamstring_location === player.hamstringLocation;
+                    return (
+                      <tr
+                        key={i}
+                        className={`border-b border-slate-100 ${
+                          isMine ? "bg-blue-50 font-bold text-blue-700" : "text-slate-600"
+                        }`}
+                      >
+                        <td className="py-1 pr-2">{c.bamic_grade ?? "—"}</td>
+                        <td className="py-1 pr-2">{MUSCLE_LABELS[c.hamstring_muscle] ?? "—"}</td>
+                        <td className="py-1 pr-2">{LOCATION_LABELS[c.hamstring_location] ?? "—"}</td>
+                        <td className="py-1 pr-2 text-right">{c.avg_days}日</td>
+                        <td className="py-1 pr-2 text-right">
+                          {c.min_days}〜{c.max_days}
+                        </td>
+                        <td className="py-1 text-right">{c.sample_size}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <p className="text-[10px] text-slate-400 mt-1">
+                完遂（受傷日と完遂日が揃った選手）のみを集計しています。青が該当選手の分類です。
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// 患部外トレーニング（11領域）
+//   coach: 領域・項目を選手ごとに処方 / player: 処方されたものを閲覧
+// ============================================================
+function OffsiteTrainingPanel({ orgId, player, readOnly, onChanged }) {
+  const [domains, setDomains] = useState([]);
+  const [items, setItems] = useState([]);
+  const [selected, setSelected] = useState([]); // item_id の配列
+  const [loading, setLoading] = useState(true);
+  const [loadFilter, setLoadFilter] = useState("all");
+  const [regionFilter, setRegionFilter] = useState("all");
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    Promise.all([
+      sbSelect(
+        "offsite_domains",
+        `?or=(org_id.is.null,org_id.eq.${encodeURIComponent(orgId)})&select=*&order=sort_order.asc`
+      ),
+      sbSelect("offsite_items", `?select=*&order=sort_order.asc`),
+      sbSelect(
+        "player_offsite_selections",
+        `?player_id=eq.${encodeURIComponent(player.id)}&select=item_id`
+      ),
+    ])
+      .then(([d, i, s]) => {
+        if (!active) return;
+        setDomains(d || []);
+        setItems(i || []);
+        setSelected((s || []).map((r) => r.item_id));
+      })
+      .catch((err) => active && setError(err.message))
+      .finally(() => active && setLoading(false));
+    return () => {
+      active = false;
+    };
+  }, [orgId, player.id]);
+
+  const applyPreset = (preset) => {
+    setLoadFilter(preset.load);
+    setRegionFilter(preset.region);
+  };
+
+  const toggle = async (itemId) => {
+    const isSelected = selected.includes(itemId);
+    setSelected((prev) => (isSelected ? prev.filter((x) => x !== itemId) : [...prev, itemId]));
+    try {
+      if (isSelected) {
+        await sb_deleteSelection(player.id, itemId);
+      } else {
+        await sbInsert("player_offsite_selections", { player_id: player.id, item_id: itemId });
+      }
+      onChanged?.();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const visibleItems = (domainId) =>
+    items.filter((it) => {
+      if (it.domain_id !== domainId) return false;
+      if (readOnly && !selected.includes(it.id)) return false;
+      if (loadFilter === "unloaded" && it.load_type !== "unloaded") return false;
+      if (loadFilter === "unloaded_partial" && it.load_type === "full") return false;
+      if (regionFilter !== "all" && it.region !== regionFilter) return false;
+      return true;
+    });
+
+  const regionsInUse = Array.from(new Set(items.map((i) => i.region).filter(Boolean)));
+
+  if (loading) {
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm flex items-center gap-2 text-slate-400 text-sm">
+        <Loader2 size={16} className="animate-spin" /> 患部外トレーニングを読み込み中...
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+      <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+        <Dumbbell size={16} className="text-blue-600" /> 患部外トレーニング（全11領域）
+      </p>
+      <p className="text-[11px] text-slate-400 mb-3">
+        走練習が制限される期間を利用して、普段十分に取り組みにくい身体機能を改善します。
+        {readOnly ? "指導者が選んだ領域が表示されます。" : "選手ごとに必要な領域だけを選択してください。"}
+      </p>
+
+      {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
+
+      {!readOnly && (
+        <>
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {OFFSITE_PRESETS.map((p) => (
+              <button
+                key={p.key}
+                onClick={() => applyPreset(p)}
+                className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
+                  loadFilter === p.load && regionFilter === p.region
+                    ? "border-blue-500 bg-blue-50 text-blue-700 font-bold"
+                    : "border-slate-200 text-slate-500 hover:bg-slate-50"
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 gap-2 mb-4">
+            <select
+              value={loadFilter}
+              onChange={(e) => setLoadFilter(e.target.value)}
+              className="border border-slate-300 rounded-lg px-2 py-1.5 text-xs bg-white"
+            >
+              <option value="all">荷重：すべて</option>
+              <option value="unloaded">免荷で可能なものだけ</option>
+              <option value="unloaded_partial">免荷＋部分荷重まで</option>
+            </select>
+            <select
+              value={regionFilter}
+              onChange={(e) => setRegionFilter(e.target.value)}
+              className="border border-slate-300 rounded-lg px-2 py-1.5 text-xs bg-white"
+            >
+              <option value="all">部位：すべて</option>
+              {regionsInUse.map((r) => (
+                <option key={r} value={r}>
+                  {REGION_LABELS[r] ?? r}
+                </option>
+              ))}
+            </select>
+          </div>
+        </>
+      )}
+
+      <div className="space-y-3">
+        {domains.map((d) => {
+          const list = visibleItems(d.id);
+          if (list.length === 0) return null;
+          return (
+            <div key={d.id} className="border border-slate-200 rounded-lg p-3">
+              <p className="text-xs font-bold text-slate-700">
+                {d.code}｜{d.title}
+              </p>
+              {d.purpose && <p className="text-[10px] text-slate-400 mt-0.5">{d.purpose}</p>}
+              <div className="mt-2 space-y-1">
+                {list.map((it) => {
+                  const isOn = selected.includes(it.id);
+                  const row = (
+                    <>
+                      <span className="flex-1 text-left">
+                        <span className="text-xs text-slate-700">
+                          {it.category ? `${it.category} ` : ""}
+                          {it.name}
+                        </span>
+                        {it.examples && (
+                          <span className="block text-[10px] text-slate-400">{it.examples}</span>
+                        )}
+                        {it.notes && (
+                          <span className="block text-[10px] text-amber-600">※{it.notes}</span>
+                        )}
+                      </span>
+                      <span
+                        className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${
+                          LOAD_BADGE[it.load_type]
+                        }`}
+                      >
+                        {LOAD_LABELS[it.load_type]}
+                      </span>
+                    </>
+                  );
+                  return readOnly ? (
+                    <div key={it.id} className="flex items-start gap-2 px-2 py-1.5 rounded bg-slate-50">
+                      {row}
+                    </div>
+                  ) : (
+                    <button
+                      key={it.id}
+                      onClick={() => toggle(it.id)}
+                      className={`w-full flex items-start gap-2 px-2 py-1.5 rounded border transition-colors ${
+                        isOn ? "border-blue-400 bg-blue-50" : "border-transparent hover:bg-slate-50"
+                      }`}
+                    >
+                      {isOn ? (
+                        <CheckCircle2 size={14} className="text-blue-600 shrink-0 mt-0.5" />
+                      ) : (
+                        <Circle size={14} className="text-slate-300 shrink-0 mt-0.5" />
+                      )}
+                      {row}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+        {domains.every((d) => visibleItems(d.id).length === 0) && (
+          <p className="text-xs text-slate-400">
+            {readOnly
+              ? "まだ患部外トレーニングが処方されていません。"
+              : "この条件に一致する項目がありません。フィルタを変更してください。"}
+          </p>
+        )}
+      </div>
+
+      {!readOnly && (
+        <p className="text-[10px] text-slate-400 mt-3">選択中：{selected.length}項目</p>
+      )}
+    </div>
+  );
+}
+
+// player_offsite_selections は複合キーなので id 指定の sbDelete が使えない
+async function sb_deleteSelection(playerId, itemId) {
+  return sb(
+    `player_offsite_selections?player_id=eq.${encodeURIComponent(playerId)}&item_id=eq.${itemId}`,
+    { method: "DELETE", prefer: "return=minimal" }
+  );
+}
+
+// ============================================================
+// 累積メニュー
+//   「PHASEが進んでも前PHASEのTrainingを終了するわけではない」
+//   今日のメニュー = intro_phase <= 現在PHASE かつ 未終了 の和集合
+// ============================================================
+function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
+  const [exercises, setExercises] = useState([]);
+  const [steps, setSteps] = useState([]);
+  const [progress, setProgress] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    if (!protocol?.id) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    Promise.all([
+      sbSelect(
+        "exercises",
+        `?protocol_id=eq.${encodeURIComponent(protocol.id)}&select=*&order=sort_order.asc`
+      ),
+      sbSelect("exercise_steps", `?select=*&order=step_order.asc`),
+      sbSelect(
+        "player_exercise_progress",
+        `?player_id=eq.${encodeURIComponent(player.id)}&select=*`
+      ),
+    ])
+      .then(([e, s, p]) => {
+        if (!active) return;
+        setExercises(e || []);
+        setSteps(s || []);
+        setProgress(p || []);
+      })
+      .catch((err) => active && setError(err.message))
+      .finally(() => active && setLoading(false));
+    return () => {
+      active = false;
+    };
+  }, [protocol?.id, player.id]);
+
+  const progressOf = (exId) => progress.find((p) => p.exercise_id === exId);
+  const stepsOf = (exId) => steps.filter((s) => s.exercise_id === exId);
+
+  const saveProgress = async (exId, patch) => {
+    const existing = progressOf(exId);
+    try {
+      const row = {
+        player_id: player.id,
+        exercise_id: exId,
+        current_step: patch.current_step ?? existing?.current_step ?? 1,
+        terminated: patch.terminated ?? existing?.terminated ?? false,
+        updated_at: new Date().toISOString(),
+      };
+      const [saved] = await sbUpsert("player_exercise_progress", row, "player_id,exercise_id");
+      setProgress((prev) => {
+        const others = prev.filter((p) => p.exercise_id !== exId);
+        return [...others, saved];
+      });
+      onChanged?.();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const current = exercises.filter(
+    (e) => e.intro_phase <= player.currentPhase && !progressOf(e.id)?.terminated
+  );
+  const upcoming = exercises.filter((e) => e.intro_phase > player.currentPhase);
+  const terminated = exercises.filter((e) => progressOf(e.id)?.terminated);
+
+  if (loading) {
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm flex items-center gap-2 text-slate-400 text-sm">
+        <Loader2 size={16} className="animate-spin" /> メニューを読み込み中...
+      </div>
+    );
+  }
+  if (exercises.length === 0) return null;
+
+  const renderExercise = (e) => {
+    const prog = progressOf(e.id);
+    const exSteps = stepsOf(e.id);
+    const stepIdx = (prog?.current_step ?? 1) - 1;
+    const step = exSteps[stepIdx] ?? null;
+    const loadKg = toActualLoadKg(step?.load_percent_bw, player.bodyWeightKg);
+    const timeSec = toActualTimeSec(step?.speed_percent, player.baselineTimeSec);
+
+    return (
+      <div key={e.id} className="border border-slate-200 rounded-lg p-3">
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex-1">
+            <p className="text-xs font-bold text-slate-700">{e.name}</p>
+            <p className="text-[10px] text-slate-400">
+              PHASE {e.intro_phase} 導入
+              {e.continues ? "・以降も継続" : ""}
+              {e.prescription ? `・${e.prescription}` : ""}
+            </p>
+          </div>
+          {!e.is_gate_exercise && (
+            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 shrink-0">
+              GATE種目外
+            </span>
+          )}
+        </div>
+
+        {e.notes && <p className="text-[10px] text-amber-600 mt-1">※{e.notes}</p>}
+
+        {exSteps.length > 0 && (
+          <div className="mt-2 bg-slate-50 rounded px-2 py-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex-1">
+                <p className="text-[10px] text-slate-400">
+                  ステップ {stepIdx + 1}/{exSteps.length}
+                </p>
+                <p className="text-xs text-slate-700">{step?.label ?? "—"}</p>
+                {step?.target && <p className="text-[10px] text-slate-500">{step.target}</p>}
+                {loadKg !== null && (
+                  <p className="text-[10px] text-blue-600">
+                    {step.load_percent_bw}%BW → 約 {loadKg}kg
+                  </p>
+                )}
+                {timeSec !== null && (
+                  <p className="text-[10px] text-blue-600">
+                    {step.speed_percent}% → {player.baselineDistanceM ?? 100}m 約 {timeSec}秒
+                  </p>
+                )}
+                {(step?.load_percent_bw && !player.bodyWeightKg) ||
+                (step?.speed_percent && !player.baselineTimeSec) ? (
+                  <p className="text-[10px] text-slate-400">
+                    体重・基準タイムを入力すると実数に換算されます
+                  </p>
+                ) : null}
+              </div>
+              {!readOnly && (
+                <div className="flex gap-1 shrink-0">
+                  <button
+                    onClick={() => saveProgress(e.id, { current_step: Math.max(1, stepIdx) })}
+                    disabled={stepIdx <= 0}
+                    className="p-1 rounded border border-slate-200 text-slate-500 disabled:opacity-30 hover:bg-white"
+                    title="前のステップへ"
+                  >
+                    <ArrowLeft size={12} />
+                  </button>
+                  <button
+                    onClick={() =>
+                      saveProgress(e.id, { current_step: Math.min(exSteps.length, stepIdx + 2) })
+                    }
+                    disabled={stepIdx >= exSteps.length - 1}
+                    className="p-1 rounded border border-slate-200 text-blue-600 disabled:opacity-30 hover:bg-white"
+                    title="次のステップへ"
+                  >
+                    <ArrowRight size={12} />
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {!readOnly && (
+          <button
+            onClick={() => saveProgress(e.id, { terminated: !prog?.terminated })}
+            className="text-[10px] text-slate-400 hover:text-red-500 underline mt-1.5"
+          >
+            {prog?.terminated ? "メニューに戻す" : "この種目を終了する"}
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+        <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+          <Dumbbell size={16} className="text-blue-600" /> 今日のメニュー（PHASE {player.currentPhase}時点）
+        </p>
+        <p className="text-[11px] text-slate-400 mb-3">
+          PHASEが進んでも前PHASEのTrainingは終了しません。解禁済みの種目がすべて表示されます。
+        </p>
+        <div className="space-y-2">{current.map(renderExercise)}</div>
+      </div>
+
+      {upcoming.length > 0 && (
+        <div className="bg-white rounded-2xl border border-red-100 p-5 shadow-sm">
+          <p className="text-sm font-bold text-red-600 mb-1 flex items-center gap-1.5">
+            <Ban size={16} /> まだ行わない種目
+          </p>
+          <p className="text-[11px] text-slate-400 mb-3">
+            GATEを通過するまで実施しません。やることリストより、やってはいけないリストのほうが現場では効きます。
+          </p>
+          <ul className="space-y-1">
+            {upcoming.map((e) => (
+              <li key={e.id} className="text-xs text-slate-600 flex items-center justify-between bg-red-50 rounded px-2 py-1.5">
+                <span>{e.name}</span>
+                <span className="text-[10px] text-red-500 font-bold shrink-0 ml-2">
+                  PHASE {e.intro_phase} で解禁
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {!readOnly && terminated.length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+          <p className="text-xs font-bold text-slate-500 mb-2">終了した種目（{terminated.length}）</p>
+          <div className="space-y-2">{terminated.map(renderExercise)}</div>
+        </div>
+      )}
+
+      {error && <p className="text-xs text-red-500">{error}</p>}
     </div>
   );
 }
