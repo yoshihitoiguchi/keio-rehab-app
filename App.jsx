@@ -1644,7 +1644,7 @@ function MenuLibraryManagement({ orgId, masterProtocols, phaseMenus, setPhaseMen
         >
           {masterProtocols.map((p) => (
             <option key={p.id} value={p.id}>
-              {p.name}
+              {p.name}（全{p.phaseCount}段階）
             </option>
           ))}
           {masterProtocols.length === 0 && <option value="">プロトコル未登録</option>}
@@ -1742,19 +1742,24 @@ function PhaseMenuCatalog({ menus, protocolId, phaseNumber }) {
 
 // ---------- プロトコル管理(CMS) ----------
 function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
-  const blankPhases = () =>
-    Array.from({ length: 5 }, (_, i) => ({ title: `フェーズ${i + 1}`, conditionsText: "" }));
+  // フェーズ数はプロトコルごとに自由（5段階でも10段階でもよい）
+  const makePhase = (i) => ({ title: `フェーズ${i + 1}`, conditionsText: "" });
+  const blankPhases = (n = 5) => Array.from({ length: n }, (_, i) => makePhase(i));
 
   const [name, setName] = useState("");
   const [totalWeeks, setTotalWeeks] = useState(8);
   const [videoUrl, setVideoUrl] = useState("");
-  const [phaseForms, setPhaseForms] = useState(blankPhases());
+  const [scheme, setScheme] = useState("");
+  const [phaseForms, setPhaseForms] = useState(blankPhases(5));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
   const updatePhaseForm = (idx, field, value) => {
     setPhaseForms((prev) => prev.map((p, i) => (i === idx ? { ...p, [field]: value } : p)));
   };
+  const addPhase = () => setPhaseForms((prev) => [...prev, makePhase(prev.length)]);
+  const removePhase = (idx) =>
+    setPhaseForms((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx)));
 
   const handleAddProtocol = async () => {
     if (!name.trim()) return;
@@ -1768,6 +1773,7 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
       name: name.trim(),
       total_weeks: Number(totalWeeks) || 8,
       video_url: videoUrl.trim() || null,
+      classification_scheme: scheme || null,
       phases,
     };
     setSaving(true);
@@ -1778,7 +1784,8 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
       setName("");
       setTotalWeeks(8);
       setVideoUrl("");
-      setPhaseForms(blankPhases());
+      setScheme("");
+      setPhaseForms(blankPhases(5));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1786,10 +1793,36 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
     }
   };
 
-  const handleDeleteProtocol = async (id) => {
+  const handleDeleteProtocol = async (id, protoName) => {
+    setError(null);
     try {
+      const users = await sbSelect(
+        "players",
+        `?protocol_id=eq.${encodeURIComponent(id)}&org_id=eq.${encodeURIComponent(orgId)}&select=id,name`
+      );
+      const n = users?.length ?? 0;
+      const warn =
+        n > 0
+          ? `\n\n注意：このプロトコルは現在 ${n}名 の選手が使用中です（${users
+              .slice(0, 5)
+              .map((u) => u.name)
+              .join("、")}${n > 5 ? " ほか" : ""}）。\n削除すると、その選手のプロトコルは未設定になります。`
+          : "";
+      if (!window.confirm(`プロトコル「${protoName}」を削除しますか？${warn}\n\nこの操作は取り消せません。`)) return;
       await sbDelete("protocols", id);
       setMasterProtocols((prev) => prev.filter((p) => p.id !== id));
+    } catch (err) {
+      setError(`削除できませんでした: ${err.message}`);
+    }
+  };
+
+  const handleUpdateScheme = async (id, value) => {
+    setError(null);
+    try {
+      await sbUpdate("protocols", id, { classification_scheme: value || null });
+      setMasterProtocols((prev) =>
+        prev.map((p) => (p.id === id ? { ...p, classificationScheme: value || null } : p))
+      );
     } catch (err) {
       setError(err.message);
     }
@@ -1813,11 +1846,18 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
           登録済みプロトコル ({masterProtocols.length})
         </h3>
         {masterProtocols.map((p) => (
-          <ProtocolCard key={p.id} protocol={p} onDelete={handleDeleteProtocol} onSaveVideo={handleUpdateVideoUrl} />
+          <ProtocolCard
+            key={p.id}
+            protocol={p}
+            onDelete={handleDeleteProtocol}
+            onSaveVideo={handleUpdateVideoUrl}
+            onSaveScheme={handleUpdateScheme}
+          />
         ))}
         {masterProtocols.length === 0 && (
           <p className="text-sm text-slate-400">まだプロトコルが登録されていません。</p>
         )}
+        {error && <p className="text-xs text-red-500">{error}</p>}
       </div>
 
       <div className="bg-white rounded-xl border border-slate-200 p-5 h-fit">
@@ -1854,10 +1894,48 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
               className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
+          <div>
+            <label className="text-xs text-slate-500">分類の分岐（任意）</label>
+            <select
+              value={scheme}
+              onChange={(e) => setScheme(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 bg-white"
+            >
+              <option value="">なし</option>
+              <option value="hamstring">ハムストリング（BAMIC × 損傷筋 × 部位）</option>
+            </select>
+            <p className="text-[10px] text-slate-400 mt-1">
+              設定すると、このプロトコルを選んだ選手の詳細画面に分類の入力欄が出ます。
+            </p>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-slate-500">
+              フェーズ構成（全 {phaseForms.length} 段階）
+            </label>
+            <button
+              onClick={addPhase}
+              className="text-[11px] px-2.5 py-1 rounded-full border border-blue-200 text-blue-600 hover:bg-blue-50"
+            >
+              ＋ フェーズを追加
+            </button>
+          </div>
+
           <div className="max-h-72 overflow-y-auto space-y-3 pr-1">
             {phaseForms.map((p, idx) => (
               <div key={idx} className="border border-slate-200 rounded-lg p-3">
-                <label className="text-xs text-slate-500">Phase {idx + 1} 名称</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs text-slate-500">Phase {idx + 1} 名称</label>
+                  {phaseForms.length > 1 && (
+                    <button
+                      onClick={() => removePhase(idx)}
+                      className="text-slate-400 hover:text-red-500"
+                      title="このフェーズを削除"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
                 <input
                   value={p.title}
                   onChange={(e) => updatePhaseForm(idx, "title", e.target.value)}
@@ -1889,7 +1967,7 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
   );
 }
 
-function ProtocolCard({ protocol, onDelete, onSaveVideo }) {
+function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme }) {
   const [videoUrl, setVideoUrl] = useState(protocol.videoUrl || "");
   const [savingVideo, setSavingVideo] = useState(false);
 
@@ -1905,8 +1983,22 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo }) {
         <div>
           <p className="font-bold text-slate-800">{protocol.name}</p>
           <p className="text-xs text-slate-400">標準復帰期間: 約{protocol.totalWeeks}週間</p>
+          <div className="flex items-center gap-1.5 mt-1">
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600">
+              全 {protocol.phaseCount} 段階
+            </span>
+            {protocol.classificationScheme === "hamstring" && (
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700">
+                分類分岐あり
+              </span>
+            )}
+          </div>
         </div>
-        <button onClick={() => onDelete(protocol.id)} className="text-slate-400 hover:text-red-500 p-1" title="削除">
+        <button
+          onClick={() => onDelete(protocol.id, protocol.name)}
+          className="text-slate-400 hover:text-red-500 p-1"
+          title="このプロトコルを削除"
+        >
           <Trash2 size={16} />
         </button>
       </div>
@@ -1924,6 +2016,18 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo }) {
           </div>
         ))}
       </div>
+      <div className="mt-3 pt-3 border-t border-slate-100">
+        <label className="text-xs text-slate-500">分類の分岐</label>
+        <select
+          value={protocol.classificationScheme || ""}
+          onChange={(e) => onSaveScheme(protocol.id, e.target.value)}
+          className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-xs mt-1 bg-white"
+        >
+          <option value="">なし</option>
+          <option value="hamstring">ハムストリング（BAMIC × 損傷筋 × 部位）</option>
+        </select>
+      </div>
+
       <div className="mt-3 pt-3 border-t border-slate-100">
         <label className="text-xs text-slate-500 flex items-center gap-1">
           <Youtube size={12} className="text-red-500" /> 参考動画URL
@@ -3298,7 +3402,7 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
         >
           {masterProtocols.map((p) => (
             <option key={p.id} value={p.id}>
-              {p.name}
+              {p.name}（全{p.phaseCount}段階）
             </option>
           ))}
           {masterProtocols.length === 0 && <option value="">プロトコル未登録</option>}
