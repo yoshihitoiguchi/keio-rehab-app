@@ -109,6 +109,10 @@ async function fetchSetting(orgId, key) {
   return value === null || value === undefined ? null : String(value).trim().toLowerCase();
 }
 
+// 画面右上に表示するビルド識別子。
+// デプロイが反映されているかを一目で確認するためのもの。
+const APP_BUILD = "v11 (分類分岐・可変フェーズ)";
+
 // ---- DBの行(snake_case) <-> アプリ内部表現(camelCase) の変換 ----
 function normalizeProtocol(row) {
   return {
@@ -544,6 +548,7 @@ export default function RehabApp() {
             <span className="hidden sm:flex items-center gap-1 ml-2 text-xs text-slate-400 border-l border-slate-700 pl-3">
               <Building2 size={12} /> {org.name}
             </span>
+            <span className="hidden md:inline text-[10px] text-slate-500 ml-2">{APP_BUILD}</span>
           </div>
           <div className="flex items-center gap-3">
             {loadError && (
