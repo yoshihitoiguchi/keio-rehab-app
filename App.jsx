@@ -345,6 +345,13 @@ function isAlert(player) {
   if (!r) return player.sos;
   return player.sos || r.triage === "red";
 }
+// 分類バリアントの短縮ラベル（例：BAMIC 2b / 大腿二頭筋 / 近位）
+function classificationLabel(player) {
+  if (!player?.bamicGrade || !player?.hamstringMuscle || !player?.hamstringLocation) return null;
+  const m = { semimembranosus: "半膜様筋", semitendinosus: "半腱様筋", biceps_femoris: "大腿二頭筋" };
+  const l = { proximal: "近位", mid_distal: "中間位〜遠位" };
+  return `BAMIC ${player.bamicGrade} / ${m[player.hamstringMuscle]} / ${l[player.hamstringLocation]}`;
+}
 function phaseCountOf(protocol) {
   return protocol?.phaseCount || 5;
 }
@@ -2317,6 +2324,9 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
                         Phase {p.currentPhase}/{phaseCountOf(protocolOf(p))}
                       </span>
                     </p>
+                    {classificationLabel(p) && (
+                      <p className="text-[10px] text-blue-600 mt-0.5">{classificationLabel(p)}</p>
+                    )}
                     {p.supportStatus && p.supportStatus !== "unresolved" && (
                       <p
                         className={`text-[10px] font-bold mt-0.5 ${
@@ -3326,15 +3336,33 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
   const [injuryDate, setInjuryDate] = useState("");
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
+  // 分類の分岐（プロトコル選択に応じて出す）
+  const [bamic, setBamic] = useState("");
+  const [muscle, setMuscle] = useState("");
+  const [location, setLocation] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+
+  const selectedProtocol = masterProtocols.find((p) => p.id === protocolId) ?? null;
+  const needsHamstring = selectedProtocol?.classificationScheme === "hamstring";
 
   useEffect(() => {
     if (!protocolId && masterProtocols[0]) setProtocolId(masterProtocols[0].id);
   }, [masterProtocols, protocolId]);
 
+  // プロトコルを変えたら分類をリセット（前の選択が残らないように）
+  useEffect(() => {
+    setBamic("");
+    setMuscle("");
+    setLocation("");
+  }, [protocolId]);
+
   const handleRegister = async () => {
     if (!name.trim() || !protocolId) return;
+    if (needsHamstring && (!bamic || !muscle || !location)) {
+      setError("BAMIC分類・損傷筋・部位をすべて選択してください");
+      return;
+    }
     if (pin.length !== 4) {
       setError("暗証番号は4桁の数字で設定してください");
       return;
@@ -3356,6 +3384,9 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
       sos: false,
       booked_slot_id: null,
       injury_date: injuryDate || null,
+      bamic_grade: needsHamstring ? bamic : null,
+      hamstring_muscle: needsHamstring ? muscle : null,
+      hamstring_location: needsHamstring ? location : null,
       pin,
     };
     setSaving(true);
@@ -3407,6 +3438,57 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
           ))}
           {masterProtocols.length === 0 && <option value="">プロトコル未登録</option>}
         </select>
+
+        {needsHamstring && (
+          <div className="border border-blue-200 bg-blue-50 rounded-lg p-3 mb-4">
+            <p className="text-xs font-bold text-blue-700 mb-1">損傷の分類</p>
+            <p className="text-[10px] text-blue-600 mb-2">
+              リハビリの内容は共通ですが、ここで分けた分類ごとに復帰期間を比較します。
+            </p>
+            <label className="text-[10px] text-slate-600">BAMIC分類</label>
+            <select
+              value={bamic}
+              onChange={(e) => setBamic(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm mt-0.5 mb-2 bg-white"
+            >
+              <option value="">選択してください</option>
+              {BAMIC_GRADES.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+            </select>
+            <label className="text-[10px] text-slate-600">損傷筋</label>
+            <select
+              value={muscle}
+              onChange={(e) => setMuscle(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm mt-0.5 mb-2 bg-white"
+            >
+              <option value="">選択してください</option>
+              {HAMSTRING_MUSCLES.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+            <label className="text-[10px] text-slate-600">部位</label>
+            <select
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm mt-0.5 bg-white"
+            >
+              <option value="">選択してください</option>
+              {HAMSTRING_LOCATIONS.map((l) => (
+                <option key={l.value} value={l.value}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+            <p className="text-[10px] text-slate-500 mt-2">
+              {BAMIC_NOTES.a}／{BAMIC_NOTES.b}／{BAMIC_NOTES.c}
+            </p>
+          </div>
+        )}
 
         <label className="text-xs text-slate-500">受傷日（あとから登録・変更も可能です）</label>
         <input
@@ -4235,6 +4317,29 @@ function HamstringClassificationCard({ orgId, player, protocol, readOnly, onSave
 
   const isHamstring = protocol?.classificationScheme === "hamstring";
 
+  const [cohorts, setCohorts] = useState([]);
+  const [showCohorts, setShowCohorts] = useState(false);
+
+  // 組織内の全分類バリアントの実績（比較用）
+  useEffect(() => {
+    let active = true;
+    if (!isHamstring) {
+      setCohorts([]);
+      return;
+    }
+    sbSelect(
+      "hamstring_recovery_by_classification",
+      `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=avg_days.asc`
+    )
+      .then((rows) => {
+        if (active) setCohorts(rows || []);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [orgId, isHamstring, player.completedAt]);
+
   useEffect(() => {
     let active = true;
     if (!isHamstring || !player.bamicGrade || !player.hamstringMuscle || !player.hamstringLocation) {
@@ -4378,6 +4483,61 @@ function HamstringClassificationCard({ orgId, player, protocol, readOnly, onSave
         <p className="text-[11px] text-slate-400 mt-3 pt-3 border-t border-slate-100">
           この分類で完遂した選手のデータはまだありません。蓄積されると平均復帰期間が表示されます。
         </p>
+      )}
+
+      {cohorts.length > 0 && (
+        <div className="mt-3 pt-3 border-t border-slate-100">
+          <button
+            onClick={() => setShowCohorts((v) => !v)}
+            className="text-[11px] text-blue-600 hover:underline"
+          >
+            {showCohorts ? "分類別の比較を閉じる" : `分類別の比較を見る（${cohorts.length}分類）`}
+          </button>
+          {showCohorts && (
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full text-[10px] border-collapse">
+                <thead>
+                  <tr className="text-left border-b border-slate-200 text-slate-500">
+                    <th className="py-1 pr-2">BAMIC</th>
+                    <th className="py-1 pr-2">損傷筋</th>
+                    <th className="py-1 pr-2">部位</th>
+                    <th className="py-1 pr-2 text-right">平均</th>
+                    <th className="py-1 pr-2 text-right">範囲</th>
+                    <th className="py-1 text-right">n</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cohorts.map((c, i) => {
+                    const isMine =
+                      c.bamic_grade === player.bamicGrade &&
+                      c.hamstring_muscle === player.hamstringMuscle &&
+                      c.hamstring_location === player.hamstringLocation;
+                    return (
+                      <tr
+                        key={i}
+                        className={`border-b border-slate-100 ${
+                          isMine ? "bg-blue-50 font-bold text-blue-700" : "text-slate-600"
+                        }`}
+                      >
+                        <td className="py-1 pr-2">{c.bamic_grade ?? "—"}</td>
+                        <td className="py-1 pr-2">{MUSCLE_LABELS[c.hamstring_muscle] ?? "—"}</td>
+                        <td className="py-1 pr-2">{LOCATION_LABELS[c.hamstring_location] ?? "—"}</td>
+                        <td className="py-1 pr-2 text-right">{c.avg_days}日</td>
+                        <td className="py-1 pr-2 text-right">
+                          {c.min_days}〜{c.max_days}
+                        </td>
+                        <td className="py-1 text-right">{c.sample_size}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <p className="text-[10px] text-slate-400 mt-1">
+                完遂（受傷日と完遂日が揃った選手）のみを集計しています。青が該当選手の分類です。
+              </p>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
