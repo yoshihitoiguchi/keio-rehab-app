@@ -84,6 +84,123 @@ const sbUpsert = (table, body, onConflictColumns) =>
     prefer: "resolution=merge-duplicates,return=representation",
   });
 
+// ============================================================
+// 写真・動画のアップロード（Supabase Storage）
+//   スマホのカメラロールやカメラから直接送れるようにする。
+//   動画は1本50MBまで、保存は90日（サーバー側で削除）。
+// ============================================================
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB
+const MAX_VIDEO_BYTES = 50 * 1024 * 1024; // 50MB
+const ATTACHMENT_BUCKET = "attachments";
+
+function formatBytes(n) {
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)}KB`;
+  return `${Math.round((n / 1024 / 1024) * 10) / 10}MB`;
+}
+
+async function uploadAttachment(file, { playerId, orgId, context, contextId }) {
+  const isVideo = file.type.startsWith("video/");
+  const kind = isVideo ? "video" : "image";
+  const limit = isVideo ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES;
+
+  if (file.size > limit) {
+    throw new Error(
+      `${isVideo ? "動画" : "写真"}は${formatBytes(limit)}までです（選んだファイルは${formatBytes(file.size)}）`
+    );
+  }
+
+  const ext = (file.name.split(".").pop() || (isVideo ? "mp4" : "jpg")).toLowerCase();
+  const path = `${playerId}/${context}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+
+  const res = await fetch(
+    `${SUPABASE_URL}/storage/v1/object/${ATTACHMENT_BUCKET}/${encodeURI(path)}`,
+    {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        "Content-Type": file.type || "application/octet-stream",
+      },
+      body: file,
+    }
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`アップロードに失敗しました: ${text || res.statusText}`);
+  }
+
+  const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${ATTACHMENT_BUCKET}/${encodeURI(path)}`;
+
+  const [row] = await sbInsert("media_attachments", {
+    player_id: playerId,
+    org_id: orgId || null,
+    storage_path: path,
+    public_url: publicUrl,
+    mime_type: file.type || null,
+    byte_size: file.size,
+    kind,
+    context,
+    context_id: contextId != null ? String(contextId) : null,
+  });
+
+  return { id: row?.id ?? null, url: publicUrl, kind, size: file.size };
+}
+
+// 写真・動画を選んで送るボタン（スマホではカメラ／ライブラリが開く）
+function MediaUploadButton({ playerId, orgId, context, contextId, onUploaded, label }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const inputRef = React.useRef(null);
+
+  const handleChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await uploadAttachment(file, { playerId, orgId, context, contextId });
+      onUploaded?.(result);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+
+  return (
+    <span className="inline-flex flex-col">
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*,video/*"
+        onChange={handleChange}
+        className="hidden"
+      />
+      <button
+        type="button"
+        onClick={() => inputRef.current?.click()}
+        disabled={busy}
+        className="text-[11px] text-slate-500 hover:text-blue-600 underline disabled:opacity-40"
+      >
+        {busy ? "アップロード中..." : label || "写真・動画を追加"}
+      </button>
+      {error && <span className="text-[10px] text-red-500 mt-0.5">{error}</span>}
+    </span>
+  );
+}
+
+// 添付のプレビュー（画像はそのまま、動画は再生できる形で出す）
+function AttachmentPreview({ url, kind }) {
+  if (!url) return null;
+  if (kind === "video") {
+    return (
+      <video src={url} controls playsInline className="w-full max-w-xs rounded-lg mt-1.5 bg-black" />
+    );
+  }
+  return <img src={url} alt="添付" className="w-full max-w-xs rounded-lg mt-1.5" />;
+}
+
 async function sha256Hex(text) {
   if (!window.crypto || !window.crypto.subtle) {
     throw new Error(
@@ -111,7 +228,7 @@ async function fetchSetting(orgId, key) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v12 (基準提示・人が確認)";
+const APP_BUILD = "v13 (選手が進行・写真動画対応)";
 
 // ---- DBの行(snake_case) <-> アプリ内部表現(camelCase) の変換 ----
 function normalizeProtocol(row) {
@@ -2178,65 +2295,8 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
   };
 
   // 自動では進めない。人が確認したときだけ呼ばれ、確認者と日時を残す。
-  const advancePhase = async (playerId, confirmedByRole = "staff", confirmedByName = "") => {
-    const player = coachPlayers.find((p) => p.id === playerId);
-    if (!player) return;
-    const protocol = masterProtocols.find((mp) => mp.id === player.protocolId);
-    const nextPhase = Math.min(phaseCountOf(protocol), player.currentPhase + 1);
-    const nextConditionsCount = protocol?.phases[nextPhase - 1]?.conditions.length ?? 0;
-    const nextChecklist = Array(nextConditionsCount).fill(false);
-    const now = new Date().toISOString();
-    setCoachPlayers((prev) =>
-      prev.map((p) =>
-        p.id === playerId ? { ...p, currentPhase: nextPhase, checklist: nextChecklist, sos: false } : p
-      )
-    );
-    try {
-      await sbUpdate("players", playerId, {
-        current_phase: nextPhase,
-        checklist: nextChecklist,
-        sos: false,
-      });
-      // 要件②：フェーズ滞在履歴を記録（前のフェーズを閉じて、新しいフェーズを開始）
-      await sb(
-        `phase_history?player_id=eq.${encodeURIComponent(playerId)}&phase_number=eq.${player.currentPhase}&left_at=is.null`,
-        { method: "PATCH", body: JSON.stringify({ left_at: now }), prefer: "return=minimal" }
-      );
-      await sbInsert("phase_history", {
-        player_id: playerId,
-        protocol_id: player.protocolId,
-        phase_number: nextPhase,
-        entered_at: now,
-      });
-      await sbInsert("phase_advances", {
-        player_id: playerId,
-        from_phase: player.currentPhase,
-        to_phase: nextPhase,
-        confirmed_by_role: confirmedByRole,
-        confirmed_by_name: confirmedByName || null,
-        confirmed_at: now,
-      });
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-
-  const markCompleted = async (playerId) => {
-    const player = coachPlayers.find((p) => p.id === playerId);
-    const now = new Date().toISOString();
-    setCoachPlayers((prev) => prev.map((p) => (p.id === playerId ? { ...p, completedAt: now } : p)));
-    try {
-      await sbUpdate("players", playerId, { completed_at: now });
-      if (player) {
-        await sb(
-          `phase_history?player_id=eq.${encodeURIComponent(playerId)}&phase_number=eq.${player.currentPhase}&left_at=is.null`,
-          { method: "PATCH", body: JSON.stringify({ left_at: now }), prefer: "return=minimal" }
-        );
-      }
-    } catch (err) {
-      setError(err.message);
-    }
-  };
+  // PHASEを進める／復帰を記録するのは選手本人だけにした（指導者側からは行わない）。
+  // スタッフはGATE項目のチェックと観察の記録を担当する。
 
   const deletePlayer = async (playerId, playerName) => {
     const confirmed = window.confirm(
@@ -2480,8 +2540,6 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
             slots={slots}
             phaseMenus={phaseMenus}
             toggleChecklist={toggleChecklist}
-            advancePhase={advancePhase}
-            markCompleted={markCompleted}
             onDelete={() => deletePlayer(selectedPlayer.id, selectedPlayer.name)}
             onSendMessage={(content, role, extra) => sendCoachMessage(selectedPlayer.id, content, role, extra)}
             onSaveZoomUrl={saveZoomUrl}
@@ -2509,8 +2567,6 @@ function PlayerDetailPanel({
   slots,
   phaseMenus,
   toggleChecklist,
-  advancePhase,
-  markCompleted,
   onDelete,
   onSendMessage,
   onSaveZoomUrl,
@@ -2686,12 +2742,11 @@ function PlayerDetailPanel({
         </div>
 
         <GatePanel
+          orgId={orgId}
           player={player}
           protocol={protocol}
           phaseInfo={phaseInfo}
           viewerRole="staff"
-          onAdvance={(role, nm) => advancePhase(player.id, role, nm)}
-          onComplete={() => markCompleted(player.id)}
         />
 
         <GateAgreementPanel player={player} />
@@ -3011,6 +3066,7 @@ function GateAgreementPanel({ player }) {
 }
 
 function GatePanel({
+  orgId,
   player,
   protocol,
   phaseInfo,
@@ -3021,8 +3077,8 @@ function GatePanel({
   const [checks, setChecks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busyIdx, setBusyIdx] = useState(null);
-  const [videoFor, setVideoFor] = useState(null);
-  const [videoUrl, setVideoUrl] = useState("");
+  // 項目ごとに、次のチェックへ添付する写真・動画を持つ
+  const [pendingMedia, setPendingMedia] = useState({});
   const [checkerName, setCheckerName] = useState("");
   const [error, setError] = useState(null);
 
@@ -3098,6 +3154,7 @@ function GatePanel({
   const record = async (idx, result) => {
     setBusyIdx(idx);
     setError(null);
+    const media = pendingMedia[idx] || null;
     try {
       const [row] = await sbInsert("gate_item_checks", {
         player_id: player.id,
@@ -3106,13 +3163,15 @@ function GatePanel({
         checker_role: viewerRole,
         checker_name: checkerName.trim() || null,
         result,
-        video_url: videoFor === idx && videoUrl.trim() ? videoUrl.trim() : null,
+        video_url: media?.url || null,
+        attachment_id: media?.id || null,
       });
       setChecks((prev) => [row, ...prev]);
-      if (videoFor === idx) {
-        setVideoFor(null);
-        setVideoUrl("");
-      }
+      setPendingMedia((prev) => {
+        const next = { ...prev };
+        delete next[idx];
+        return next;
+      });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -3154,50 +3213,57 @@ function GatePanel({
                   {/* 原案の文言をそのまま表示する */}
                   <p className="text-sm text-slate-800">{text}</p>
                   {st.note && <p className="text-[10px] text-slate-500 mt-0.5">{st.note}</p>}
-                  {st.self?.video_url && (
-                    <a
-                      href={st.self.video_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-[10px] text-blue-600 underline"
-                    >
-                      添付動画を開く
-                    </a>
+                  {(st.self?.video_url || st.staff?.video_url) && (
+                    <AttachmentPreview
+                      url={st.self?.video_url || st.staff?.video_url}
+                      kind={
+                        (st.self?.video_url || st.staff?.video_url || "").match(
+                          /\.(mp4|mov|webm)$/i
+                        )
+                          ? "video"
+                          : "image"
+                      }
+                    />
                   )}
                 </div>
               </div>
 
               {!st.auto && (
-                <div className="flex flex-wrap items-center gap-1.5 mt-2 ml-6">
-                  <button
-                    onClick={() => record(idx, true)}
-                    disabled={busyIdx === idx}
-                    className="text-[11px] px-2.5 py-1 rounded-full border border-green-300 text-green-700 hover:bg-green-50 disabled:opacity-40"
-                  >
-                    できた
-                  </button>
-                  <button
-                    onClick={() => record(idx, false)}
-                    disabled={busyIdx === idx}
-                    className="text-[11px] px-2.5 py-1 rounded-full border border-slate-300 text-slate-500 hover:bg-slate-50 disabled:opacity-40"
-                  >
-                    できていない
-                  </button>
-                  <button
-                    onClick={() => setVideoFor(videoFor === idx ? null : idx)}
-                    className="text-[11px] text-slate-400 hover:text-blue-600 underline"
-                  >
-                    動画を添付（任意）
-                  </button>
+                <div className="mt-2 ml-6">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      onClick={() => record(idx, true)}
+                      disabled={busyIdx === idx}
+                      className="text-[11px] px-2.5 py-1 rounded-full border border-green-300 text-green-700 hover:bg-green-50 disabled:opacity-40"
+                    >
+                      できた
+                    </button>
+                    <button
+                      onClick={() => record(idx, false)}
+                      disabled={busyIdx === idx}
+                      className="text-[11px] px-2.5 py-1 rounded-full border border-slate-300 text-slate-500 hover:bg-slate-50 disabled:opacity-40"
+                    >
+                      できていない
+                    </button>
+                    <MediaUploadButton
+                      playerId={player.id}
+                      orgId={orgId}
+                      context="gate_check"
+                      contextId={`${phase}-${idx}`}
+                      label="写真・動画を追加（任意）"
+                      onUploaded={(m) => setPendingMedia((prev) => ({ ...prev, [idx]: m }))}
+                    />
+                  </div>
+                  {pendingMedia[idx] && (
+                    <div className="mt-1.5">
+                      <p className="text-[10px] text-green-600">
+                        添付を用意しました（{formatBytes(pendingMedia[idx].size)}）。
+                        「できた」「できていない」を押すと一緒に記録されます。
+                      </p>
+                      <AttachmentPreview url={pendingMedia[idx].url} kind={pendingMedia[idx].kind} />
+                    </div>
+                  )}
                 </div>
-              )}
-              {videoFor === idx && (
-                <input
-                  value={videoUrl}
-                  onChange={(e) => setVideoUrl(e.target.value)}
-                  placeholder="動画URL（任意・次のチェックに添付されます）"
-                  className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-xs mt-2 ml-6"
-                />
               )}
             </div>
           );
@@ -3225,16 +3291,17 @@ function GatePanel({
         </div>
       )}
 
-      {!isLastPhase && (
+      {/* PHASEを進めるのは選手本人だけ。スタッフは項目のチェックと観察の記録を行う。 */}
+      {viewerRole === "self" && !isLastPhase && (
         <button
-          onClick={() => onAdvance(viewerRole, checkerName.trim())}
+          onClick={() => onAdvance("self", checkerName.trim())}
           disabled={!allOk}
           className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-blue-600 text-white font-bold text-sm hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
         >
           確認して次のPHASEへ進む <ArrowRight size={16} />
         </button>
       )}
-      {isLastPhase && !player.completedAt && onComplete && (
+      {viewerRole === "self" && isLastPhase && !player.completedAt && onComplete && (
         <button
           onClick={() => onComplete()}
           disabled={!allOk}
@@ -3242,6 +3309,13 @@ function GatePanel({
         >
           <ShieldCheck size={16} /> 確認して復帰を記録する
         </button>
+      )}
+      {viewerRole === "staff" && !player.completedAt && (
+        <p className="mt-4 text-[11px] text-slate-400 text-center">
+          {allOk
+            ? "条件はそろっています。次のPHASEへ進むのは選手本人の操作です。"
+            : "PHASEを進めるのは選手本人の操作です。"}
+        </p>
       )}
       {player.completedAt && (
         <div className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-green-50 text-green-700 font-bold text-sm">
@@ -4227,6 +4301,8 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
   const [rpe, setRpe] = useState(70);
   // 送信結果（基準の提示に使う）
   const [submitted, setSubmitted] = useState(null);
+  // 日報に添える写真・動画（任意）
+  const [reportMedia, setReportMedia] = useState(null);
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
   const [error, setError] = useState(null);
@@ -4282,6 +4358,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
         fear_level: player.currentPhase >= 5 ? fearLevel : null,
         slipping_contact: player.currentPhase >= 6 ? slippingContact : null,
         rpe: player.currentPhase >= 7 ? rpe : null,
+        attachment_id: reportMedia?.id ?? null,
       });
       await sbUpdate("players", player.id, { sos });
       setMyPlayer((prev) => ({ ...prev, sos, reports: [...prev.reports, newReport] }));
@@ -4297,6 +4374,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
       setSos(false);
       setSelfCompensation(false);
       setSelfSevereSymptom(false);
+      setReportMedia(null);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -4502,6 +4580,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
           <InjuryDateCard orgId={orgId} player={player} protocol={protocol} setMyPlayer={setMyPlayer} />
 
           <GatePanel
+            orgId={orgId}
             player={player}
             protocol={protocol}
             phaseInfo={phaseInfo}
@@ -4678,6 +4757,33 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
               placeholder="今日感じたことを正直に書いてください"
               className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
+
+            <div className="border border-slate-200 rounded-lg p-3 mb-3">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-bold text-slate-600">写真・動画（任意）</p>
+                <MediaUploadButton
+                  playerId={player.id}
+                  orgId={orgId}
+                  context="report"
+                  contextId={todayStr()}
+                  onUploaded={(m) => setReportMedia(m)}
+                />
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1">
+                写真は10MBまで、動画は50MBまで。保存期間は90日です。
+              </p>
+              {reportMedia && (
+                <div className="mt-1.5">
+                  <AttachmentPreview url={reportMedia.url} kind={reportMedia.kind} />
+                  <button
+                    onClick={() => setReportMedia(null)}
+                    className="text-[10px] text-slate-400 hover:text-red-500 underline mt-1"
+                  >
+                    取り消す
+                  </button>
+                </div>
+              )}
+            </div>
 
             <div className="border border-slate-200 rounded-lg p-3 mb-3 space-y-2">
               <p className="text-xs font-bold text-slate-600">今日の状態</p>
@@ -5050,9 +5156,6 @@ function HamstringClassificationCard({ orgId, player, protocol, readOnly, onSave
     <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
       <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
         <Activity size={16} className="text-blue-600" /> ハムストリング損傷の分類
-      </p>
-      <p className="text-[11px] text-slate-400 mb-3">
-        プロトコルの中身は共通です。部位・重症度別に復帰期間を追跡するために記録します。
       </p>
 
       {readOnly ? (
@@ -5678,10 +5781,7 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
           <p className="text-sm font-bold text-red-600 mb-1 flex items-center gap-1.5">
             <Ban size={16} /> まだ行わない種目
           </p>
-          <p className="text-[11px] text-slate-400 mb-3">
-            GATEを通過するまで実施しません。やることリストより、やってはいけないリストのほうが現場では効きます。
-          </p>
-          <ul className="space-y-1">
+          <ul className="space-y-1 mt-3">
             {upcoming.map((e) => (
               <li key={e.id} className="text-xs text-slate-600 flex items-center justify-between bg-red-50 rounded px-2 py-1.5">
                 <span>{e.name}</span>
