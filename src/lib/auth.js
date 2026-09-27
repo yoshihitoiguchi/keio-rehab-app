@@ -20,7 +20,7 @@ export const SUPABASE_URL =
   import.meta.env.VITE_SUPABASE_URL || "https://akvfrihatvfkrjzpxtcw.supabase.co";
 export const SUPABASE_ANON_KEY =
   import.meta.env.VITE_SUPABASE_ANON_KEY ||
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFrdmZyaWhhdHZma3JqenB4dGN3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxMjk4NDEsImV4cCI6MjEwNDcwNTg0MX0.LUUpqkDo61LfV6vK5RSfYGyb7is93WrvQeikTiV1uIg";
+  "sb_publishable_c2dND4Q3D36SDX8JsxaWSA_ayFHmuSJ";
 
 const AUTH_SESSION_KEY = "resprint.auth";
 

@@ -84,8 +84,12 @@ v15 から **`src/lib/auth.js`** に置いている。`.env.local` に `VITE_SUP
 
 ```js
 const SUPABASE_URL = "https://akvfrihatvfkrjzpxtcw.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFrdmZyaWhhdHZma3JqenB4dGN3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxMjk4NDEsImV4cCI6MjEwNDcwNTg0MX0.LUUpqkDo61LfV6vK5RSfYGyb7is93WrvQeikTiV1uIg";
+const SUPABASE_ANON_KEY = "sb_publishable_c2dND4Q3D36SDX8JsxaWSA_ayFHmuSJ";   // 新形式の公開キー（2026-09-27 に切り替え）
 ```
+
+新形式の公開キーは JWT ではないので、**`apikey` ヘッダーにだけ入れ、`Authorization` には入れない**
+（ログイン中は `Authorization: Bearer <利用者のトークン>`）。`src/lib/auth.js` の `apiHeaders()` がこれを扱う。
+旧形式の匿名キー（`eyJ…`）は、2026年末の廃止まで Supabase 側でまだ有効だが、アプリでは使っていない。
 
 ---
 
@@ -281,7 +285,7 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 **変更をリリースするたびに必ず上げること。** ヘッダー右とログイン画面下に出る。
 
 ```js
-const APP_BUILD = "v15 (サーバー側の認証・組織の分離)";
+const APP_BUILD = "v15.1 (新しい公開キー)";
 ```
 
 本番に出ているのは `v15 (サーバー側の認証・組織の分離)`（2026-09-27 公開。GitHub main `f1322d4`）。
@@ -422,7 +426,7 @@ v16 後も残る穴（優先順。2026-09-27 のレビューで確認したも�
    ```
 5. **テストを増やす。** いまあるのは `npm run test:db`（段階ごとの SQL テスト）だけ。画面のテストは作業用フォルダで動かしただけ。
 6. 添付ファイルの自動削除（`purge_expired_attachments()` は実装済み、pg_cron の有効化が未実施）。
-7. **2026年末までに**新形式の公開キー（`sb_publishable_…`）へ切り替える（上の「Supabase 側の期限」）。
+7. ~~新形式の公開キーへの切り替え~~（2026-09-27 完了）
 
 ---
 
@@ -541,8 +545,8 @@ v16 後も残る穴（優先順。2026-09-27 のレビューで確認したも�
 ### Supabase 側の期限（2026-09-27 時点で公式に告知されているもの）
 - **2026-10-30**：既存プロジェクトでも、新しく作ったテーブル・関数に anon / authenticated の権限が自動で付かなくなる。
   今後のマイグレーションでは、必要な `grant` を必ず明示すること（v15〜v17 は明示済み）。
-- **2026年末**：旧形式の匿名キー（`eyJ…`）が廃止予定。新形式（`sb_publishable_…`）に切り替える。
-  `src/lib/auth.js` と `scripts/check-production.mjs` は新形式でも動くようにしてある（Authorization に入れない）。
+- **2026年末**：旧形式の匿名キー（`eyJ…`）が廃止予定。**2026-09-27 に新形式（`sb_publishable_…`）へ切り替え済み。**
+  Supabase の管理画面（Settings > API Keys）で旧形式を無効にしても、アプリは影響を受けない。
 - 匿名サインインを使うので、「Allow new users to sign up」は**オンのまま**にする（オフにすると匿名サインインも止まる）。
   CAPTCHA を有効にすると、いまのログイン処理は動かなくなる（対応が必要）。
 

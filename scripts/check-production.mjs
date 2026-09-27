@@ -16,7 +16,7 @@ const SITE = process.env.CHECK_SITE || "https://keio-rehab-app.vercel.app";
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || "https://akvfrihatvfkrjzpxtcw.supabase.co";
 const ANON =
   process.env.VITE_SUPABASE_ANON_KEY ||
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFrdmZyaWhhdHZma3JqenB4dGN3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxMjk4NDEsImV4cCI6MjEwNDcwNTg0MX0.LUUpqkDo61LfV6vK5RSfYGyb7is93WrvQeikTiV1uIg";
+  "sb_publishable_c2dND4Q3D36SDX8JsxaWSA_ayFHmuSJ";
 // 新形式の公開キー（sb_publishable_...）は Authorization に入れない
 const H = ANON.startsWith("eyJ") ? { apikey: ANON, Authorization: `Bearer ${ANON}` } : { apikey: ANON };
 
@@ -36,7 +36,7 @@ const site = await safe(async () => {
   const html = await (await fetch(SITE, { cache: "no-store" })).text();
   const js = html.match(/\/assets\/index-[^"]+\.js/)?.[0];
   const code = js ? await (await fetch(SITE + js)).text() : "";
-  const build = code.match(/v1\d \([^)"]{1,40}\)/)?.[0] || "(不明)";
+  const build = code.match(/v1\d(\.\d+)? \([^)"]{1,40}\)/)?.[0] || "(不明)";
   const sw = (await fetch(SITE + "/sw.js", { cache: "no-store" })).status;
   return { build, sw };
 });
