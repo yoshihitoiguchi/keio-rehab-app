@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "ask": [
+      "Bash(npx vercel@latest deploy *)",
+      "Bash(npx vercel@latest promote *)",
+      "Bash(npx vercel@latest rollback *)",
+      "Bash(npx vercel@latest link *)",
+      "Bash(npx vercel@latest --prod *)",
+      "Bash(npx vercel@latest)",
+      "Bash(npx vercel deploy *)",
+      "Bash(npx vercel promote *)",
+      "Bash(npx vercel rollback *)",
+      "Bash(npx --yes vercel@latest deploy *)",
+      "Bash(npx --yes vercel@latest promote *)",
+      "Bash(npx --yes vercel@latest rollback *)",
+      "Bash(vercel deploy *)",
+      "Bash(vercel promote *)",
+      "Bash(vercel rollback *)",
+      "Bash(vercel --prod *)"
+    ],
+    "deny": [
+      "mcp__vercel__deploy_to_vercel",
+      "mcp__vercel__buy_*",
+      "mcp__supabase-prod-ro__apply_migration",
+      "mcp__supabase-prod-ro__deploy_edge_function"
+    ],
+    "allow": [
+      "Bash(git push origin *)",
+      "mcp__supabase-prod-write"
+    ]
+  }
+}

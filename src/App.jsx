@@ -42,33 +42,60 @@ import {
   Gauge,
   ChevronUp,
   ChevronDown,
+  Smartphone,
+  X,
 } from "lucide-react";
+import {
+  SUPABASE_URL,
+  AUTH_LOST_EVENT,
+  apiHeaders,
+  currentAuth,
+  hasAuthSession,
+  ensureAnonymousSession,
+  signInWithPassword,
+  signOut,
+} from "./lib/auth.js";
 
 // ============================================================
-// Supabase 接続設定（確定した本番の値）
+// Supabase 接続設定とログイン状態は src/lib/auth.js にまとめてある。
+// REST・Storage には、ログイン中の利用者のトークンを付けて送る
+// （RLS が「自分の組織のデータだけ」に絞る）。
 // ============================================================
-const SUPABASE_URL = "https://akvfrihatvfkrjzpxtcw.supabase.co";
-const SUPABASE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFrdmZyaWhhdHZma3JqenB4dGN3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxMjk4NDEsImV4cCI6MjEwNDcwNTg0MX0.LUUpqkDo61LfV6vK5RSfYGyb7is93WrvQeikTiV1uIg";
-
 async function sb(path, options = {}) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     method: options.method || "GET",
     body: options.body,
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    headers: await apiHeaders({
       "Content-Type": "application/json",
       Prefer: options.prefer || "return=representation",
-    },
+    }),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Supabase error ${res.status}: ${text || res.statusText}`);
+    const err = new Error(`Supabase error ${res.status}: ${text || res.statusText}`);
+    err.status = res.status;
+    try {
+      err.serverMessage = JSON.parse(text).message || null;
+    } catch {
+      err.serverMessage = null;
+    }
+    throw err;
   }
   if (res.status === 204) return null;
   const text = await res.text();
   return text ? JSON.parse(text) : null;
+}
+
+// DB の関数（RPC）を呼ぶ。関数が出した日本語のエラー文をそのまま画面に出せるようにする。
+async function sbRpc(name, args = {}) {
+  try {
+    return await sb(`rpc/${name}`, { method: "POST", body: JSON.stringify(args) });
+  } catch (err) {
+    if (err.status === 404) {
+      throw new Error("サーバー側の準備（データベースの更新 v15）がまだ済んでいません。");
+    }
+    throw new Error(err.serverMessage || err.message);
+  }
 }
 
 const sbSelect = (table, query = "") => sb(`${table}${query}`);
@@ -116,11 +143,9 @@ async function uploadAttachment(file, { playerId, orgId, context, contextId }) {
     `${SUPABASE_URL}/storage/v1/object/${ATTACHMENT_BUCKET}/${encodeURI(path)}`,
     {
       method: "POST",
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      headers: await apiHeaders({
         "Content-Type": file.type || "application/octet-stream",
-      },
+      }),
       body: file,
     }
   );
@@ -201,6 +226,16 @@ function AttachmentPreview({ url, kind }) {
   return <img src={url} alt="添付" className="w-full max-w-xs rounded-lg mt-1.5" />;
 }
 
+// 画面に出すリンクは http / https だけにする（javascript: などを埋め込まれても実行させない）
+function safeHref(url) {
+  try {
+    const u = new URL(String(url || ""), window.location.href);
+    return u.protocol === "https:" || u.protocol === "http:" ? u.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function sha256Hex(text) {
   if (!window.crypto || !window.crypto.subtle) {
     throw new Error(
@@ -228,7 +263,51 @@ async function fetchSetting(orgId, key) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v13 (選手が進行・写真動画対応)";
+const APP_BUILD = "v15 (サーバー側の認証・組織の分離)";
+
+// ==================================================================
+// ログイン状態をこの端末に保存する（ホーム画面アプリ用）
+//   毎回パスワードと暗証番号を入れ直さずに済むようにする。
+//   保存先はこの端末のブラウザの中だけで、サーバーには送りません。
+//   ・組織ログイン ... 30日間
+//   ・選手ログイン ... 「自分の端末として記憶する」を選んだときだけ 30日間
+//   共用端末ではチェックを外してください。ログアウトすると消えます。
+// ==================================================================
+const SESSION_DAYS = 30;
+const ORG_SESSION_KEY = "resprint.org";
+const PLAYER_SESSION_KEY = "resprint.player";
+
+function readSession(key) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const saved = JSON.parse(raw);
+    if (!saved || !saved.expiresAt || Date.now() > saved.expiresAt) {
+      window.localStorage.removeItem(key);
+      return null;
+    }
+    return saved.value ?? null;
+  } catch {
+    // プライベートブラウズなどで localStorage が使えないことがある。
+    // その場合は「保存されていない」として通常どおり動かす。
+    return null;
+  }
+}
+
+function writeSession(key, value) {
+  try {
+    if (value === null || value === undefined) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ value, expiresAt: Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000 })
+    );
+  } catch {
+    // 保存できなくても動作は続ける
+  }
+}
 
 // ---- DBの行(snake_case) <-> アプリ内部表現(camelCase) の変換 ----
 function normalizeProtocol(row) {
@@ -635,7 +714,15 @@ function getYouTubeEmbedUrl(url) {
 
 // ==================================================================
 export default function RehabApp() {
-  const [org, setOrg] = useState(null); // { id, name } | null
+  // この端末に保存された組織ログインがあれば、それで始める。
+  // v14 以前に保存されたもの（サーバー側のログイン状態がない）は使わず、ログインし直してもらう。
+  const [org, setOrgState] = useState(() =>
+    hasAuthSession() && currentAuth()?.isAnonymous ? readSession(ORG_SESSION_KEY) : null
+  ); // { id, name } | null
+  const setOrg = (next) => {
+    writeSession(ORG_SESSION_KEY, next ? { id: next.id, name: next.name } : null);
+    setOrgState(next);
+  };
 
   const [mode, setMode] = useState("player"); // 'player' | 'coach' | 'coach-login'
   const [coachAuthed, setCoachAuthed] = useState(false);
@@ -657,7 +744,8 @@ export default function RehabApp() {
     setLoading(true);
     setLoadError(null);
     try {
-      const [protocolRows, slotRows, dirRows, menuRows] = await Promise.all([
+      const [orgRows, protocolRows, slotRows, dirRows, menuRows] = await Promise.all([
+        sbSelect("organizations", `?id=eq.${encodeURIComponent(orgId)}&select=id,name`),
         sbSelect("protocols", `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=name.asc`),
         sbSelect("slots", `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=datetime.asc`),
         sbSelect(
@@ -669,6 +757,14 @@ export default function RehabApp() {
           `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=phase_number.asc`
         ),
       ]);
+      // この端末に保存されていた組織が、管理者によって削除されている場合は
+      // 保存を消してログイン画面に戻す
+      // （パスワードの変更で入り直しになった場合も、RLS により空になるのでここに来る）
+      // （この端末の匿名ユーザーは、どの組織のメンバーでもなくなっているので、そのまま使い回す）
+      if (!orgRows.length) {
+        handleSwitchOrg({ skipServer: true });
+        return;
+      }
       setMasterProtocols(protocolRows.map(normalizeProtocol));
       setSlots(slotRows.map(normalizeSlot));
       setPlayerDirectory(dirRows);
@@ -683,6 +779,13 @@ export default function RehabApp() {
   useEffect(() => {
     if (org) loadPublicData(org.id);
   }, [org?.id]);
+
+  // ログインの有効期限が切れて更新もできなかったら、ログイン画面に戻す
+  useEffect(() => {
+    const onLost = () => handleSwitchOrg({ skipServer: true });
+    window.addEventListener(AUTH_LOST_EVENT, onLost);
+    return () => window.removeEventListener(AUTH_LOST_EVENT, onLost);
+  }, []);
 
   const loadCoachPlayers = async () => {
     if (!org) return;
@@ -714,8 +817,17 @@ export default function RehabApp() {
     await loadCoachPlayers();
   };
 
-  const handleSwitchOrg = () => {
+  // 組織から抜ける。
+  //   ・サーバー側のメンバー記録を消す。この端末の匿名ユーザーは次のログインで使い回す
+  //     （匿名サインインは同じ回線から1時間30回までなので、作り直しを減らす）
+  //   ・メンバー記録を消せなかったときは、匿名ユーザーごと破棄する
+  //     （共用端末で、次に使う人に前の組織の権限が残らないように）
+  const handleSwitchOrg = ({ skipServer = false } = {}) => {
+    if (!skipServer && org) {
+      sbRpc("org_leave", { p_org_id: org.id }).catch(() => signOut());
+    }
     setOrg(null);
+    writeSession(PLAYER_SESSION_KEY, null); // 端末に保存した選手ログインも消す
     setMode("player");
     setCoachAuthed(false);
     setCoachPlayers([]);
@@ -732,21 +844,22 @@ export default function RehabApp() {
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col print:bg-white print:block">
-      <header className="bg-slate-900 text-white sticky top-0 z-20 shadow-md print:hidden">
-        <div className="max-w-6xl mx-auto flex items-center justify-between px-4 py-3">
-          <div className="flex items-center gap-2">
-            <Flame className="text-orange-400" size={22} />
-            <span className="font-bold tracking-tight text-lg">
-              RE:SPRINT <span className="text-slate-400 font-normal text-sm">Rehab Progress</span>
+      <header className="bg-slate-900 text-white sticky top-0 z-20 shadow-md print:hidden safe-top safe-x">
+        <div className="max-w-6xl mx-auto flex items-center justify-between gap-2 px-3 sm:px-4 pb-3">
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+            <Flame className="text-orange-400 shrink-0" size={22} />
+            <span className="font-bold tracking-tight text-lg whitespace-nowrap">
+              RE:SPRINT{" "}
+              <span className="hidden sm:inline text-slate-400 font-normal text-sm">Rehab Progress</span>
             </span>
             <span className="hidden sm:flex items-center gap-1 ml-2 text-xs text-slate-400 border-l border-slate-700 pl-3">
               <Building2 size={12} /> {org.name}
             </span>
             <span className="hidden md:inline text-[10px] text-slate-500 ml-2">{APP_BUILD}</span>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
             {loadError && (
-              <span className="text-xs text-red-300 max-w-[160px] truncate" title={loadError}>
+              <span className="hidden sm:inline text-xs text-red-300 max-w-[160px] truncate" title={loadError}>
                 同期エラー
               </span>
             )}
@@ -754,29 +867,30 @@ export default function RehabApp() {
             <div className="flex bg-slate-800 rounded-full p-1 gap-1">
               <button
                 onClick={() => handleSwitchMode("player")}
-                className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                className={`px-3 sm:px-4 py-1.5 rounded-full text-xs sm:text-sm font-medium whitespace-nowrap transition-colors ${
                   mode === "player" ? "bg-blue-600 text-white" : "text-slate-300 hover:text-white"
                 }`}
               >
-                🏃‍♂️ 選手モード
+                🏃‍♂️ 選手<span className="hidden sm:inline">モード</span>
               </button>
               <button
                 onClick={() => handleSwitchMode("coach")}
-                className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                className={`px-3 sm:px-4 py-1.5 rounded-full text-xs sm:text-sm font-medium whitespace-nowrap transition-colors ${
                   mode === "coach" || mode === "coach-login"
                     ? "bg-blue-600 text-white"
                     : "text-slate-300 hover:text-white"
                 }`}
               >
-                📋 指導者モード
+                📋 指導者<span className="hidden sm:inline">モード</span>
               </button>
             </div>
             <button
-              onClick={handleSwitchOrg}
-              className="text-xs text-slate-400 hover:text-white flex items-center gap-1"
+              onClick={() => handleSwitchOrg()}
+              className="p-2.5 -mr-2 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 flex items-center"
               title="別の組織に切り替える"
+              aria-label="ログアウトして別の組織に切り替える"
             >
-              <LogOut size={13} />
+              <LogOut size={16} />
             </button>
           </div>
         </div>
@@ -791,7 +905,7 @@ export default function RehabApp() {
         </div>
       )}
 
-      <main className="flex-1">
+      <main className="flex-1 safe-bottom safe-x">
         {loading && (
           <div className="flex flex-col items-center justify-center py-24 text-slate-400 gap-2">
             <Loader2 className="animate-spin" size={24} />
@@ -837,111 +951,590 @@ export default function RehabApp() {
 }
 
 // ==================================================================
-// 組織（テナント）ログイン
+// 組織（テナント）ログインと管理者
+//
+//   どちらも権限の確認はサーバー（DB の関数と RLS）で行う。
+//   画面側のチェックは入力ミスを早めに知らせるためだけのもの。
+//
+//   ・組織ログイン：org_login(組織ID, パスワード) が照合し、
+//     成功するとこの端末の利用者が組織のメンバーになる。
+//   ・管理者：Supabase Auth のメールアドレスとパスワードでログインし、
+//     所有者が app_admins に登録した人だけが組織を追加・管理できる。
+//     画面から自分を管理者にする手段はない（supabase_setup_admin.sql を参照）。
 // ==================================================================
-function OrgLogin({ onAuthed }) {
-  const [orgCode, setOrgCode] = useState("");
-  const [password, setPassword] = useState("");
+const ORG_ID_PATTERN = /^[A-Za-z0-9_-]{2,40}$/;
+const ORG_PASSWORD_MIN = 8;
+
+// 組織パスワードは、v13 と同じく JavaScript の trim() で前後の空白を除いてから送る。
+// （DB の trim() は半角スペースしか除かないため、全角スペースや改行が残ると
+//   v13 で設定したパスワードと一致しなくなる）
+const normalizeOrgPassword = (pw) => String(pw ?? "").trim();
+
+// 「組織ログイン／管理者」の切り替え
+function LoginModeTabs({ mode, onChange }) {
+  const tab = (value, label) => (
+    <button
+      type="button"
+      onClick={() => onChange(value)}
+      aria-pressed={mode === value}
+      className={`flex-1 py-1.5 rounded-full text-xs font-bold transition-colors ${
+        mode === value ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"
+      }`}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="flex bg-slate-100 rounded-full p-1 gap-1 mb-5">
+      {tab("org", "組織ログイン")}
+      {tab("admin", "管理者")}
+    </div>
+  );
+}
+
+// ログイン画面の外枠（組織ログインと管理者で共通）。
+// 中で定義すると入力のたびにフォーカスが外れるので、モジュールレベルに置く。
+function LoginShell({ mode, onChangeMode, children }) {
+  return (
+    <div className="min-h-screen bg-slate-100 flex items-center justify-center px-4 py-8 safe-top safe-bottom safe-x">
+      <div className="max-w-sm w-full bg-white rounded-2xl shadow-lg p-6 sm:p-8 border border-slate-200">
+        <div className="flex flex-col items-center gap-3 mb-5">
+          <div
+            className={`w-14 h-14 rounded-full flex items-center justify-center ${
+              mode === "admin" ? "bg-slate-800" : "bg-blue-50"
+            }`}
+          >
+            {mode === "admin" ? (
+              <Settings className="text-white" size={24} />
+            ) : (
+              <Building2 className="text-blue-600" size={26} />
+            )}
+          </div>
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-1.5">
+            <Flame className="text-orange-400" size={18} /> RE:SPRINT
+          </h2>
+        </div>
+        <LoginModeTabs mode={mode} onChange={onChangeMode} />
+        {children}
+        <InstallHint />
+        <p className="text-[10px] text-slate-300 text-center mt-2">{APP_BUILD}</p>
+      </div>
+    </div>
+  );
+}
+
+function AdminLogin({ onChangeMode, onAuthed }) {
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
   const [error, setError] = useState(null);
-  const [debugInfo, setDebugInfo] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const handleLogin = async () => {
     setError(null);
-    setDebugInfo(null);
-    if (!orgCode.trim()) {
-      setError("組織ID（組織コード）を入力してください。");
+    if (!email.trim() || !pw) {
+      setError("メールアドレスとパスワードを入力してください。");
       return;
     }
     setBusy(true);
     try {
-      const rows = await sbSelect(
-        "organizations",
-        `?id=eq.${encodeURIComponent(orgCode.trim())}&select=id,name,password_hash`
-      );
-      if (!rows || rows.length === 0) {
-        setError("その組織IDは見つかりませんでした。");
-        setBusy(false);
+      await signInWithPassword(email, pw);
+      const isAdmin = await sbRpc("admin_whoami");
+      if (isAdmin !== true) {
+        await signOut();
+        setError("このアカウントは管理者として登録されていません。");
         return;
       }
-      const row = rows[0];
-      const storedHash = row.password_hash ? String(row.password_hash).trim().toLowerCase() : null;
-      const inputHash = await sha256Hex(password);
-      if (!storedHash) {
-        setError("この組織にはパスワードが設定されていません。管理者にご確認ください。");
-        setBusy(false);
-        return;
-      }
-      if (storedHash !== inputHash) {
-        setError("パスワードが違います。下記のハッシュ値を比較してください。");
-        setDebugInfo({ inputHash, storedHash });
-        setBusy(false);
-        return;
-      }
-      onAuthed({ id: row.id, name: row.name });
+      setPw("");
+      onAuthed();
     } catch (err) {
-      setError(`ログインに失敗しました: ${err.message}`);
+      setError(err.message);
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-slate-100 flex items-center justify-center px-4">
-      <div className="max-w-sm w-full bg-white rounded-2xl shadow-lg p-8 border border-slate-200">
-        <div className="flex flex-col items-center gap-3 mb-6">
-          <div className="w-14 h-14 rounded-full bg-blue-50 flex items-center justify-center">
-            <Building2 className="text-blue-600" size={26} />
-          </div>
-          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-1.5">
-            <Flame className="text-orange-400" size={18} /> RE:SPRINT
+    <LoginShell mode="admin" onChangeMode={onChangeMode}>
+      <p className="text-sm text-slate-500 text-center mb-4">
+        管理者のメールアドレスとパスワードを入力してください。
+      </p>
+      <label className="text-xs text-slate-500">メールアドレス</label>
+      <input
+        type="email"
+        autoComplete="username"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-slate-500"
+        autoFocus
+      />
+      <label className="text-xs text-slate-500">パスワード</label>
+      <input
+        type="password"
+        autoComplete="current-password"
+        value={pw}
+        onChange={(e) => setPw(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+        className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-slate-500"
+      />
+      {error && <p className="text-red-500 text-sm mb-2 text-center">{error}</p>}
+      <button
+        onClick={handleLogin}
+        disabled={busy}
+        className="w-full py-2.5 rounded-lg bg-slate-800 text-white text-sm font-bold hover:bg-slate-700 disabled:bg-slate-300 flex items-center justify-center gap-2"
+      >
+        {busy && <Loader2 size={14} className="animate-spin" />}
+        {busy ? "確認中..." : "管理者としてログイン"}
+      </button>
+      <p className="text-[11px] text-slate-400 text-center mt-4 leading-relaxed">
+        管理者のアカウントは、システムの所有者が登録します。
+      </p>
+    </LoginShell>
+  );
+}
+
+// 組織の追加・一覧（管理者としてログインしているときだけ表示される）
+function OrgManager({ onBack }) {
+  const [orgs, setOrgs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [orgId, setOrgId] = useState("");
+  const [orgName, setOrgName] = useState("");
+  const [orgPw, setOrgPw] = useState("");
+  const [orgPwConfirm, setOrgPwConfirm] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [done, setDone] = useState(null);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const rows = await sbRpc("admin_list_orgs");
+      setOrgs(rows || []);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    load();
+  }, []);
+
+  const handleCreate = async () => {
+    setError(null);
+    setDone(null);
+    const id = orgId.trim();
+    if (!ORG_ID_PATTERN.test(id)) {
+      setError("組織IDは半角英数字・ハイフン・アンダースコアで2〜40文字にしてください。");
+      return;
+    }
+    if (!orgName.trim()) {
+      setError("組織名を入力してください。");
+      return;
+    }
+    if (orgPw.trim().length < ORG_PASSWORD_MIN) {
+      setError(`組織パスワードは${ORG_PASSWORD_MIN}文字以上にしてください。`);
+      return;
+    }
+    if (orgPw !== orgPwConfirm) {
+      setError("組織パスワード（確認）が一致しません。");
+      return;
+    }
+    // 重複の最終確認はサーバー側で行う（ここは早めに知らせるためだけ）
+    if (orgs.some((o) => o.id.toLowerCase() === id.toLowerCase())) {
+      setError(`組織ID「${id}」はすでに使われています。`);
+      return;
+    }
+    setSaving(true);
+    try {
+      const row = await sbRpc("admin_create_org", {
+        p_id: id,
+        p_name: orgName.trim(),
+        p_password: normalizeOrgPassword(orgPw),
+      });
+      setDone(
+        `組織「${row.name}」を追加しました。組織ID「${row.id}」と、いま設定したパスワードで組織ログインできます。`
+      );
+      setOrgId("");
+      setOrgName("");
+      setOrgPw("");
+      setOrgPwConfirm("");
+      await load();
+    } catch (err) {
+      setError(`追加できませんでした: ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleResetPassword = async (org) => {
+    setError(null);
+    setDone(null);
+    const next = window.prompt(
+      `「${org.name}」の新しい組織パスワードを入力してください（${ORG_PASSWORD_MIN}文字以上）\n\n変更すると、この組織でログイン中の端末はすべて入り直しになります。`
+    );
+    if (next === null) return;
+    if (next.trim().length < ORG_PASSWORD_MIN) {
+      setError(`パスワードは${ORG_PASSWORD_MIN}文字以上にしてください。`);
+      return;
+    }
+    try {
+      await sbRpc("admin_set_org_password", { p_id: org.id, p_password: normalizeOrgPassword(next) });
+      setDone(`「${org.name}」のパスワードを変更しました。`);
+      await load();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleDelete = async (org) => {
+    setError(null);
+    setDone(null);
+    const n = org.player_count ?? 0;
+    const warn =
+      n > 0
+        ? `\n\n注意：この組織には ${n}名 の選手が登録されています。削除すると選手データも一緒に消えます。`
+        : "";
+    if (!window.confirm(`組織「${org.name}」を削除しますか？${warn}\n\nこの操作は取り消せません。`)) return;
+    try {
+      await sbRpc("admin_delete_org", { p_id: org.id });
+      setDone(`組織「${org.name}」を削除しました。`);
+      await load();
+    } catch (err) {
+      setError(`削除できませんでした: ${err.message}`);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-100 px-4 py-8 safe-top safe-bottom safe-x">
+      <div className="max-w-2xl mx-auto space-y-5">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+            <Settings size={20} className="text-slate-600" /> 組織の管理
           </h2>
-          <p className="text-sm text-slate-500 text-center">
-            所属する組織のIDとパスワードを入力してください。
-          </p>
+          <button
+            onClick={onBack}
+            className="text-xs text-slate-500 hover:text-slate-700 underline flex items-center gap-1 shrink-0"
+          >
+            <LogOut size={12} /> 管理者をログアウト
+          </button>
         </div>
-        <label className="text-xs text-slate-500">組織ID（組織コード）</label>
-        <input
-          value={orgCode}
-          onChange={(e) => setOrgCode(e.target.value)}
-          placeholder="例：default"
-          className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          autoFocus
-        />
-        <label className="text-xs text-slate-500">パスワード</label>
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleLogin()}
-          placeholder="組織パスワード"
-          className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
-        {error && <p className="text-red-500 text-sm mb-2 text-center">{error}</p>}
-        {debugInfo && (
-          <div className="mb-3 bg-slate-50 border border-slate-200 rounded-lg p-3 text-[10px] font-mono text-slate-500 space-y-1">
-            <p className="break-all">
-              入力ハッシュ: <span className="text-slate-700">{debugInfo.inputHash}</span>
-            </p>
-            <p className="break-all">
-              DBハッシュ: <span className="text-slate-700">{debugInfo.storedHash}</span>
-            </p>
-          </div>
+
+        {error && (
+          <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+            {error}
+          </p>
         )}
-        <button
-          onClick={handleLogin}
-          disabled={busy}
-          className="w-full py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium disabled:bg-slate-300 flex items-center justify-center gap-2"
-        >
-          {busy && <Loader2 size={14} className="animate-spin" />}
-          ログイン
-        </button>
-        <p className="text-xs text-slate-400 text-center mt-4">
-          初めての場合は組織ID「default」・初期パスワード「1234」でログインできます。
-        </p>
-        <p className="text-[10px] text-slate-300 text-center mt-2">{APP_BUILD}</p>
+        {done && (
+          <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+            {done}
+          </p>
+        )}
+
+        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+          <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+            <PlusCircle size={16} className="text-blue-600" /> 組織を追加する
+          </p>
+
+          <label className="text-xs text-slate-500">組織ID（ログインに使います）</label>
+          <input
+            value={orgId}
+            onChange={(e) => setOrgId(e.target.value)}
+            placeholder="例：keio-track"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            maxLength={40}
+            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-1 font-mono"
+          />
+          <p className="text-[10px] text-slate-400 mb-3">
+            半角英数字・ハイフン・アンダースコアで2〜40文字。あとから変更できません。
+          </p>
+
+          <label className="text-xs text-slate-500">組織名（画面に表示されます）</label>
+          <input
+            value={orgName}
+            onChange={(e) => setOrgName(e.target.value)}
+            placeholder="例：慶應義塾大学競走部"
+            maxLength={100}
+            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3"
+          />
+
+          <label className="text-xs text-slate-500">組織パスワード</label>
+          <input
+            type="password"
+            autoComplete="new-password"
+            value={orgPw}
+            onChange={(e) => setOrgPw(e.target.value)}
+            placeholder={`${ORG_PASSWORD_MIN}文字以上`}
+            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3"
+          />
+
+          <label className="text-xs text-slate-500">組織パスワード（確認）</label>
+          <input
+            type="password"
+            autoComplete="new-password"
+            value={orgPwConfirm}
+            onChange={(e) => setOrgPwConfirm(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+            placeholder="もう一度入力"
+            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-4"
+          />
+
+          <button
+            onClick={handleCreate}
+            disabled={saving}
+            className="w-full py-2.5 rounded-lg bg-blue-600 text-white text-sm font-bold hover:bg-blue-700 disabled:bg-slate-300 flex items-center justify-center gap-2"
+          >
+            {saving && <Loader2 size={14} className="animate-spin" />}
+            {saving ? "追加中..." : "組織を追加する"}
+          </button>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+          <p className="text-sm font-bold text-slate-700 mb-3">
+            登録済みの組織（{orgs.length}）
+          </p>
+          {loading ? (
+            <p className="text-sm text-slate-400 flex items-center gap-2">
+              <Loader2 size={14} className="animate-spin" /> 読み込み中...
+            </p>
+          ) : (
+            <ul className="divide-y divide-slate-100">
+              {orgs.map((o) => (
+                <li key={o.id} className="py-3 flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-slate-800 break-words">{o.name}</p>
+                    <p className="text-[11px] text-slate-400 font-mono break-all">{o.id}</p>
+                    <p className="text-[10px] text-slate-400">選手 {o.player_count ?? 0}名</p>
+                    {!o.has_password && (
+                      <p className="text-[10px] text-orange-600">パスワード未設定（ログインできません）</p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <button
+                      onClick={() => handleResetPassword(o)}
+                      className="text-[11px] text-slate-500 hover:text-blue-600 underline"
+                    >
+                      パスワード変更
+                    </button>
+                    <button
+                      onClick={() => handleDelete(o)}
+                      className="text-slate-400 hover:text-red-500 p-1"
+                      title="この組織を削除"
+                      aria-label={`${o.name}を削除`}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </li>
+              ))}
+              {orgs.length === 0 && (
+                <li className="py-3 text-sm text-slate-400">まだ組織がありません。</li>
+              )}
+            </ul>
+          )}
+        </div>
       </div>
     </div>
+  );
+}
+
+// ==================================================================
+// ホーム画面への追加をすすめる案内
+//   iPhone は「共有 → ホーム画面に追加」しかないので、その手順を出す。
+//   Android・PCのChromeは、ボタン一つで追加できる。
+//   すでにホーム画面から開いているときは表示しない。
+// ==================================================================
+const INSTALL_HINT_KEY = "resprint.installHintClosed";
+
+function InstallHint({ className = "mt-5" }) {
+  const [installPrompt, setInstallPrompt] = useState(null);
+  const [closed, setClosed] = useState(() => {
+    try {
+      return window.localStorage.getItem(INSTALL_HINT_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  const standalone =
+    typeof window !== "undefined" &&
+    (window.matchMedia("(display-mode: standalone)").matches ||
+      window.navigator.standalone === true);
+
+  // iPadOS 13 以降の Safari は Mac と名乗るので、タッチ対応かどうかで見分ける
+  const isIOS =
+    typeof navigator !== "undefined" &&
+    (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1));
+
+  useEffect(() => {
+    const onPrompt = (e) => {
+      e.preventDefault();
+      setInstallPrompt(e);
+    };
+    window.addEventListener("beforeinstallprompt", onPrompt);
+    return () => window.removeEventListener("beforeinstallprompt", onPrompt);
+  }, []);
+
+  const handleClose = () => {
+    try {
+      window.localStorage.setItem(INSTALL_HINT_KEY, "1");
+    } catch {
+      // 保存できなくても閉じられる
+    }
+    setClosed(true);
+  };
+
+  if (standalone || closed) return null;
+  if (!isIOS && !installPrompt) return null; // 追加できない環境では出さない
+
+  return (
+    <div className={`${className} rounded-xl border border-slate-200 bg-slate-50 p-3 text-left`}>
+      <div className="flex items-start gap-2">
+        <Smartphone size={16} className="text-blue-600 mt-0.5 shrink-0" />
+        <div className="flex-1">
+          <p className="text-xs font-bold text-slate-700">ホーム画面に追加できます</p>
+          {isIOS ? (
+            <>
+              <ol className="text-[11px] text-slate-500 leading-relaxed mt-1 list-decimal list-inside space-y-0.5">
+                <li>
+                  Safari の<span className="font-medium text-slate-600">共有ボタン</span>
+                  （□に↑。iPhone は画面下、iPad は画面上）を押す
+                </li>
+                <li>
+                  <span className="font-medium text-slate-600">「ホーム画面に追加」</span>
+                  を選ぶ（見当たらなければ一覧を下にスクロール）
+                </li>
+                <li>右上の「追加」を押す</li>
+              </ol>
+              <p className="text-[11px] text-slate-500 leading-relaxed mt-1">
+                ホーム画面の RE:SPRINT アイコンから、アプリのように全画面で開けます。
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-[11px] text-slate-500 leading-relaxed mt-1">
+                アプリとして追加すると、次からURLを開かずに使えます。
+              </p>
+              <button
+                onClick={async () => {
+                  installPrompt.prompt();
+                  await installPrompt.userChoice;
+                  setInstallPrompt(null);
+                }}
+                className="mt-2 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-700"
+              >
+                ホーム画面に追加
+              </button>
+            </>
+          )}
+        </div>
+        <button
+          onClick={handleClose}
+          className="text-slate-300 hover:text-slate-500 shrink-0"
+          title="今後表示しない"
+        >
+          <X size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function OrgLogin({ onAuthed }) {
+  const [screen, setScreen] = useState("org"); // 'org' | 'admin' | 'admin-panel'
+  const [orgCode, setOrgCode] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const handleLogin = async () => {
+    setError(null);
+    if (!orgCode.trim() || !password) {
+      setError("組織IDとパスワードを入力してください。");
+      return;
+    }
+    setBusy(true);
+    try {
+      await ensureAnonymousSession();
+      const org = await sbRpc("org_login", {
+        p_org_id: orgCode.trim(),
+        p_password: normalizeOrgPassword(password),
+      });
+      if (!org || !org.id) {
+        setError("組織IDまたはパスワードが違います。");
+        return;
+      }
+      setPassword("");
+      onAuthed({ id: org.id, name: org.name });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // 管理者をログアウトして組織ログインに戻る
+  const leaveAdmin = async () => {
+    await signOut();
+    setScreen("org");
+  };
+
+  if (screen === "admin-panel") {
+    return <OrgManager onBack={leaveAdmin} />;
+  }
+
+  if (screen === "admin") {
+    return (
+      <AdminLogin
+        onChangeMode={(m) => setScreen(m === "admin" ? "admin" : "org")}
+        onAuthed={() => setScreen("admin-panel")}
+      />
+    );
+  }
+
+  return (
+    <LoginShell mode="org" onChangeMode={(m) => setScreen(m)}>
+      <p className="text-sm text-slate-500 text-center mb-4">
+        所属する組織のIDとパスワードを入力してください。
+      </p>
+
+      <label className="text-xs text-slate-500">組織ID</label>
+      <input
+        value={orgCode}
+        onChange={(e) => setOrgCode(e.target.value)}
+        autoCapitalize="none"
+        autoCorrect="off"
+        spellCheck={false}
+        autoComplete="username"
+        className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        autoFocus
+      />
+      <label className="text-xs text-slate-500">パスワード</label>
+      <input
+        type="password"
+        autoComplete="current-password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+        placeholder="組織パスワード"
+        className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+      {error && <p className="text-red-500 text-sm mb-2 text-center">{error}</p>}
+      <button
+        onClick={handleLogin}
+        disabled={busy}
+        className="w-full py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium disabled:bg-slate-300 flex items-center justify-center gap-2"
+      >
+        {busy && <Loader2 size={14} className="animate-spin" />}
+        ログイン
+      </button>
+      <p className="text-[11px] text-slate-400 text-center mt-4 leading-relaxed">
+        組織IDとパスワードは、チームの管理者から受け取ってください。
+        ログインはこの端末に30日間保存されます。
+      </p>
+    </LoginShell>
   );
 }
 
@@ -953,7 +1546,6 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
   const [pwInput, setPwInput] = useState("");
   const [pwConfirm, setPwConfirm] = useState("");
   const [error, setError] = useState(null);
-  const [debugInfo, setDebugInfo] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const checkExistingPassword = async () => {
@@ -974,7 +1566,6 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
 
   const handleSetup = async () => {
     setError(null);
-    setDebugInfo(null);
     if (pwInput.trim().length < 4) {
       setError("4文字以上のパスワードを設定してください。");
       return;
@@ -997,7 +1588,6 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
 
   const handleLogin = async () => {
     setError(null);
-    setDebugInfo(null);
     setBusy(true);
     try {
       let storedHash;
@@ -1013,18 +1603,15 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
 
       if (!storedHash) {
         setError("データベースからハッシュ値を取得できませんでした（app_settingsに行が存在しません）。");
-        setDebugInfo({ inputHash, storedHash: "(該当行なし)" });
         setBusy(false);
         return;
       }
 
       if (storedHash === inputHash) {
         setPwInput("");
-        setDebugInfo(null);
         onAuthed();
       } else {
-        setError("パスワードが一致しません。下記のハッシュ値を比較してください。");
-        setDebugInfo({ inputHash, storedHash });
+        setError("パスワードが違います。");
       }
     } catch (err) {
       setError(`認証中にエラーが発生しました: ${err.message}`);
@@ -1032,18 +1619,6 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
       setBusy(false);
     }
   };
-
-  const DebugBox = () =>
-    debugInfo && (
-      <div className="mt-3 bg-slate-50 border border-slate-200 rounded-lg p-3 text-[10px] font-mono text-slate-500 space-y-1">
-        <p className="break-all">
-          入力ハッシュ: <span className="text-slate-700">{debugInfo.inputHash}</span>
-        </p>
-        <p className="break-all">
-          DBハッシュ: <span className="text-slate-700">{debugInfo.storedHash}</span>
-        </p>
-      </div>
-    );
 
   if (phase === "checking") {
     return (
@@ -1126,7 +1701,6 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
         autoFocus
       />
       {error && <p className="text-red-500 text-sm mt-2 text-center">{error}</p>}
-      <DebugBox />
       <div className="flex gap-2 mt-5">
         <button
           onClick={onCancel}
@@ -1146,7 +1720,6 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
       <button
         onClick={() => {
           setError(null);
-          setDebugInfo(null);
           setPhase("setup");
         }}
         className="w-full mt-3 text-xs text-slate-400 hover:text-slate-600 underline"
@@ -1228,7 +1801,7 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader })
                   {m.timestampNote && <p>該当箇所：{m.timestampNote}</p>}
                   {m.videoUrl && (
                     <a
-                      href={m.videoUrl}
+                      href={safeHref(m.videoUrl)}
                       target="_blank"
                       rel="noreferrer"
                       className={`flex items-center gap-1 underline ${
@@ -1399,12 +1972,10 @@ function CoachSettings({ orgId }) {
   const [confirm, setConfirm] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-  const [debugInfo, setDebugInfo] = useState(null);
   const [success, setSuccess] = useState(false);
 
   const handleChange = async () => {
     setError(null);
-    setDebugInfo(null);
     setSuccess(false);
     if (next.length < 4) {
       setError("新しいパスワードは4文字以上にしてください");
@@ -1420,13 +1991,11 @@ function CoachSettings({ orgId }) {
       const currentHash = await sha256Hex(current);
       if (!storedHash) {
         setError("現在のパスワードのハッシュ値をデータベースから取得できませんでした。");
-        setDebugInfo({ inputHash: currentHash, storedHash: "(該当行なし)" });
         setSaving(false);
         return;
       }
       if (storedHash !== currentHash) {
-        setError("現在のパスワードが違います。下記のハッシュ値を比較してください。");
-        setDebugInfo({ inputHash: currentHash, storedHash });
+        setError("現在のパスワードが違います。");
         setSaving(false);
         return;
       }
@@ -1470,16 +2039,6 @@ function CoachSettings({ orgId }) {
         className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
       {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
-      {debugInfo && (
-        <div className="mb-3 bg-slate-50 border border-slate-200 rounded-lg p-3 text-[10px] font-mono text-slate-500 space-y-1">
-          <p className="break-all">
-            入力ハッシュ: <span className="text-slate-700">{debugInfo.inputHash}</span>
-          </p>
-          <p className="break-all">
-            DBハッシュ: <span className="text-slate-700">{debugInfo.storedHash}</span>
-          </p>
-        </div>
-      )}
       {success && <p className="text-xs text-green-600 mb-2">パスワードを変更しました。</p>}
       <button
         onClick={handleChange}
@@ -1927,7 +2486,7 @@ function PhaseMenuCatalog({ menus, protocolId, phaseNumber }) {
           <p className="font-bold text-slate-700">{m.name}</p>
           {m.youtubeUrl && (
             <a
-              href={m.youtubeUrl}
+              href={safeHref(m.youtubeUrl)}
               target="_blank"
               rel="noreferrer"
               className="mt-1 flex items-center gap-1 text-blue-600 text-xs hover:underline"
@@ -2749,8 +3308,6 @@ function PlayerDetailPanel({
           viewerRole="staff"
         />
 
-        <GateAgreementPanel player={player} />
-
         <ImagingFindingsCard player={player} onSave={onSaveImagingFindings} />
 
         <AthleteMetricsCard
@@ -2910,7 +3467,6 @@ function isNextDayItem(text) {
   return text.includes("実施後") && text.includes("翌日");
 }
 
-// 本人とスタッフの一致率（「選手だけで回せるか」を確かめるための指標）
 // 「方針に迷ったとき」の面談申し込み（受付のみ。決済は後）
 // 医師との面談は実装だけ用意し、まだ公開しない。
 const CONSULTATION_KINDS = [
@@ -3000,66 +3556,6 @@ function ConsultationRequestCard({ orgId, player }) {
             </button>
           </div>
         </div>
-      )}
-    </div>
-  );
-}
-
-function GateAgreementPanel({ player }) {
-  const [rows, setRows] = useState([]);
-  const [open, setOpen] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    sbSelect(
-      "gate_check_agreement",
-      `?player_id=eq.${encodeURIComponent(player.id)}&select=*&order=phase_number.asc`
-    )
-      .then((r) => active && setRows(r || []))
-      .catch(() => {});
-    return () => {
-      active = false;
-    };
-  }, [player.id]);
-
-  if (rows.length === 0) return null;
-  const agreed = rows.filter((r) => r.agreed).length;
-  const rate = Math.round((agreed / rows.length) * 100);
-
-  return (
-    <div className="bg-white rounded-xl border border-slate-200 p-5">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center justify-between text-sm font-bold text-slate-700"
-      >
-        <span>本人とスタッフの一致率：{rate}%（{agreed}/{rows.length}項目）</span>
-        <span className="text-xs font-normal text-slate-400">{open ? "閉じる" : "詳細"}</span>
-      </button>
-      {open && (
-        <table className="w-full text-[11px] mt-3 border-collapse">
-          <thead>
-            <tr className="text-left border-b border-slate-200 text-slate-500">
-              <th className="py-1 pr-2">PHASE</th>
-              <th className="py-1 pr-2">項目</th>
-              <th className="py-1 pr-2">本人</th>
-              <th className="py-1 pr-2">スタッフ</th>
-              <th className="py-1">一致</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => (
-              <tr key={i} className="border-b border-slate-100 text-slate-600">
-                <td className="py-1 pr-2">{r.phase_number}</td>
-                <td className="py-1 pr-2">{r.item_index + 1}</td>
-                <td className="py-1 pr-2">{r.self_result ? "できた" : "できていない"}</td>
-                <td className="py-1 pr-2">{r.staff_result ? "できた" : "できていない"}</td>
-                <td className={`py-1 ${r.agreed ? "text-green-600" : "text-orange-600"}`}>
-                  {r.agreed ? "一致" : "不一致"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       )}
     </div>
   );
@@ -3739,7 +4235,10 @@ function PlayerMode({
       slots={slots}
       setSlots={setSlots}
       phaseMenus={phaseMenus}
-      onLogout={() => setMyPlayer(null)}
+      onLogout={() => {
+        writeSession(PLAYER_SESSION_KEY, null); // 端末の記憶も消す
+        setMyPlayer(null);
+      }}
     />
   );
 }
@@ -3750,6 +4249,47 @@ function PlayerLogin({ orgId, masterProtocols, playerDirectory, setPlayerDirecto
   const [pin, setPin] = useState("");
   const [error, setError] = useState(null);
   const [checking, setChecking] = useState(false);
+  // 自分の端末なら、次回から名前と暗証番号の入力を省く
+  const [remember, setRemember] = useState(true);
+
+  // この端末に保存された選手ログインがあれば、それで復帰する
+  const savedLogin = readSession(PLAYER_SESSION_KEY);
+  const hasSavedLogin = Boolean(savedLogin && savedLogin.orgId === orgId && savedLogin.id);
+  const [restoring, setRestoring] = useState(hasSavedLogin);
+
+  useEffect(() => {
+    const saved = readSession(PLAYER_SESSION_KEY);
+    if (!saved || saved.orgId !== orgId || !saved.id) {
+      setRestoring(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const rows = await sbSelect(
+          "players",
+          `?id=eq.${encodeURIComponent(saved.id)}&org_id=eq.${encodeURIComponent(orgId)}&select=${PLAYER_FIELDS}${PLAYER_EMBED_ORDER}`
+        );
+        if (cancelled) return;
+        if (rows[0]) {
+          setMyPlayer(normalizePlayer(rows[0]));
+          return; // この画面は閉じられる
+        }
+        writeSession(PLAYER_SESSION_KEY, null); // 選手が削除されている
+      } catch {
+        // 通信できないときは、通常のログイン画面を出す
+      }
+      if (!cancelled) setRestoring(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [orgId]);
+
+  const handleForgetDevice = () => {
+    writeSession(PLAYER_SESSION_KEY, null);
+    setRestoring(false);
+  };
 
   const handleSelectName = (dir) => {
     setSelectedDir(dir);
@@ -3779,6 +4319,10 @@ function PlayerLogin({ orgId, masterProtocols, playerDirectory, setPlayerDirecto
         "players",
         `?id=eq.${encodeURIComponent(selectedDir.id)}&org_id=eq.${encodeURIComponent(orgId)}&select=${PLAYER_FIELDS}${PLAYER_EMBED_ORDER}`
       );
+      writeSession(
+        PLAYER_SESSION_KEY,
+        remember ? { orgId, id: selectedDir.id, name: selectedDir.name } : null
+      );
       setMyPlayer(normalizePlayer(fullRows[0]));
     } catch (err) {
       setError(err.message);
@@ -3786,6 +4330,23 @@ function PlayerLogin({ orgId, masterProtocols, playerDirectory, setPlayerDirecto
       setChecking(false);
     }
   };
+
+  if (restoring) {
+    return (
+      <div className="max-w-sm mx-auto mt-16 bg-white rounded-2xl shadow-lg p-8 border border-slate-200 text-center">
+        <Loader2 className="animate-spin text-blue-600 mx-auto" size={26} />
+        <p className="mt-4 text-sm text-slate-600">
+          <span className="font-bold text-slate-800">{savedLogin?.name}</span> さんとして開いています
+        </p>
+        <button
+          onClick={handleForgetDevice}
+          className="mt-5 text-xs text-slate-400 hover:text-slate-600 underline"
+        >
+          別の人でログインする
+        </button>
+      </div>
+    );
+  }
 
   if (screen === "register") {
     return (
@@ -3821,6 +4382,20 @@ function PlayerLogin({ orgId, masterProtocols, playerDirectory, setPlayerDirecto
           autoFocus
         />
         {error && <p className="text-red-500 text-sm mt-2 text-center">{error}</p>}
+        <label className="flex items-start gap-2 mt-4 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={remember}
+            onChange={(e) => setRemember(e.target.checked)}
+            className="mt-0.5 w-4 h-4 accent-blue-600"
+          />
+          <span className="text-xs text-slate-600 leading-relaxed">
+            この端末を自分の端末として記憶する
+            <span className="block text-slate-400">
+              次回から名前と暗証番号の入力を省きます。共用の端末ではチェックを外してください。
+            </span>
+          </span>
+        </label>
         <div className="flex gap-2 mt-5">
           <button
             onClick={() => setScreen("select")}
@@ -4109,6 +4684,7 @@ function UsageGuide() {
           <li>「受傷日」を登録すると、同じ怪我をした過去の選手たちの平均復帰期間が目安として表示されます。</li>
         </ul>
       )}
+      {open && <InstallHint className="mt-3" />}
     </div>
   );
 }
@@ -4566,7 +5142,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
                 </div>
               ) : (
                 <a
-                  href={protocol.videoUrl}
+                  href={safeHref(protocol.videoUrl)}
                   target="_blank"
                   rel="noreferrer"
                   className="flex items-center justify-center gap-2 py-3 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-blue-600 font-medium"
@@ -4627,7 +5203,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
                 <p className="text-sm text-blue-700 font-bold">予約済み：{bookedSlot.datetime}</p>
                 {bookedSlot.zoomUrl ? (
                   <a
-                    href={bookedSlot.zoomUrl}
+                    href={safeHref(bookedSlot.zoomUrl)}
                     target="_blank"
                     rel="noreferrer"
                     className="flex items-center justify-center gap-2 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-bold hover:bg-blue-700"

@@ -1,3 +1,56 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ------------------------------------------------------------------
+   ホーム画面アプリ（PWA）としてiPhoneで開いたときの調整
+   ------------------------------------------------------------------ */
+
+/* 画面全体の背景。上端まで濃紺にして、切り欠き（ノッチ）まわりを自然に見せる */
+html {
+  background-color: #0f172a;
+}
+
+/* ヘッダーを切り欠き・ステータスバーの下に収める */
+.safe-top {
+  padding-top: calc(0.75rem + env(safe-area-inset-top, 0px));
+}
+
+/* 画面下端のホームバーに重ならないようにする */
+.safe-bottom {
+  padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
+}
+
+/* 左右の切り欠き（横向きのとき） */
+.safe-x {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* 入力欄をタップしたときにiOSが勝手に拡大するのを防ぐ
+   （フォントサイズが16px未満だと拡大される） */
+@media (max-width: 767px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
+/* ホーム画面アプリとして開いているときは、文字の長押し選択を控えめにする。
+   入力欄と、印刷レポートは対象外にする。 */
+@media (display-mode: standalone) {
+  body {
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: none;
+  }
+}
+
+/* 印刷時は余白の調整を無効化する */
+@media print {
+  .safe-top,
+  .safe-bottom,
+  .safe-x {
+    padding: 0 !important;
+  }
+}

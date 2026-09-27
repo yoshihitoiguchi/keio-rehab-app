@@ -1,0 +1,18 @@
+node_modules/
+dist/
+.vite/
+
+.env
+.env.local
+.env.*.local
+
+.DS_Store
+*.log
+npm-debug.log*
+
+.vercel
+.idea/
+.vscode/
+
+# Claude Code の個人設定（プロジェクト共通の .claude/settings.json は Git に入れる）
+.claude/settings.local.json
