@@ -174,7 +174,18 @@ export async function apiHeaders(extra = {}) {
 }
 
 // 組織ログイン用：この端末の匿名利用者を用意する
-export async function ensureAnonymousSession() {
+// 同時に何度呼ばれても、匿名サインインは1回だけにする（回数制限の節約）
+let ensuring = null;
+export function ensureAnonymousSession() {
+  if (!ensuring) {
+    ensuring = ensureAnonymousSessionOnce().finally(() => {
+      ensuring = null;
+    });
+  }
+  return ensuring;
+}
+
+async function ensureAnonymousSessionOnce() {
   const s = loadSession();
   if (s && s.isAnonymous) {
     const token = await getAccessToken();

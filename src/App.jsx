@@ -263,7 +263,7 @@ async function fetchSetting(orgId, key) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.1 (新しい公開キー)";
+const APP_BUILD = "v15.2 (招待リンク・チャットに写真動画)";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -306,6 +306,60 @@ function writeSession(key, value) {
     );
   } catch {
     // 保存できなくても動作は続ける
+  }
+}
+
+// ==================================================================
+// 招待リンク
+//   管理者が組織ごとに発行し、LINE などでメンバーに送る。
+//   開くだけで組織ログインが済む（組織ID とパスワードを URL の # 以降に入れる）。
+//   # 以降はサーバーに送られない。読み取ったらすぐアドレス欄から消す。
+//   iPhone はホーム画面のアプリと Safari でログインが別なので、
+//   ホーム画面のアプリではリンクを「貼り付けて」入れるようにしている。
+// ==================================================================
+function toBase64Url(text) {
+  const bytes = new TextEncoder().encode(text);
+  let bin = "";
+  bytes.forEach((b) => (bin += String.fromCharCode(b)));
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function fromBase64Url(token) {
+  const b64 = token.replace(/-/g, "+").replace(/_/g, "/");
+  const bin = atob(b64 + "===".slice((b64.length + 3) % 4));
+  return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+}
+
+function makeInviteLink(orgId, password) {
+  const token = toBase64Url(JSON.stringify({ o: orgId, p: password }));
+  return `${window.location.origin}/#join=${token}`;
+}
+
+// 招待リンク（またはその一部）から { o: 組織ID, p: パスワード } を取り出す。読めなければ null
+function parseInvite(text) {
+  const m = String(text || "").match(/join=([A-Za-z0-9_-]+)/);
+  if (!m) return null;
+  try {
+    const v = JSON.parse(fromBase64Url(m[1]));
+    return v && typeof v.o === "string" && typeof v.p === "string" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+// ページを開いたときの URL に招待が入っていれば取り出す（読むだけ。消すのは clearInviteFromUrl）
+function readInviteFromUrl() {
+  if (typeof window === "undefined") return null;
+  return parseInvite(window.location.hash);
+}
+
+// アドレス欄から招待の情報（パスワードを含む）を消す
+function clearInviteFromUrl() {
+  if (typeof window === "undefined" || !window.location.hash.includes("join=")) return;
+  try {
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  } catch {
+    window.location.hash = "";
   }
 }
 
@@ -724,6 +778,12 @@ export default function RehabApp() {
     setOrgState(next);
   };
 
+  // 招待リンクで開かれたとき（読み取ったらアドレス欄からは消える）
+  const [invite, setInvite] = useState(() => readInviteFromUrl());
+  useEffect(() => {
+    clearInviteFromUrl();
+  }, []);
+
   const [mode, setMode] = useState("player"); // 'player' | 'coach' | 'coach-login'
   const [coachAuthed, setCoachAuthed] = useState(false);
 
@@ -779,6 +839,26 @@ export default function RehabApp() {
   useEffect(() => {
     if (org) loadPublicData(org.id);
   }, [org?.id]);
+
+  // 開くたびにログインの期限（30日）を延ばす。使い続けている限りログインし直しは不要
+  useEffect(() => {
+    if (!org) return;
+    sbRpc("org_renew", { p_org_id: org.id })
+      .then((ok) => {
+        if (ok === false) handleSwitchOrg({ skipServer: true }); // 期限切れ・パスワード変更
+        else writeSession(ORG_SESSION_KEY, { id: org.id, name: org.name });
+      })
+      .catch(() => {
+        // 通信できないときなどは、そのまま使う
+      });
+  }, [org?.id]);
+
+  // 別の組織の招待リンクで開かれたら、いまの組織から抜けて招待先に入る
+  useEffect(() => {
+    if (!invite || !org) return;
+    if (org.id === invite.o) setInvite(null);
+    else handleSwitchOrg();
+  }, [invite, org?.id]);
 
   // ログインの有効期限が切れて更新もできなかったら、ログイン画面に戻す
   useEffect(() => {
@@ -839,7 +919,15 @@ export default function RehabApp() {
   };
 
   if (!org) {
-    return <OrgLogin onAuthed={setOrg} />;
+    return (
+      <OrgLogin
+        invite={invite}
+        onAuthed={(next) => {
+          setInvite(null);
+          setOrg(next);
+        }}
+      />
+    );
   }
 
   return (
@@ -1092,6 +1180,68 @@ function AdminLogin({ onChangeMode, onAuthed }) {
   );
 }
 
+// 招待リンクの表示（コピー・共有）
+function InviteLinkCard({ invite, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const canShare = typeof navigator !== "undefined" && typeof navigator.share === "function";
+  const message = `RE:SPRINT「${invite.name}」への招待です。\nこのリンクを開くとログインできます。\n${invite.link}`;
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(invite.link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      window.prompt("このリンクをコピーしてください", invite.link);
+    }
+  };
+
+  const share = async () => {
+    try {
+      await navigator.share({ title: `RE:SPRINT ${invite.name}`, text: message });
+    } catch {
+      // 共有をやめたときなど
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-blue-200 p-5 shadow-sm">
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <p className="text-sm font-bold text-slate-700 flex items-center gap-1.5">
+          <LinkIcon size={16} className="text-blue-600" /> 「{invite.name}」の招待リンク
+        </p>
+        <button onClick={onClose} className="text-slate-400 hover:text-slate-600 p-1" aria-label="閉じる">
+          <X size={16} />
+        </button>
+      </div>
+      <p className="text-[11px] text-slate-500 leading-relaxed mb-2">
+        このリンクを LINE などでメンバーに送ってください。開くだけでこの組織にログインできます。
+        リンクにはパスワードが含まれるので、メンバー以外には渡さないでください。
+        パスワードを変更すると、このリンクは使えなくなります。
+      </p>
+      <p className="text-[11px] font-mono break-all bg-slate-50 border border-slate-200 rounded-lg p-2 mb-3 select-all">
+        {invite.link}
+      </p>
+      <div className="flex gap-2">
+        <button
+          onClick={copy}
+          className="flex-1 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700"
+        >
+          {copied ? "コピーしました" : "リンクをコピー"}
+        </button>
+        {canShare && (
+          <button
+            onClick={share}
+            className="flex-1 py-2 rounded-lg border border-blue-600 text-blue-700 text-sm font-medium hover:bg-blue-50"
+          >
+            LINE などで送る
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // 組織の追加・一覧（管理者としてログインしているときだけ表示される）
 function OrgManager({ onBack }) {
   const [orgs, setOrgs] = useState([]);
@@ -1103,6 +1253,7 @@ function OrgManager({ onBack }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [done, setDone] = useState(null);
+  const [invite, setInvite] = useState(null); // { name, link }
 
   const load = async () => {
     setLoading(true);
@@ -1154,6 +1305,7 @@ function OrgManager({ onBack }) {
       setDone(
         `組織「${row.name}」を追加しました。組織ID「${row.id}」と、いま設定したパスワードで組織ログインできます。`
       );
+      setInvite({ name: row.name, link: makeInviteLink(row.id, normalizeOrgPassword(orgPw)) });
       setOrgId("");
       setOrgName("");
       setOrgPw("");
@@ -1179,11 +1331,21 @@ function OrgManager({ onBack }) {
     }
     try {
       await sbRpc("admin_set_org_password", { p_id: org.id, p_password: normalizeOrgPassword(next) });
-      setDone(`「${org.name}」のパスワードを変更しました。`);
+      setDone(`「${org.name}」のパスワードを変更しました。新しい招待リンクを送ってください。`);
+      setInvite({ name: org.name, link: makeInviteLink(org.id, normalizeOrgPassword(next)) });
       await load();
     } catch (err) {
       setError(err.message);
     }
+  };
+
+  // 既存の組織の招待リンクを作る（パスワードは保存していないので、入力してもらう）
+  const handleMakeInvite = (org) => {
+    const pw = window.prompt(
+      `「${org.name}」の組織パスワードを入力してください。\n（招待リンクに入れるためだけに使います）`
+    );
+    if (!pw || !normalizeOrgPassword(pw)) return;
+    setInvite({ name: org.name, link: makeInviteLink(org.id, normalizeOrgPassword(pw)) });
   };
 
   const handleDelete = async (org) => {
@@ -1229,6 +1391,7 @@ function OrgManager({ onBack }) {
             {done}
           </p>
         )}
+        {invite && <InviteLinkCard invite={invite} onClose={() => setInvite(null)} />}
 
         <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
           <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
@@ -1311,6 +1474,12 @@ function OrgManager({ onBack }) {
                     )}
                   </div>
                   <div className="flex items-center gap-3 shrink-0">
+                    <button
+                      onClick={() => handleMakeInvite(o)}
+                      className="text-[11px] text-blue-600 hover:text-blue-800 underline"
+                    >
+                      招待リンク
+                    </button>
                     <button
                       onClick={() => handleResetPassword(o)}
                       className="text-[11px] text-slate-500 hover:text-blue-600 underline"
@@ -1411,6 +1580,10 @@ function InstallHint({ className = "mt-5" }) {
               <p className="text-[11px] text-slate-500 leading-relaxed mt-1">
                 ホーム画面の RE:SPRINT アイコンから、アプリのように全画面で開けます。
               </p>
+              <p className="text-[11px] text-slate-500 leading-relaxed mt-1">
+                ※ iPhone はホーム画面のアプリと Safari でログインが別です。アイコンから初めて開いたときは、
+                招待リンクをコピーして「コピーした招待リンクを貼り付けて入る」を押してください（最初の1回だけ）。
+              </p>
             </>
           ) : (
             <>
@@ -1442,16 +1615,17 @@ function InstallHint({ className = "mt-5" }) {
   );
 }
 
-function OrgLogin({ onAuthed }) {
+function OrgLogin({ onAuthed, invite }) {
   const [screen, setScreen] = useState("org"); // 'org' | 'admin' | 'admin-panel'
   const [orgCode, setOrgCode] = useState("");
   const [password, setPassword] = useState("");
+  const [inviteText, setInviteText] = useState("");
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  const handleLogin = async () => {
+  const loginWith = async (id, pw, { fromInvite = false } = {}) => {
     setError(null);
-    if (!orgCode.trim() || !password) {
+    if (!String(id || "").trim() || !pw) {
       setError("組織IDとパスワードを入力してください。");
       return;
     }
@@ -1459,14 +1633,19 @@ function OrgLogin({ onAuthed }) {
     try {
       await ensureAnonymousSession();
       const org = await sbRpc("org_login", {
-        p_org_id: orgCode.trim(),
-        p_password: normalizeOrgPassword(password),
+        p_org_id: String(id).trim(),
+        p_password: normalizeOrgPassword(pw),
       });
       if (!org || !org.id) {
-        setError("組織IDまたはパスワードが違います。");
+        setError(
+          fromInvite
+            ? "この招待リンクは使えません（組織のパスワードが変更された可能性があります）。管理者に新しいリンクをもらってください。"
+            : "組織IDまたはパスワードが違います。"
+        );
         return;
       }
       setPassword("");
+      setInviteText("");
       onAuthed({ id: org.id, name: org.name });
     } catch (err) {
       setError(err.message);
@@ -1474,6 +1653,32 @@ function OrgLogin({ onAuthed }) {
       setBusy(false);
     }
   };
+
+  const handleLogin = () => loginWith(orgCode, password);
+
+  const handleInvite = (text) => {
+    const inv = parseInvite(text);
+    if (!inv) {
+      setError("招待リンクを読み取れませんでした。管理者から届いたリンクをそのまま貼り付けてください。");
+      return;
+    }
+    loginWith(inv.o, inv.p, { fromInvite: true });
+  };
+
+  const pasteInvite = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      setInviteText(text);
+      handleInvite(text);
+    } catch {
+      setError("貼り付けできませんでした。下の欄に長押しで貼り付けてください。");
+    }
+  };
+
+  // 招待リンクで開かれたら、そのままログインする
+  useEffect(() => {
+    if (invite) loginWith(invite.o, invite.p, { fromInvite: true });
+  }, [invite]);
 
   // 管理者をログアウトして組織ログインに戻る
   const leaveAdmin = async () => {
@@ -1496,8 +1701,40 @@ function OrgLogin({ onAuthed }) {
 
   return (
     <LoginShell mode="org" onChangeMode={(m) => setScreen(m)}>
+      {busy && invite && (
+        <p className="text-sm text-blue-600 text-center mb-3 flex items-center justify-center gap-2">
+          <Loader2 size={14} className="animate-spin" /> 招待リンクでログインしています...
+        </p>
+      )}
+      <div className="rounded-xl border border-blue-100 bg-blue-50 p-3 mb-5">
+        <p className="text-xs font-bold text-blue-700 mb-1">招待リンクで入る（かんたん）</p>
+        <p className="text-[11px] text-blue-700/80 leading-relaxed mb-2">
+          管理者から届いたリンクをコピーして、ここで貼り付けるだけで入れます。
+        </p>
+        <button
+          type="button"
+          onClick={pasteInvite}
+          disabled={busy}
+          className="w-full py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:bg-slate-300 mb-2"
+        >
+          コピーした招待リンクを貼り付けて入る
+        </button>
+        <input
+          value={inviteText}
+          onChange={(e) => {
+            setInviteText(e.target.value);
+            if (parseInvite(e.target.value)) handleInvite(e.target.value);
+          }}
+          placeholder="ここに長押しで貼り付けてもOK"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          className="w-full border border-blue-200 rounded-lg px-3 py-2 text-xs bg-white"
+        />
+      </div>
+
       <p className="text-sm text-slate-500 text-center mb-4">
-        所属する組織のIDとパスワードを入力してください。
+        または、組織のIDとパスワードを入力してください。
       </p>
 
       <label className="text-xs text-slate-500">組織ID</label>
@@ -1733,8 +1970,15 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
 // ==================================================================
 // チャットパネル（選手⇔スタッフ 共通コンポーネント）
 // ==================================================================
-function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader }) {
+// アプリから送った写真・動画（attachments バケット）かどうか。そうならチャット内にそのまま表示する
+function uploadedMediaKind(url) {
+  if (!url || !String(url).includes(`/storage/v1/object/public/${ATTACHMENT_BUCKET}/`)) return null;
+  return /\.(mp4|mov|webm|m4v|qt)(\?|$)/i.test(url) ? "video" : "image";
+}
+
+function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, playerId, orgId }) {
   const [text, setText] = useState("");
+  const [attachment, setAttachment] = useState(null); // { url, kind } 送信前の写真・動画
   const [role, setRole] = useState(roleOptions?.[0]?.value ?? null);
   const [sending, setSending] = useState(false);
   const [showExtra, setShowExtra] = useState(false);
@@ -1743,15 +1987,17 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader })
   const [timestampNote, setTimestampNote] = useState("");
 
   const handleSend = async () => {
-    if (!text.trim()) return;
+    if (!text.trim() && !attachment) return;
     setSending(true);
     try {
-      await onSend(text.trim(), role, {
+      const body = text.trim() || (attachment?.kind === "video" ? "（動画）" : "（写真）");
+      await onSend(body, role, {
         painType: painType || null,
-        videoUrl: videoUrl.trim() || null,
+        videoUrl: attachment?.url || videoUrl.trim() || null,
         timestampNote: timestampNote.trim() || null,
       });
       setText("");
+      setAttachment(null);
       setPainType("");
       setVideoUrl("");
       setTimestampNote("");
@@ -1799,7 +2045,10 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader })
                 >
                   {m.painType && <p>痛みの種類：{PAIN_TYPE_LABELS[m.painType] || m.painType}</p>}
                   {m.timestampNote && <p>該当箇所：{m.timestampNote}</p>}
-                  {m.videoUrl && (
+                  {m.videoUrl && uploadedMediaKind(m.videoUrl) && (
+                    <AttachmentPreview url={m.videoUrl} kind={uploadedMediaKind(m.videoUrl)} />
+                  )}
+                  {m.videoUrl && !uploadedMediaKind(m.videoUrl) && (
                     <a
                       href={safeHref(m.videoUrl)}
                       target="_blank"
@@ -1853,6 +2102,32 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader })
         </div>
       )}
 
+      {attachment && (
+        <div className="mb-2 flex items-start gap-2">
+          <div className="flex-1">
+            <AttachmentPreview url={attachment.url} kind={attachment.kind} />
+          </div>
+          <button
+            type="button"
+            onClick={() => setAttachment(null)}
+            className="text-slate-400 hover:text-red-500 p-1"
+            aria-label="添付を取り消す"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
+      {playerId && (
+        <div className="mb-2">
+          <MediaUploadButton
+            playerId={playerId}
+            orgId={orgId}
+            context="message"
+            label={attachment ? "別の写真・動画に差し替える" : "📎 写真・動画を添付"}
+            onUploaded={(r) => setAttachment({ url: r.url, kind: r.kind })}
+          />
+        </div>
+      )}
       <div className="flex gap-2">
         {roleOptions && (
           <select
@@ -3371,6 +3646,8 @@ function PlayerDetailPanel({
             </div>
           </div>
           <ChatPanel
+            playerId={player.id}
+            orgId={orgId}
             messages={player.messages}
             myRole="staff"
             title=""
@@ -4272,6 +4549,7 @@ function PlayerLogin({ orgId, masterProtocols, playerDirectory, setPlayerDirecto
         );
         if (cancelled) return;
         if (rows[0]) {
+          writeSession(PLAYER_SESSION_KEY, saved); // 使うたびに保存期限を延ばす
           setMyPlayer(normalizePlayer(rows[0]));
           return; // この画面は閉じられる
         }
@@ -4762,7 +5040,7 @@ function InjuryDateCard({ orgId, player, protocol, setMyPlayer }) {
   );
 }
 
-// ---------- 要件②：全組織横断のPhase別タイムライン比較 ----------
+// ---------- 要件②：Phase別タイムライン比較（v19 から自分の組織の中だけの集計） ----------
 function PhaseTimelineComparison({ player, protocol }) {
   const [globalAvg, setGlobalAvg] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -5466,7 +5744,14 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
             )}
           </div>
 
-          <ChatPanel messages={player.messages} myRole="player" title="指導者とのチャット" onSend={sendPlayerMessage} />
+          <ChatPanel
+            playerId={player.id}
+            orgId={orgId}
+            messages={player.messages}
+            myRole="player"
+            title="指導者とのチャット"
+            onSend={sendPlayerMessage}
+          />
         </>
       )}
     </div>
