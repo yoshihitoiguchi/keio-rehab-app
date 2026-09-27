@@ -263,7 +263,7 @@ async function fetchSetting(orgId, key) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.2 (招待リンク・チャットに写真動画)";
+const APP_BUILD = "v15.3 (ホーム画面への追加の案内)";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -307,6 +307,66 @@ function writeSession(key, value) {
   } catch {
     // 保存できなくても動作は続ける
   }
+}
+
+// ==================================================================
+// 端末の見分け（ホーム画面への追加の案内に使う）
+// ==================================================================
+function isStandaloneApp() {
+  if (typeof window === "undefined") return false;
+  return window.matchMedia?.("(display-mode: standalone)").matches || window.navigator.standalone === true;
+}
+
+// iPadOS 13 以降の Safari は Mac と名乗るので、タッチ対応かどうかで見分ける
+function isIOSDevice() {
+  if (typeof navigator === "undefined") return false;
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+}
+
+function isAndroidDevice() {
+  return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+}
+
+// LINE・Instagram などのアプリの中のブラウザ（ここからはホーム画面に追加できない）
+function inAppBrowserName() {
+  if (typeof navigator === "undefined") return null;
+  const ua = navigator.userAgent;
+  if (/\bLine\//i.test(ua)) return "LINE";
+  if (/Instagram/i.test(ua)) return "Instagram";
+  if (/FBAN|FBAV|FB_IAB/i.test(ua)) return "Facebook";
+  if (/MicroMessenger/i.test(ua)) return "WeChat";
+  if (/KAKAOTALK/i.test(ua)) return "KakaoTalk";
+  return null;
+}
+
+// Android の「アプリとして追加」の合図は、画面が出る前に来ることがあるので、ここで受け取っておく
+let deferredInstallPrompt = null;
+const INSTALLABLE_EVENT = "resprint:installable";
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    window.dispatchEvent(new Event(INSTALLABLE_EVENT));
+  });
+}
+
+function useInstallPrompt() {
+  const [prompt, setPrompt] = useState(() => deferredInstallPrompt);
+  useEffect(() => {
+    const on = () => setPrompt(deferredInstallPrompt);
+    window.addEventListener(INSTALLABLE_EVENT, on);
+    return () => window.removeEventListener(INSTALLABLE_EVENT, on);
+  }, []);
+  const install = async () => {
+    const p = prompt || deferredInstallPrompt;
+    if (!p) return false;
+    p.prompt();
+    const choice = await p.userChoice.catch(() => null);
+    deferredInstallPrompt = null;
+    setPrompt(null);
+    return choice?.outcome === "accepted";
+  };
+  return { canInstall: Boolean(prompt), install };
 }
 
 // ==================================================================
@@ -356,6 +416,8 @@ function readInviteFromUrl() {
 // アドレス欄から招待の情報（パスワードを含む）を消す
 function clearInviteFromUrl() {
   if (typeof window === "undefined" || !window.location.hash.includes("join=")) return;
+  // LINE などの中で開いたときは残す（「Safari で開く」を押したときに招待がそのまま引き継がれるように）
+  if (inAppBrowserName()) return;
   try {
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
   } catch {
@@ -780,6 +842,8 @@ export default function RehabApp() {
 
   // 招待リンクで開かれたとき（読み取ったらアドレス欄からは消える）
   const [invite, setInvite] = useState(() => readInviteFromUrl());
+  // 招待リンクでログインした直後の「ホーム画面に追加」の案内（スマホで、まだ追加していないときだけ）
+  const [installGuide, setInstallGuide] = useState(null); // { orgName, link } | null
   useEffect(() => {
     clearInviteFromUrl();
   }, []);
@@ -923,6 +987,9 @@ export default function RehabApp() {
       <OrgLogin
         invite={invite}
         onAuthed={(next) => {
+          if (invite && !isStandaloneApp() && (isIOSDevice() || isAndroidDevice())) {
+            setInstallGuide({ orgName: next.name, link: makeInviteLink(invite.o, invite.p) });
+          }
           setInvite(null);
           setOrg(next);
         }}
@@ -1034,6 +1101,14 @@ export default function RehabApp() {
           />
         )}
       </main>
+
+      {installGuide && (
+        <InstallGuide
+          orgName={installGuide.orgName}
+          link={installGuide.link}
+          onClose={() => setInstallGuide(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1517,7 +1592,7 @@ function OrgManager({ onBack }) {
 const INSTALL_HINT_KEY = "resprint.installHintClosed";
 
 function InstallHint({ className = "mt-5" }) {
-  const [installPrompt, setInstallPrompt] = useState(null);
+  const { canInstall, install } = useInstallPrompt();
   const [closed, setClosed] = useState(() => {
     try {
       return window.localStorage.getItem(INSTALL_HINT_KEY) === "1";
@@ -1526,25 +1601,8 @@ function InstallHint({ className = "mt-5" }) {
     }
   });
 
-  const standalone =
-    typeof window !== "undefined" &&
-    (window.matchMedia("(display-mode: standalone)").matches ||
-      window.navigator.standalone === true);
-
-  // iPadOS 13 以降の Safari は Mac と名乗るので、タッチ対応かどうかで見分ける
-  const isIOS =
-    typeof navigator !== "undefined" &&
-    (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
-      (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1));
-
-  useEffect(() => {
-    const onPrompt = (e) => {
-      e.preventDefault();
-      setInstallPrompt(e);
-    };
-    window.addEventListener("beforeinstallprompt", onPrompt);
-    return () => window.removeEventListener("beforeinstallprompt", onPrompt);
-  }, []);
+  const standalone = isStandaloneApp();
+  const isIOS = isIOSDevice();
 
   const handleClose = () => {
     try {
@@ -1556,7 +1614,7 @@ function InstallHint({ className = "mt-5" }) {
   };
 
   if (standalone || closed) return null;
-  if (!isIOS && !installPrompt) return null; // 追加できない環境では出さない
+  if (!isIOS && !canInstall) return null; // 追加できない環境では出さない
 
   return (
     <div className={`${className} rounded-xl border border-slate-200 bg-slate-50 p-3 text-left`}>
@@ -1591,11 +1649,7 @@ function InstallHint({ className = "mt-5" }) {
                 アプリとして追加すると、次からURLを開かずに使えます。
               </p>
               <button
-                onClick={async () => {
-                  installPrompt.prompt();
-                  await installPrompt.userChoice;
-                  setInstallPrompt(null);
-                }}
+                onClick={install}
                 className="mt-2 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-700"
               >
                 ホーム画面に追加
@@ -1610,6 +1664,157 @@ function InstallHint({ className = "mt-5" }) {
         >
           <X size={14} />
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ==================================================================
+// 招待リンクでログインした直後に出す「ホーム画面に追加」の案内（全画面）
+//   iPhone：リンクをコピー → 共有 →「ホーム画面に追加」→ アイコンから開いて貼り付け
+//   Android：追加できるならボタン1つで追加。できなければメニューからの手順
+//   LINE などの中のブラウザ：先に Safari／Chrome で開き直してもらう
+// ==================================================================
+function GuideStep({ n, title, children }) {
+  return (
+    <li className="flex gap-3">
+      <span className="shrink-0 w-8 h-8 rounded-full bg-blue-600 text-white font-bold flex items-center justify-center">
+        {n}
+      </span>
+      <div className="flex-1 pt-1">
+        <p className="text-sm font-bold text-slate-800">{title}</p>
+        {children && <div className="text-xs text-slate-500 leading-relaxed mt-1">{children}</div>}
+      </div>
+    </li>
+  );
+}
+
+function ShareIconMark() {
+  // iPhone の共有ボタン（□に↑）の見た目
+  return (
+    <span className="inline-flex items-center justify-center w-5 h-5 align-middle border border-blue-500 rounded-sm mx-0.5 relative">
+      <ArrowRight size={11} className="text-blue-500 -rotate-90" />
+    </span>
+  );
+}
+
+function InstallGuide({ orgName, link, onClose }) {
+  const { canInstall, install } = useInstallPrompt();
+  const [copied, setCopied] = useState(false);
+  const [installed, setInstalled] = useState(false);
+  const ios = isIOSDevice();
+  const android = isAndroidDevice();
+  const inApp = inAppBrowserName();
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+    } catch {
+      window.prompt("このリンクをコピーしてください", link);
+      setCopied(true);
+    }
+  };
+
+  const doInstall = async () => {
+    const ok = await install();
+    if (ok) setInstalled(true);
+  };
+
+  const copyButton = (
+    <button
+      onClick={copy}
+      className={`mt-2 w-full py-2.5 rounded-xl text-sm font-bold ${
+        copied ? "bg-green-600 text-white" : "bg-blue-600 text-white hover:bg-blue-700"
+      }`}
+    >
+      {copied ? "✓ コピーしました" : "招待リンクをコピーする"}
+    </button>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-900/70 flex items-end sm:items-center justify-center print:hidden" role="dialog" aria-modal="true">
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto p-6 safe-bottom">
+        <div className="flex flex-col items-center text-center mb-5">
+          <img src="/apple-touch-icon.png" alt="" className="w-16 h-16 rounded-2xl shadow mb-3" />
+          <p className="text-xs text-green-700 font-bold mb-1">✓「{orgName}」にログインしました</p>
+          <h2 className="text-lg font-bold text-slate-800">ホーム画面に追加しましょう</h2>
+          <p className="text-xs text-slate-500 mt-1">
+            次からはホーム画面のアイコンを押すだけで開けます（1分で終わります）
+          </p>
+        </div>
+
+        {inApp ? (
+          <ol className="space-y-4">
+            <GuideStep n={1} title={`${inApp} の中では追加できません`}>
+              {ios ? (
+                <>画面の右下（または右上）の「…」や共有ボタンから、<b>「Safari で開く」</b>を選んでください。</>
+              ) : (
+                <>画面の右上の「︙」から、<b>「他のアプリで開く」→ Chrome</b> を選んでください。</>
+              )}
+              <br />開き直すと、自動でログインしてこの案内が出ます。
+            </GuideStep>
+            <GuideStep n={2} title="うまく開けないときは">
+              リンクをコピーして、{ios ? "Safari" : "Chrome"} のアドレス欄に貼り付けて開いてください。
+              {copyButton}
+            </GuideStep>
+          </ol>
+        ) : ios ? (
+          <ol className="space-y-4">
+            <GuideStep n={1} title="招待リンクをコピーする">
+              ホーム画面のアプリで最初に1回だけ使います。
+              {copyButton}
+            </GuideStep>
+            <GuideStep n={2} title="共有ボタンから「ホーム画面に追加」">
+              Safari の画面の下（iPad は上）にある共有ボタン
+              <ShareIconMark />
+              を押し、一覧から<b>「ホーム画面に追加」</b>を選んで、右上の<b>「追加」</b>を押します。
+              見当たらないときは一覧を下にスクロールしてください。
+            </GuideStep>
+            <GuideStep n={3} title="ホーム画面のアイコンから開いて、貼り付ける">
+              RE:SPRINT のアイコンを開き、<b>「コピーした招待リンクを貼り付けて入る」</b>を押します。
+              これで完了です。次からはアイコンを押すだけで開けます。
+            </GuideStep>
+          </ol>
+        ) : android ? (
+          canInstall && !installed ? (
+            <ol className="space-y-4">
+              <GuideStep n={1} title="下のボタンを押して「追加」を選ぶ">
+                <button
+                  onClick={doInstall}
+                  className="mt-2 w-full py-3 rounded-xl bg-blue-600 text-white text-sm font-bold hover:bg-blue-700"
+                >
+                  ホーム画面に追加する
+                </button>
+              </GuideStep>
+              <GuideStep n={2} title="ホーム画面の RE:SPRINT アイコンから開く">
+                ログインしたままなので、アイコンを押すだけで使えます。
+              </GuideStep>
+            </ol>
+          ) : installed ? (
+            <p className="text-sm text-green-700 font-bold text-center py-4">
+              ✓ 追加しました。ホーム画面の RE:SPRINT アイコンから開けます。
+            </p>
+          ) : (
+            <ol className="space-y-4">
+              <GuideStep n={1} title="Chrome の右上「︙」を押す" />
+              <GuideStep n={2} title="「ホーム画面に追加」（または「アプリをインストール」）を選ぶ" />
+              <GuideStep n={3} title="ホーム画面の RE:SPRINT アイコンから開く">
+                ログインしたままなので、アイコンを押すだけで使えます。
+              </GuideStep>
+            </ol>
+          )
+        ) : null}
+
+        <button
+          onClick={onClose}
+          className="w-full mt-6 py-2.5 rounded-xl border border-slate-300 text-slate-600 text-sm font-medium hover:bg-slate-50"
+        >
+          {installed ? "閉じる" : "あとで（このまま使う）"}
+        </button>
+        <p className="text-[10px] text-slate-400 text-center mt-2">
+          あとで追加したいときは、選手画面の「このアプリの使い方」に手順があります。
+        </p>
       </div>
     </div>
   );
