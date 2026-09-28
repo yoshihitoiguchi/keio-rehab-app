@@ -76,6 +76,7 @@ insert into protocols values ('hs','default','ハム'), ('op','other','他');
 insert into players values ('p1','default','A','1111','hs'), ('p2','other','B','2222','op');
 insert into reports (player_id, vas) values ('p1',3), ('p2',5);
 insert into gate_item_checks (player_id, checker_role, result) values ('p1','player','ok'), ('p1','coach','ok');
+insert into app_settings values ('default','coach_password_hash','${sha("coach")}'), ('default','other_setting','x');
 insert into offsite_domains values ('A', null, '共通'), ('Z', 'other', '他専用');
 insert into protocols values ('tpl', null, '共通テンプレート');
 create table protocol_notes (id bigint generated always as identity primary key, protocol_id text, note text);
@@ -299,6 +300,40 @@ ok((await db.query("select (public.resprint_clone_template('default','comm-a'))-
 ok((await as(U3, "insert into phase_menus (org_id, protocol_id, phase_number, name) values ('comm-a','comm-a-hs',10,'Phase10') returning id")).rows?.length === 1,
    "[v20] Phase 10 のメニューを登録できる（以前は 1〜5 の制約でエラー）");
 ok(!!(await as(U1, "select public.resprint_clone_template('default','x')")).error, "[v20] コピー関数はアプリから直接呼べない");
+
+// ===== v21：指導者パスワードを管理者が設定・サーバーで照合 =====
+ok(!(await run("supabase_migration_v21_coach_password.sql")), "[v21] 適用 1 回目");
+ok(!(await run("supabase_migration_v21_coach_password.sql")), "[v21] 適用 2 回目（冪等）");
+const c21 = one(await as(ADMIN, "select public.admin_create_org('comm-b','コミュニティB','comm-b-pass','coach-b-pass')"));
+ok(c21?.coach_password_set === true, "[v21] 組織を作るときに指導者パスワードも設定できる");
+ok(/別のもの/.test((await as(ADMIN, "select public.admin_create_org('comm-c','C','same-pass-1','same-pass-1')")).error || ""), "[v21] 組織パスワードと同じ指導者パスワードは拒否");
+ok(one(await as(ADMIN, "select public.admin_create_org('comm-d','D','comm-d-pass')"))?.coach_password_set === false, "[v21] 3つの引数（以前の呼び方）でも組織を作れる（指導者パスワードは未設定）");
+const U4 = randomUUID();
+await db.exec(`insert into auth.users (id, is_anonymous) values ('${U4}', true)`);
+await as(U4, "select public.org_login('comm-b','comm-b-pass')");
+ok((await as(U4, "select value from app_settings where key = 'coach_password_hash'")).rows?.length === 0, "[v21] 選手（メンバー）は指導者パスワードのハッシュを読めない");
+ok(!!(await as(U4, "insert into app_settings (org_id, key, value) values ('comm-b','coach_password_hash','x')")).error
+   && (await as(U4, "update app_settings set value = 'x' where key = 'coach_password_hash' returning key")).rows?.length === 0,
+   "[v21] 選手は指導者パスワードを書き換えられない（先に決めることもできない）");
+ok(one(await as(U4, "select public.coach_check('comm-b','')"))?.set === true, "[v21] 設定済みかどうかが分かる（空の問い合わせ）");
+ok(one(await as(U4, "select public.coach_check('comm-b','wrong')"))?.ok === false, "[v21] 間違ったパスワードは通らない");
+ok(one(await as(U4, "select public.coach_check('comm-b','coach-b-pass')"))?.ok === true, "[v21] 正しいパスワードは通る");
+ok(one(await as(U1, "select public.coach_check('default','coach')"))?.ok === true, "[v21] 既存の default の指導者パスワード（v13 からのもの）はそのまま使える");
+ok(!!(await as(U4, "select public.coach_check('default','coach')")).error, "[v21] 他の組織の指導者パスワードは確かめられない");
+ok(one(await as(U4, "select public.coach_change_password('comm-b','wrong','new-coach-1')")) === false, "[v21] 今のパスワードが違うと変更できない");
+ok(one(await as(U4, "select public.coach_change_password('comm-b','coach-b-pass','new-coach-1')")) === true
+   && one(await as(U4, "select public.coach_check('comm-b','new-coach-1')"))?.ok === true, "[v21] 指導者本人は、今のパスワードを確かめて変更できる");
+ok(!!(await as(U4, "select public.admin_set_coach_password('comm-b','hijack')")).error, "[v21] 管理者以外は指導者パスワードを設定できない");
+await as(ADMIN, "select public.admin_set_coach_password('comm-d','coach-d-pass')");
+const U5 = randomUUID();
+await db.exec(`insert into auth.users (id, is_anonymous) values ('${U5}', true)`);
+await as(U5, "select public.org_login('comm-d','comm-d-pass')");
+ok(one(await as(U5, "select public.coach_check('comm-d','coach-d-pass')"))?.ok === true, "[v21] 管理者は既存の組織の指導者パスワードを設定できる");
+const lst = one(await as(ADMIN, "select public.admin_list_orgs()"));
+ok(lst.find((o) => o.id === "comm-b")?.has_coach_password === true && lst.every((o) => !JSON.stringify(o).includes("coach_password_hash")), "[v21] 管理者の一覧に「指導者パスワード設定済み」が出て、ハッシュは出ない");
+for (let i = 0; i < 10; i++) await as(U5, "select public.coach_check('comm-d','x" + i + "')");
+ok(/間違いが続いた/.test((await as(U5, "select public.coach_check('comm-d','coach-d-pass')")).error || ""), "[v21] 10回間違えると15分止まる");
+ok((await as(U1, "select value from app_settings where key = 'other_setting'")).rows?.length === 1, "[v21] 指導者パスワード以外の設定は、今までどおりメンバーが読める");
 
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");

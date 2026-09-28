@@ -236,34 +236,9 @@ function safeHref(url) {
   }
 }
 
-async function sha256Hex(text) {
-  if (!window.crypto || !window.crypto.subtle) {
-    throw new Error(
-      "このページはHTTPS接続ではないため、パスワードのハッシュ化機能（Web Crypto API）が利用できません。"
-    );
-  }
-  const normalized = String(text).trim();
-  const enc = new TextEncoder().encode(normalized);
-  const digest = await window.crypto.subtle.digest("SHA-256", enc);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .toLowerCase();
-}
-
-async function fetchSetting(orgId, key) {
-  const rows = await sbSelect(
-    "app_settings",
-    `?org_id=eq.${encodeURIComponent(orgId)}&key=eq.${encodeURIComponent(key)}&select=value`
-  );
-  if (!rows || rows.length === 0) return null;
-  const value = rows[0].value;
-  return value === null || value === undefined ? null : String(value).trim().toLowerCase();
-}
-
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.4 (新しい組織にテンプレートをコピー)";
+const APP_BUILD = "v15.5 (指導者パスワードを管理者が設定)";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -1325,6 +1300,8 @@ function OrgManager({ onBack }) {
   const [orgName, setOrgName] = useState("");
   const [orgPw, setOrgPw] = useState("");
   const [orgPwConfirm, setOrgPwConfirm] = useState("");
+  const [coachPw, setCoachPw] = useState("");
+  const [coachPwConfirm, setCoachPwConfirm] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [done, setDone] = useState(null);
@@ -1365,6 +1342,18 @@ function OrgManager({ onBack }) {
       setError("組織パスワード（確認）が一致しません。");
       return;
     }
+    if (coachPw.trim().length < 4) {
+      setError("指導者パスワードは4文字以上にしてください（選手が指導者モードに入れないようにするため）。");
+      return;
+    }
+    if (coachPw !== coachPwConfirm) {
+      setError("指導者パスワード（確認）が一致しません。");
+      return;
+    }
+    if (normalizeOrgPassword(coachPw) === normalizeOrgPassword(orgPw)) {
+      setError("指導者パスワードは、組織パスワードと別のものにしてください。");
+      return;
+    }
     // 重複の最終確認はサーバー側で行う（ここは早めに知らせるためだけ）
     if (orgs.some((o) => o.id.toLowerCase() === id.toLowerCase())) {
       setError(`組織ID「${id}」はすでに使われています。`);
@@ -1376,6 +1365,7 @@ function OrgManager({ onBack }) {
         p_id: id,
         p_name: orgName.trim(),
         p_password: normalizeOrgPassword(orgPw),
+        p_coach_password: normalizeOrgPassword(coachPw),
       });
       const c = row.copied || {};
       setDone(
@@ -1383,13 +1373,15 @@ function OrgManager({ onBack }) {
           (c.protocols
             ? `プロトコル${c.protocols}件・種目メニュー${c.exercises}件をテンプレートからコピーしました。`
             : "") +
-          "下の招待リンクをメンバーに送ってください。"
+          "下の招待リンクをメンバーに送ってください。指導者パスワードは指導者にだけ伝えてください。"
       );
       setInvite({ name: row.name, link: makeInviteLink(row.id, normalizeOrgPassword(orgPw)) });
       setOrgId("");
       setOrgName("");
       setOrgPw("");
       setOrgPwConfirm("");
+      setCoachPw("");
+      setCoachPwConfirm("");
       await load();
     } catch (err) {
       setError(`追加できませんでした: ${err.message}`);
@@ -1413,6 +1405,27 @@ function OrgManager({ onBack }) {
       await sbRpc("admin_set_org_password", { p_id: org.id, p_password: normalizeOrgPassword(next) });
       setDone(`「${org.name}」のパスワードを変更しました。新しい招待リンクを送ってください。`);
       setInvite({ name: org.name, link: makeInviteLink(org.id, normalizeOrgPassword(next)) });
+      await load();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  // 指導者パスワードの設定・変更（管理者だけができる）
+  const handleSetCoachPassword = async (org) => {
+    setError(null);
+    setDone(null);
+    const next = window.prompt(
+      `「${org.name}」の指導者パスワードを入力してください（4文字以上）\n\n指導者モード（選手の医療情報を含む画面）に入るためのパスワードです。指導者にだけ伝えてください。`
+    );
+    if (next === null) return;
+    if (normalizeOrgPassword(next).length < 4) {
+      setError("指導者パスワードは4文字以上にしてください。");
+      return;
+    }
+    try {
+      await sbRpc("admin_set_coach_password", { p_id: org.id, p_password: normalizeOrgPassword(next) });
+      setDone(`「${org.name}」の指導者パスワードを設定しました。`);
       await load();
     } catch (err) {
       setError(err.message);
@@ -1518,10 +1531,33 @@ function OrgManager({ onBack }) {
             autoComplete="new-password"
             value={orgPwConfirm}
             onChange={(e) => setOrgPwConfirm(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleCreate()}
             placeholder="もう一度入力"
             className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-4"
           />
+
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 mb-4">
+            <p className="text-xs font-bold text-amber-800 mb-1">指導者パスワード</p>
+            <p className="text-[11px] text-amber-800/80 leading-relaxed mb-2">
+              指導者モード（選手の医療情報を含む画面）に入るためのパスワードです。組織パスワードとは別のものにして、指導者にだけ伝えてください。
+            </p>
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={coachPw}
+              onChange={(e) => setCoachPw(e.target.value)}
+              placeholder="4文字以上"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mb-2 bg-white"
+            />
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={coachPwConfirm}
+              onChange={(e) => setCoachPwConfirm(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+              placeholder="もう一度入力"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
+            />
+          </div>
 
           <button
             onClick={handleCreate}
@@ -1552,8 +1588,11 @@ function OrgManager({ onBack }) {
                     {!o.has_password && (
                       <p className="text-[10px] text-orange-600">パスワード未設定（ログインできません）</p>
                     )}
+                    {o.has_coach_password === false && (
+                      <p className="text-[10px] text-orange-600">指導者パスワード未設定（指導者モードに入れません）</p>
+                    )}
                   </div>
-                  <div className="flex items-center gap-3 shrink-0">
+                  <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 max-w-[55%]">
                     <button
                       onClick={() => handleMakeInvite(o)}
                       className="text-[11px] text-blue-600 hover:text-blue-800 underline"
@@ -1565,6 +1604,12 @@ function OrgManager({ onBack }) {
                       className="text-[11px] text-slate-500 hover:text-blue-600 underline"
                     >
                       パスワード変更
+                    </button>
+                    <button
+                      onClick={() => handleSetCoachPassword(o)}
+                      className="text-[11px] text-slate-500 hover:text-blue-600 underline"
+                    >
+                      指導者パスワード
                     </button>
                     <button
                       onClick={() => handleDelete(o)}
@@ -1989,79 +2034,47 @@ function OrgLogin({ onAuthed, invite }) {
 // パスワードゲート（指導者モード・組織スコープ）
 // ==================================================================
 function PasswordGate({ orgId, onAuthed, onCancel }) {
-  const [phase, setPhase] = useState("checking"); // 'checking' | 'setup' | 'login'
+  // 照合はサーバーの中（coach_check）で行う。ハッシュはアプリからは読めない（v21）
+  const [phase, setPhase] = useState("checking"); // 'checking' | 'unset' | 'login'
   const [pwInput, setPwInput] = useState("");
-  const [pwConfirm, setPwConfirm] = useState("");
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  const checkExistingPassword = async () => {
+  useEffect(() => {
+    let active = true;
     setPhase("checking");
     setError(null);
-    try {
-      const hash = await fetchSetting(orgId, "coach_password_hash");
-      setPhase(hash ? "login" : "setup");
-    } catch (err) {
-      setError(`設定の確認に失敗しました（${err.message}）。`);
-      setPhase("login");
-    }
-  };
-
-  useEffect(() => {
-    checkExistingPassword();
+    sbRpc("coach_check", { p_org_id: orgId, p_password: "" })
+      .then((r) => active && setPhase(r?.set ? "login" : "unset"))
+      .catch((err) => {
+        if (!active) return;
+        setError(err.message);
+        setPhase("login");
+      });
+    return () => {
+      active = false;
+    };
   }, [orgId]);
-
-  const handleSetup = async () => {
-    setError(null);
-    if (pwInput.trim().length < 4) {
-      setError("4文字以上のパスワードを設定してください。");
-      return;
-    }
-    if (pwInput !== pwConfirm) {
-      setError("確認用パスワードが一致しません。");
-      return;
-    }
-    setBusy(true);
-    try {
-      const hash = await sha256Hex(pwInput);
-      await sbUpsert("app_settings", { org_id: orgId, key: "coach_password_hash", value: hash }, "org_id,key");
-      onAuthed();
-    } catch (err) {
-      setError(`パスワードの保存に失敗しました: ${err.message}`);
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const handleLogin = async () => {
     setError(null);
+    if (!pwInput) {
+      setError("パスワードを入力してください。");
+      return;
+    }
     setBusy(true);
     try {
-      let storedHash;
-      try {
-        storedHash = await fetchSetting(orgId, "coach_password_hash");
-      } catch (fetchErr) {
-        setError(`データベースからハッシュ値を取得できませんでした（${fetchErr.message}）`);
-        setBusy(false);
-        return;
-      }
-
-      const inputHash = await sha256Hex(pwInput);
-
-      if (!storedHash) {
-        setError("データベースからハッシュ値を取得できませんでした（app_settingsに行が存在しません）。");
-        setBusy(false);
-        return;
-      }
-
-      if (storedHash === inputHash) {
+      const r = await sbRpc("coach_check", { p_org_id: orgId, p_password: pwInput });
+      if (r?.ok) {
         setPwInput("");
         onAuthed();
+      } else if (r && !r.set) {
+        setPhase("unset");
       } else {
         setError("パスワードが違います。");
       }
     } catch (err) {
-      setError(`認証中にエラーが発生しました: ${err.message}`);
+      setError(err.message);
     } finally {
       setBusy(false);
     }
@@ -2076,53 +2089,25 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
     );
   }
 
-  if (phase === "setup") {
+  if (phase === "unset") {
     return (
-      <div className="max-w-sm mx-auto mt-16 bg-white rounded-2xl shadow-lg p-8 border border-slate-200">
-        <div className="flex flex-col items-center gap-3 mb-6">
-          <div className="w-14 h-14 rounded-full bg-blue-50 flex items-center justify-center">
-            <KeyRound className="text-blue-600" size={26} />
+      <div className="max-w-sm mx-auto mt-16 mx-4 sm:mx-auto bg-white rounded-2xl shadow-lg p-8 border border-slate-200">
+        <div className="flex flex-col items-center gap-3 mb-4">
+          <div className="w-14 h-14 rounded-full bg-amber-50 flex items-center justify-center">
+            <KeyRound className="text-amber-600" size={26} />
           </div>
-          <h2 className="text-lg font-bold text-slate-800">指導者パスワードの初回設定</h2>
-          <p className="text-sm text-slate-500 text-center">
-            この組織ではまだ指導者パスワードが設定されていません。
+          <h2 className="text-lg font-bold text-slate-800">指導者パスワードが未設定です</h2>
+          <p className="text-sm text-slate-500 text-center leading-relaxed">
+            この組織の指導者パスワードは、まだ設定されていません。
+            管理者に設定を依頼してください（管理者画面の組織一覧から設定できます）。
           </p>
         </div>
-        <label className="text-xs text-slate-500">新しいパスワード</label>
-        <input
-          type="password"
-          value={pwInput}
-          onChange={(e) => setPwInput(e.target.value)}
-          placeholder="4文字以上"
-          className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          autoFocus
-        />
-        <label className="text-xs text-slate-500">新しいパスワード（確認）</label>
-        <input
-          type="password"
-          value={pwConfirm}
-          onChange={(e) => setPwConfirm(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleSetup()}
-          placeholder="もう一度入力"
-          className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
-        {error && <p className="text-red-500 text-sm mb-2 text-center">{error}</p>}
-        <div className="flex gap-2 mt-2">
-          <button
-            onClick={onCancel}
-            className="flex-1 py-2.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 text-sm font-medium"
-          >
-            戻る
-          </button>
-          <button
-            onClick={handleSetup}
-            disabled={busy}
-            className="flex-1 py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium disabled:bg-slate-300 flex items-center justify-center gap-2"
-          >
-            {busy && <Loader2 size={14} className="animate-spin" />}
-            設定してログイン
-          </button>
-        </div>
+        <button
+          onClick={onCancel}
+          className="w-full py-2.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 text-sm font-medium"
+        >
+          戻る
+        </button>
       </div>
     );
   }
@@ -2140,6 +2125,7 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
       </div>
       <input
         type="password"
+        autoComplete="current-password"
         value={pwInput}
         onChange={(e) => setPwInput(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && handleLogin()}
@@ -2164,15 +2150,9 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
           ログイン
         </button>
       </div>
-      <button
-        onClick={() => {
-          setError(null);
-          setPhase("setup");
-        }}
-        className="w-full mt-3 text-xs text-slate-400 hover:text-slate-600 underline"
-      >
-        パスワードが分からない場合／未設定の場合はこちら（再設定）
-      </button>
+      <p className="mt-4 text-[11px] text-slate-400 text-center leading-relaxed">
+        パスワードが分からない場合は、管理者に再設定を依頼してください。
+      </p>
     </div>
   );
 }
@@ -2472,20 +2452,16 @@ function CoachSettings({ orgId }) {
     }
     setSaving(true);
     try {
-      const storedHash = await fetchSetting(orgId, "coach_password_hash");
-      const currentHash = await sha256Hex(current);
-      if (!storedHash) {
-        setError("現在のパスワードのハッシュ値をデータベースから取得できませんでした。");
-        setSaving(false);
-        return;
-      }
-      if (storedHash !== currentHash) {
+      // 今のパスワードの確認と変更は、サーバーの中で行う（v21）
+      const changed = await sbRpc("coach_change_password", {
+        p_org_id: orgId,
+        p_current: current,
+        p_new: next,
+      });
+      if (!changed) {
         setError("現在のパスワードが違います。");
-        setSaving(false);
         return;
       }
-      const newHash = await sha256Hex(next);
-      await sbUpsert("app_settings", { org_id: orgId, key: "coach_password_hash", value: newHash }, "org_id,key");
       setSuccess(true);
       setCurrent("");
       setNext("");
