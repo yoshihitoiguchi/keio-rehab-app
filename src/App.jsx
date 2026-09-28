@@ -263,7 +263,7 @@ async function fetchSetting(orgId, key) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.3 (ホーム画面への追加の案内)";
+const APP_BUILD = "v15.4 (新しい組織にテンプレートをコピー)";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -1377,8 +1377,13 @@ function OrgManager({ onBack }) {
         p_name: orgName.trim(),
         p_password: normalizeOrgPassword(orgPw),
       });
+      const c = row.copied || {};
       setDone(
-        `組織「${row.name}」を追加しました。組織ID「${row.id}」と、いま設定したパスワードで組織ログインできます。`
+        `組織「${row.name}」を追加しました。` +
+          (c.protocols
+            ? `プロトコル${c.protocols}件・種目メニュー${c.exercises}件をテンプレートからコピーしました。`
+            : "") +
+          "下の招待リンクをメンバーに送ってください。"
       );
       setInvite({ name: row.name, link: makeInviteLink(row.id, normalizeOrgPassword(orgPw)) });
       setOrgId("");
@@ -2840,7 +2845,7 @@ function MenuLibraryManagement({ orgId, masterProtocols, phaseMenus, setPhaseMen
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <div className="space-y-3">
         <h3 className="font-bold text-slate-700 text-sm">登録済みメニュー ({phaseMenus.length})</h3>
-        {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
+        {Array.from({ length: 20 }, (_, i) => i + 1).map((n) => {
           const menusForPhase = phaseMenus.filter((m) => m.phaseNumber === n);
           if (menusForPhase.length === 0) return null;
           return (

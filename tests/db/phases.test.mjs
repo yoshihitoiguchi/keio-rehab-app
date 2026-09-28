@@ -53,7 +53,8 @@ create table gate_item_checks (id bigint generated always as identity primary ke
 create table phase_history (id bigint generated always as identity primary key, player_id text references players(id) on delete cascade, protocol_id text, phase_number int);
 create table slots (id bigint generated always as identity primary key, org_id text references organizations(id) on delete cascade, datetime text);
 create table exercises (id bigint generated always as identity primary key, org_id text, protocol_id text, name text);
-create table exercise_steps (id bigint generated always as identity primary key, exercise_id bigint);
+create table exercise_steps (id bigint generated always as identity primary key, exercise_id bigint, step_order int, label text);
+create table phase_menus (id bigint generated always as identity primary key, org_id text references organizations(id), protocol_id text, phase_number int check (phase_number >= 1 and phase_number <= 5), name text);
 create table offsite_domains (id text primary key, org_id text, label text);
 create table offsite_items (id bigint generated always as identity primary key, org_id text, domain_id text);
 create table media_attachments (id bigint generated always as identity primary key, player_id text references players(id) on delete cascade, org_id text references organizations(id), storage_path text, public_url text, kind text);
@@ -82,7 +83,9 @@ insert into protocol_notes (protocol_id, note) values ('tpl', 'テンプレの�
 grant all on protocol_notes to anon, authenticated;
 alter table protocol_notes enable row level security;
 create policy "public all - protocol_notes" on protocol_notes for all using (true) with check (true);
-insert into exercises (org_id, protocol_id, name) values ('default', 'hs', 'ノルディック');
+insert into exercises (org_id, protocol_id, name) values ('default', 'hs', 'ノルディック'), ('default', 'hs', 'ブリッジ');
+insert into exercise_steps (exercise_id, step_order, label) select id, g, 'step' || g from exercises, generate_series(1,2) g where protocol_id = 'hs';
+insert into phase_menus (org_id, protocol_id, phase_number, name) values ('default', 'hs', 1, '歩行');
 insert into offsite_items (org_id, domain_id) values (null, 'A'), (null, 'A'), ('other', 'Z');
 insert into organizations (id, name, password_hash) values ('ws', '改行つきハッシュ', '${sha("pass1234")}' || chr(10));
 create table mystery (id int, note text);
@@ -232,7 +235,7 @@ ok(!!(await as(U1, "insert into protocol_notes (protocol_id, note) values ('tpl'
    "[③] 共通テンプレートに属する行は書き換えられない");
 ok((await as(U1, "select count(*)::int as n from offsite_items")).rows?.[0]?.n === 2,
    "[③] 全組織共通のオフサイト項目（org_id が空）は読め、他組織専用の項目は読めない（本番は70件すべて共通）");
-ok((await as(U1, "select count(*)::int as n from exercises")).rows?.[0]?.n === 1, "[③] 種目（exercises）は自組織の分だけ読める");
+ok((await as(U1, "select count(*)::int as n from exercises")).rows?.[0]?.n === 2, "[③] 種目（exercises）は自組織の分だけ読める");
 ok(!!(await as(U1, "insert into media_attachments (player_id, org_id, storage_path, public_url, kind) values ('p1','default','p2/report/x.jpg','u','image')")).error,
    "[③] 写真の記録で、他の選手のフォルダを指すことはできない（他組織のファイル削除の防止）");
 ok((await as(U1, "insert into media_attachments (player_id, org_id, storage_path, public_url, kind) values ('p1','default','p1/report/x.jpg','u','image') returning id")).rows?.length === 1,
@@ -278,6 +281,24 @@ ok(!(await run("supabase_rollback_v16.sql")), "[再適用] また戻す");
 ok((await as(null, "insert into newtable values (1, 'x') returning id")).rows?.length === 1, "[再適用] 途中で足した表も、v13 時代と同じく開いた状態に戻る（退避を取り直している）");
 await as(U1, "select public.org_login('default','1234')");
 ok(!(await run("supabase_migration_v16_enforce.sql")), "[再適用] ③を適用して④へ");
+
+// ===== v20：新しい組織にテンプレートをコピー =====
+ok(!(await run("supabase_migration_v20_org_template.sql")), "[v20] 適用 1 回目");
+ok(!(await run("supabase_migration_v20_org_template.sql")), "[v20] 適用 2 回目（冪等）");
+const created = one(await as(ADMIN, "select public.admin_create_org('comm-a','コミュニティA','comm-a-pass')"));
+ok(created?.copied?.protocols === 1 && created?.copied?.exercises === 2 && created?.copied?.steps === 4 && created?.copied?.menus === 1,
+   "[v20] 組織を作ると default のプロトコル1・種目2・段階4・Phase別メニュー1がコピーされる " + JSON.stringify(created?.copied));
+const U3 = randomUUID();
+await db.exec(`insert into auth.users (id, is_anonymous) values ('${U3}', true)`);
+await as(U3, "select public.org_login('comm-a','comm-a-pass')");
+ok((await as(U3, "select id from protocols")).rows?.map((r) => r.id).join() === "comm-a-hs", "[v20] 新しい組織のメンバーは、自分の組織用にコピーされたプロトコルが見える");
+ok((await as(U3, "select count(*)::int as n from exercises")).rows?.[0]?.n === 2, "[v20] 種目も自分の組織の分として見える");
+ok((await as(U3, "select count(*)::int as n from exercise_steps s join exercises e on e.id = s.exercise_id")).rows?.[0]?.n === 4, "[v20] 種目の段階もつながっている");
+ok((await db.query("select count(*)::int n from exercises where org_id = 'default'")).rows[0].n === 2, "[v20] 元の default 組織の種目は変わらない");
+ok((await db.query("select (public.resprint_clone_template('default','comm-a'))->>'protocols' as n")).rows[0].n === "0", "[v20] もう一度コピーしても重複しない");
+ok((await as(U3, "insert into phase_menus (org_id, protocol_id, phase_number, name) values ('comm-a','comm-a-hs',10,'Phase10') returning id")).rows?.length === 1,
+   "[v20] Phase 10 のメニューを登録できる（以前は 1〜5 の制約でエラー）");
+ok(!!(await as(U1, "select public.resprint_clone_template('default','x')")).error, "[v20] コピー関数はアプリから直接呼べない");
 
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
