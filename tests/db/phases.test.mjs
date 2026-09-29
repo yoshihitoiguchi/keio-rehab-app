@@ -354,6 +354,26 @@ ok((await db.query("select count(*)::int n from reports")).rows[0].n === nReport
 for (let i = 2; i <= 12; i++) await db.query(`select * from resprint_backup.take_snapshot('test-${i}', 10)`);
 ok((await db.query("select count(distinct label)::int n from resprint_backup.snapshots")).rows[0].n === 10, "[v22] 控えは新しい10回分だけ残る");
 
+// ===== v23：指導者パスワードの変更記録 =====
+ok(!(await run("supabase_migration_v23_coach_password_log.sql")), "[v23] 適用 1 回目");
+ok(!(await run("supabase_migration_v23_coach_password_log.sql")), "[v23] 適用 2 回目（冪等）");
+const r23 = await as(U4, "select public.coach_change_password('comm-b','new-coach-1','coach-b-new') as v");
+ok(r23.rows?.[0]?.v === true, "[v23] 指導者は今のパスワードを確かめて変更できる");
+let lst23 = one(await as(ADMIN, "select public.admin_list_orgs()"));
+let b23 = lst23.find((o) => o.id === "comm-b");
+ok(b23?.coach_password_changed_by === "coach" && !!b23?.coach_password_updated_at, "[v23] 管理者の一覧に「指導者本人が変更」と日時が出る");
+await as(ADMIN, "select public.admin_set_coach_password('comm-b','coach-b-reset')");
+b23 = one(await as(ADMIN, "select public.admin_list_orgs()")).find((o) => o.id === "comm-b");
+ok(b23?.coach_password_changed_by === "admin", "[v23] 管理者がリセットすると「管理者」になる");
+ok(one(await as(U4, "select public.coach_check('comm-b','coach-b-reset')"))?.ok === true, "[v23] リセット後のパスワードで指導者モードに入れる");
+ok((await as(U4, "select value from app_settings where key like 'coach_password%'")).rows?.length === 0
+   && !!(await as(U4, "insert into app_settings (org_id, key, value) values ('comm-b','coach_password_changed_by','admin')")).error,
+   "[v23] 変更記録はメンバーから読めない・偽装できない");
+ok((await as(U1, "select value from app_settings where key = 'other_setting'")).rows?.length === 1, "[v23] ほかの設定は今までどおり読める");
+ok(!(await run("supabase_rollback_v23.sql")), "[v23] 戻し用 SQL が通る");
+ok(one(await as(U4, "select public.coach_check('comm-b','coach-b-reset')"))?.ok === true, "[v23] 戻してもパスワードはそのまま使える");
+ok(!(await run("supabase_migration_v23_coach_password_log.sql")), "[v23] 戻した後にもう一度適用できる");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

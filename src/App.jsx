@@ -18,7 +18,6 @@ import {
   Trash2,
   LogOut,
   Loader2,
-  Info,
   MessageCircle,
   KeyRound,
   UserRound,
@@ -46,6 +45,9 @@ import {
   X,
   Home,
   MoreHorizontal,
+  BookOpen,
+  Pencil,
+  Save,
 } from "lucide-react";
 import {
   SUPABASE_URL,
@@ -240,7 +242,7 @@ function safeHref(url) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.6 (スマホ向けの画面・安全な更新)";
+const APP_BUILD = "v15.7 (使い方タブ・指導者の下タブ・プロトコル編集)";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -558,7 +560,18 @@ function normalizePlayer(row) {
       .sort((a, b) => new Date(a.entered_at) - new Date(b.entered_at))
       .map(normalizePhaseHistoryEntry),
     exerciseProgress: (row.player_exercise_progress || []).map(normalizeExerciseProgress),
+    consultations: (row.consultation_requests || [])
+      .slice()
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+      .map(normalizeConsultation),
   };
+}
+// 面談の申し込み。status：requested（未対応）→ closed（対応済み）
+function normalizeConsultation(row) {
+  return { id: row.id, note: row.note || "", status: row.status || "requested", createdAt: row.created_at };
+}
+function pendingConsultations(player) {
+  return (player?.consultations || []).filter((c) => c.status !== "closed");
 }
 function normalizeSlot(row) {
   return {
@@ -580,7 +593,7 @@ const VAS_ANCHORS = [
 ];
 const MENTAL_FACES = ["😞", "😕", "😐", "🙂", "😄"];
 const PLAYER_FIELDS =
-  "*,reports(*),messages(*),treatments(*),phase_history(*),player_exercise_progress(*)";
+  "*,reports(*),messages(*),treatments(*),phase_history(*),player_exercise_progress(*),consultation_requests(*)";
 const PLAYER_EMBED_ORDER =
   "&reports.order=created_at.asc&messages.order=created_at.asc&treatments.order=created_at.asc&phase_history.order=entered_at.asc";
 
@@ -688,6 +701,8 @@ function CriteriaResult({ report }) {
           </ul>
         )}
       </div>
+      {/* 基準を出す場所には、入力内容にかかわらず同じ注記を添える */}
+      <p className="text-[11px] text-slate-500 leading-relaxed">{DISCLAIMER_MAIN}</p>
     </div>
   );
 }
@@ -1225,37 +1240,35 @@ const ORG_PASSWORD_MIN = 8;
 //   v13 で設定したパスワードと一致しなくなる）
 const normalizeOrgPassword = (pw) => String(pw ?? "").trim();
 
-// 「組織ログイン／管理者」の切り替え
-function LoginModeTabs({ mode, onChange }) {
-  const tab = (value, label) => (
-    <button
-      type="button"
-      onClick={() => onChange(value)}
-      aria-pressed={mode === value}
-      className={`flex-1 py-2.5 rounded-full text-sm font-bold transition-colors ${
-        mode === value ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"
-      }`}
-    >
-      {label}
-    </button>
-  );
-  return (
-    <div className="flex bg-slate-100 rounded-full p-1 gap-1 mb-5">
-      {tab("org", "組織ログイン")}
-      {tab("admin", "管理者")}
-    </div>
-  );
+// 管理者ログインは隠し入口にする（管理者は所有者1人だけのため）。
+//   ・ログイン画面のアイコンを5回続けてタップする
+//   ・または、アドレスの末尾に #admin を付けて開く
+//   権限の確認はサーバー側（admin_whoami）なので、入口を隠すのは画面を簡単にするためだけ。
+const ADMIN_TAPS = 5;
+function isAdminHash() {
+  return typeof window !== "undefined" && window.location.hash === "#admin";
 }
 
 // ログイン画面の外枠（組織ログインと管理者で共通）。
 // 中で定義すると入力のたびにフォーカスが外れるので、モジュールレベルに置く。
 function LoginShell({ mode, onChangeMode, children }) {
+  const taps = React.useRef({ n: 0, t: 0 });
+  const handleLogoTap = () => {
+    if (mode === "admin") return;
+    const now = Date.now();
+    taps.current = now - taps.current.t < 800 ? { n: taps.current.n + 1, t: now } : { n: 1, t: now };
+    if (taps.current.n >= ADMIN_TAPS) {
+      taps.current = { n: 0, t: 0 };
+      onChangeMode("admin");
+    }
+  };
   return (
     <div className="min-h-screen bg-slate-100 flex items-center justify-center px-4 py-8 safe-top safe-bottom safe-x">
       <div className="max-w-sm w-full bg-white rounded-2xl shadow-lg p-6 sm:p-8 border border-slate-200">
         <div className="flex flex-col items-center gap-3 mb-5">
           <div
-            className={`w-14 h-14 rounded-full flex items-center justify-center ${
+            onClick={handleLogoTap}
+            className={`w-14 h-14 rounded-full flex items-center justify-center select-none ${
               mode === "admin" ? "bg-slate-800" : "bg-blue-50"
             }`}
           >
@@ -1268,9 +1281,18 @@ function LoginShell({ mode, onChangeMode, children }) {
           <h2 className="text-lg font-bold text-slate-800 flex items-center gap-1.5">
             <Flame className="text-orange-400" size={18} /> RE:SPRINT
           </h2>
+          {mode === "admin" && <p className="text-xs font-bold text-slate-500">管理者ログイン</p>}
         </div>
-        <LoginModeTabs mode={mode} onChange={onChangeMode} />
         {children}
+        {mode === "admin" && (
+          <button
+            type="button"
+            onClick={() => onChangeMode("org")}
+            className="w-full mt-3 py-2 text-xs text-slate-400 hover:text-slate-600 underline"
+          >
+            組織ログインに戻る
+          </button>
+        )}
         <InstallHint />
         <p className="text-[10px] text-slate-300 text-center mt-2">{APP_BUILD}</p>
       </div>
@@ -1533,7 +1555,9 @@ function OrgManager({ onBack }) {
     setError(null);
     setDone(null);
     const next = window.prompt(
-      `「${org.name}」の指導者パスワードを入力してください（4文字以上）\n\n指導者モード（選手の医療情報を含む画面）に入るためのパスワードです。指導者にだけ伝えてください。`
+      `「${org.name}」の新しい指導者パスワードを入力してください（4文字以上）\n\n` +
+        `今の指導者パスワードが分からなくても、ここで上書きできます（指導者が変えてしまった・忘れた場合など）。\n` +
+        `指導者モード（選手の医療情報を含む画面）に入るためのパスワードです。指導者にだけ伝えてください。`
     );
     if (next === null) return;
     if (normalizeOrgPassword(next).length < 4) {
@@ -1708,6 +1732,16 @@ function OrgManager({ onBack }) {
                     {o.has_coach_password === false && (
                       <p className="text-[10px] text-orange-600">指導者パスワード未設定（指導者モードに入れません）</p>
                     )}
+                    {o.has_coach_password && o.coach_password_updated_at && (
+                      <p
+                        className={`text-[10px] ${
+                          o.coach_password_changed_by === "coach" ? "text-orange-600 font-bold" : "text-slate-400"
+                        }`}
+                      >
+                        指導者パスワード：{formatDateTimeJa(o.coach_password_updated_at)}に
+                        {o.coach_password_changed_by === "coach" ? "指導者が変更" : o.coach_password_changed_by === "admin" ? "管理者が設定" : "設定"}
+                      </p>
+                    )}
                   </div>
                   <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 max-w-[55%]">
                     <button
@@ -1726,7 +1760,7 @@ function OrgManager({ onBack }) {
                       onClick={() => handleSetCoachPassword(o)}
                       className="text-[11px] text-slate-500 hover:text-blue-600 underline"
                     >
-                      指導者パスワード
+                      {o.has_coach_password ? "指導者パスワードをリセット" : "指導者パスワードを設定"}
                     </button>
                     <button
                       onClick={() => handleDelete(o)}
@@ -1981,7 +2015,7 @@ function InstallGuide({ orgName, link, onClose }) {
           {installed ? "閉じる" : "あとで（このまま使う）"}
         </button>
         <p className="text-[10px] text-slate-400 text-center mt-2">
-          あとで追加したいときは、選手画面の「このアプリの使い方」に手順があります。
+          あとで追加したいときは、選手画面の「使い方」タブに手順があります。
         </p>
       </div>
     </div>
@@ -1989,7 +2023,8 @@ function InstallGuide({ orgName, link, onClose }) {
 }
 
 function OrgLogin({ onAuthed, invite }) {
-  const [screen, setScreen] = useState("org"); // 'org' | 'admin' | 'admin-panel'
+  // 'org' | 'admin' | 'admin-panel'。#admin で開いたときは管理者ログインから
+  const [screen, setScreen] = useState(() => (isAdminHash() ? "admin" : "org"));
   const [orgCode, setOrgCode] = useState("");
   const [password, setPassword] = useState("");
   const [inviteText, setInviteText] = useState("");
@@ -2056,6 +2091,7 @@ function OrgLogin({ onAuthed, invite }) {
   // 管理者をログアウトして組織ログインに戻る
   const leaveAdmin = async () => {
     await signOut();
+    if (isAdminHash()) window.history.replaceState(null, "", window.location.pathname + window.location.search);
     setScreen("org");
   };
 
@@ -2066,7 +2102,12 @@ function OrgLogin({ onAuthed, invite }) {
   if (screen === "admin") {
     return (
       <AdminLogin
-        onChangeMode={(m) => setScreen(m === "admin" ? "admin" : "org")}
+        onChangeMode={(m) => {
+          if (m !== "admin" && isAdminHash()) {
+            window.history.replaceState(null, "", window.location.pathname + window.location.search);
+          }
+          setScreen(m === "admin" ? "admin" : "org");
+        }}
         onAuthed={() => setScreen("admin-panel")}
       />
     );
@@ -2080,7 +2121,7 @@ function OrgLogin({ onAuthed, invite }) {
         </p>
       )}
       <div className="rounded-xl border border-blue-100 bg-blue-50 p-3 mb-5">
-        <p className="text-xs font-bold text-blue-700 mb-1">招待リンクで入る（かんたん）</p>
+        <p className="text-xs font-bold text-blue-700 mb-1">招待リンクで入る</p>
         <p className="text-[11px] text-blue-700/80 leading-relaxed mb-2">
           管理者から届いたリンクをコピーして、ここで貼り付けるだけで入れます。
         </p>
@@ -2494,37 +2535,51 @@ function CoachDashboard({
   phaseMenus,
   setPhaseMenus,
 }) {
-  const [subTab, setSubTab] = useState("players");
+  // 画面下のタブ（選手画面と同じ形）。読み込み直しても同じタブに戻る
+  const COACH_TAB_KEY = "resprint.coachTab";
+  const [subTab, setSubTabState] = useState(() => {
+    try {
+      const t = window.sessionStorage.getItem(COACH_TAB_KEY);
+      return ["players", "protocols", "menus", "scheduling", "settings"].includes(t) ? t : "players";
+    } catch {
+      return "players";
+    }
+  });
+  const setSubTab = (t) => {
+    setSubTabState(t);
+    try {
+      window.sessionStorage.setItem(COACH_TAB_KEY, t);
+    } catch {
+      // 覚えられなくても動く
+    }
+    window.scrollTo(0, 0);
+  };
+
+  // 対応が必要な選手の数（SOS・面談の申し込み・未読のチャット）
+  const attention = coachPlayers.filter(
+    (p) =>
+      !p.completedAt &&
+      (p.sos ||
+        pendingConsultations(p).length > 0 ||
+        p.messages.some((m) => m.sender === "player" && !m.isRead))
+  ).length;
 
   const tabs = [
-    { key: "players", label: "選手管理", icon: Users },
-    { key: "protocols", label: "プロトコル管理", icon: ClipboardList },
-    { key: "menus", label: "メニューライブラリ", icon: Dumbbell },
+    { key: "players", label: "選手", icon: Users, badge: attention },
+    { key: "protocols", label: "プロトコル", icon: ClipboardList },
+    { key: "menus", label: "メニュー", icon: Dumbbell },
     { key: "scheduling", label: "日程調整", icon: CalendarRange },
-    { key: "settings", label: "設定", icon: Settings },
+    { key: "settings", label: "その他", icon: MoreHorizontal },
   ];
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-4 sm:py-6">
-      {/* スマホでは1行のまま横にスクロールできるタブにする */}
-      <div className="flex gap-1 sm:gap-2 mb-5 sm:mb-6 border-b border-slate-300 overflow-x-auto no-scrollbar -mx-4 px-4 sm:mx-0 sm:px-0 print:hidden">
-        {tabs.map((t) => {
-          const Icon = t.icon;
-          return (
-            <button
-              key={t.key}
-              onClick={() => setSubTab(t.key)}
-              className={`flex items-center gap-1.5 px-3 sm:px-4 py-3 text-sm font-medium whitespace-nowrap shrink-0 border-b-2 -mb-px transition-colors ${
-                subTab === t.key
-                  ? "border-blue-600 text-blue-700"
-                  : "border-transparent text-slate-500 hover:text-slate-800"
-              }`}
-            >
-              <Icon size={16} /> {t.label}
-            </button>
-          );
-        })}
-      </div>
+    <div className="max-w-6xl mx-auto px-4 pt-4 sm:pt-6 pb-28">
+      <nav
+        className="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur border-t border-slate-200 print:hidden safe-nav"
+        aria-label="指導者メニュー"
+      >
+        <BottomTabs tabs={tabs} active={subTab} onChange={setSubTab} />
+      </nav>
 
       {subTab === "protocols" && (
         <ProtocolManagement orgId={orgId} masterProtocols={masterProtocols} setMasterProtocols={setMasterProtocols} />
@@ -2538,7 +2593,14 @@ function CoachDashboard({
         />
       )}
       {subTab === "scheduling" && <CoachScheduling orgId={orgId} slots={slots} setSlots={setSlots} />}
-      {subTab === "settings" && <CoachSettings orgId={orgId} />}
+      {subTab === "settings" && (
+        <div className="max-w-md mx-auto space-y-5">
+          <CoachSettings orgId={orgId} />
+          {/* 免責文は「その他」の一番下に、常に同じ文面で出す */}
+          <StandingNotice />
+          <p className="text-center text-[11px] text-slate-400">{APP_BUILD}</p>
+        </div>
+      )}
       {subTab === "players" &&
         (coachLoading ? (
           <div className="flex items-center justify-center py-16 text-slate-400 gap-2">
@@ -3184,6 +3246,16 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
     }
   };
 
+  // 登録済みのプロトコルの中身（標準復帰期間・各フェーズの名称と条件）を書き換える。
+  // フェーズの数は変えない（選手の現在の PHASE や記録とずれないように）。
+  const handleUpdateContent = async (id, totalWeeks, phases) => {
+    setError(null);
+    await sbUpdate("protocols", id, { total_weeks: totalWeeks, phases });
+    setMasterProtocols((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, totalWeeks, phases, phaseCount: phases.length || p.phaseCount } : p))
+    );
+  };
+
   const handleUpdateVideoUrl = async (id, url) => {
     try {
       await sbUpdate("protocols", id, { video_url: url.trim() || null });
@@ -3208,6 +3280,7 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
             onDelete={handleDeleteProtocol}
             onSaveVideo={handleUpdateVideoUrl}
             onSaveScheme={handleUpdateScheme}
+            onSaveContent={handleUpdateContent}
           />
         ))}
         {masterProtocols.length === 0 && (
@@ -3231,7 +3304,7 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
             />
           </div>
           <div>
-            <label className="text-xs text-slate-500">標準復帰期間（週）</label>
+            <label className="text-xs text-slate-500">全体復帰までの期間（週）</label>
             <input
               type="number"
               value={totalWeeks}
@@ -3323,9 +3396,50 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
   );
 }
 
-function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme }) {
+function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme, onSaveContent }) {
   const [videoUrl, setVideoUrl] = useState(protocol.videoUrl || "");
   const [savingVideo, setSavingVideo] = useState(false);
+  // 中身の編集（フェーズの数は変えない）
+  const [editing, setEditing] = useState(false);
+  const [weeksDraft, setWeeksDraft] = useState(String(protocol.totalWeeks ?? 8));
+  const [phaseDrafts, setPhaseDrafts] = useState([]);
+  const [savingContent, setSavingContent] = useState(false);
+  const [contentError, setContentError] = useState(null);
+
+  const startEdit = () => {
+    setWeeksDraft(String(protocol.totalWeeks ?? 8));
+    setPhaseDrafts(
+      protocol.phases.map((ph) => ({ title: ph.title || "", conditionsText: (ph.conditions || []).join("\n") }))
+    );
+    setContentError(null);
+    setEditing(true);
+  };
+  const updateDraft = (idx, field, value) =>
+    setPhaseDrafts((prev) => prev.map((p, i) => (i === idx ? { ...p, [field]: value } : p)));
+
+  const saveContent = async () => {
+    const weeks = Number(weeksDraft);
+    if (!Number.isFinite(weeks) || weeks < 1 || weeks > 104) {
+      setContentError("標準復帰期間は1〜104週で入力してください。");
+      return;
+    }
+    // 元のフェーズの情報（他の項目があれば）を残したまま、名称と条件だけ差し替える
+    const phases = protocol.phases.map((ph, i) => ({
+      ...ph,
+      title: phaseDrafts[i]?.title.trim() || ph.title || `フェーズ${i + 1}`,
+      conditions: (phaseDrafts[i]?.conditionsText || "").split("\n").map((c) => c.trim()).filter(Boolean),
+    }));
+    setSavingContent(true);
+    setContentError(null);
+    try {
+      await onSaveContent(protocol.id, Math.round(weeks), phases);
+      setEditing(false);
+    } catch (err) {
+      setContentError(`保存できませんでした: ${err.message}`);
+    } finally {
+      setSavingContent(false);
+    }
+  };
 
   const handleSave = async () => {
     setSavingVideo(true);
@@ -3338,7 +3452,7 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme }) {
       <div className="flex items-start justify-between">
         <div>
           <p className="font-bold text-slate-800">{protocol.name}</p>
-          <p className="text-xs text-slate-400">標準復帰期間: 約{protocol.totalWeeks}週間</p>
+          <p className="text-xs text-slate-400">全体復帰までの期間: 約{protocol.totalWeeks}週間</p>
           <div className="flex items-center gap-1.5 mt-1">
             <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600">
               全 {protocol.phaseCount} 段階
@@ -3350,15 +3464,82 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme }) {
             )}
           </div>
         </div>
-        <button
-          onClick={() => onDelete(protocol.id, protocol.name)}
-          className="text-slate-400 hover:text-red-500 p-1"
-          title="このプロトコルを削除"
-        >
-          <Trash2 size={16} />
-        </button>
+        <div className="flex items-center gap-1 shrink-0">
+          {!editing && (
+            <button
+              onClick={startEdit}
+              className="flex items-center gap-1 px-3 py-2 rounded-lg border border-blue-200 text-blue-600 text-xs font-bold hover:bg-blue-50"
+            >
+              <Pencil size={13} /> 編集
+            </button>
+          )}
+          <button
+            onClick={() => onDelete(protocol.id, protocol.name)}
+            className="text-slate-400 hover:text-red-500 p-2.5"
+            title="このプロトコルを削除"
+            aria-label="このプロトコルを削除"
+          >
+            <Trash2 size={16} />
+          </button>
+        </div>
       </div>
-      <div className="mt-3 space-y-2">
+      {editing && (
+        <div className="mt-3 space-y-3 border border-blue-200 bg-blue-50/40 rounded-lg p-3">
+          <div>
+            <label className="text-xs font-bold text-slate-600">全体復帰までの期間（週）</label>
+            <input
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={104}
+              value={weeksDraft}
+              onChange={(e) => setWeeksDraft(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-1 bg-white"
+            />
+            <p className="text-[11px] text-slate-400 mt-1">選手のホームの「全体復帰まであと○週間」の計算に使います。</p>
+          </div>
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            フェーズの数（{protocol.phases.length}段階）はそのままで、名称と条件を書き換えます。
+            条件の順番を入れ替えると、選手がすでに付けた「できた」の記録と項目がずれることがあります。
+          </p>
+          {phaseDrafts.map((p, idx) => (
+            <div key={idx} className="bg-white border border-slate-200 rounded-lg p-3">
+              <label className="text-xs text-slate-500">Phase {idx + 1} 名称</label>
+              <input
+                value={p.title}
+                onChange={(e) => updateDraft(idx, "title", e.target.value)}
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-2"
+              />
+              <label className="text-xs text-slate-500">条件（1行に1つ）</label>
+              <textarea
+                value={p.conditionsText}
+                onChange={(e) => updateDraft(idx, "conditionsText", e.target.value)}
+                rows={Math.max(3, p.conditionsText.split("\n").length + 1)}
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1"
+              />
+            </div>
+          ))}
+          {contentError && <p className="text-xs text-red-500">{contentError}</p>}
+          <div className="flex gap-2 sticky bottom-20">
+            <button
+              onClick={() => setEditing(false)}
+              disabled={savingContent}
+              className="flex-1 py-3 rounded-lg border border-slate-300 bg-white text-slate-600 text-sm"
+            >
+              やめる
+            </button>
+            <button
+              onClick={saveContent}
+              disabled={savingContent}
+              className="flex-1 py-3 rounded-lg bg-blue-600 text-white text-sm font-bold disabled:bg-slate-300 flex items-center justify-center gap-1.5"
+            >
+              {savingContent ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+              {savingContent ? "保存中..." : "保存する"}
+            </button>
+          </div>
+        </div>
+      )}
+      <div className={`mt-3 space-y-2 ${editing ? "hidden" : ""}`}>
         {protocol.phases.map((ph, i) => (
           <div key={i} className="text-xs bg-slate-50 rounded-lg px-3 py-2">
             <p className="font-semibold text-slate-600">
@@ -3492,6 +3673,17 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
     await sbUpdate("players", playerId, { support_status: "resolved", support_assignee_role: null });
     setCoachPlayers((prev) =>
       prev.map((p) => (p.id === playerId ? { ...p, supportStatus: "resolved", supportAssigneeRole: null } : p))
+    );
+  };
+
+  const closeConsultation = async (playerId, requestId) => {
+    await sbUpdate("consultation_requests", requestId, { status: "closed" });
+    setCoachPlayers((prev) =>
+      prev.map((p) =>
+        p.id === playerId
+          ? { ...p, consultations: (p.consultations || []).map((c) => (c.id === requestId ? { ...c, status: "closed" } : c)) }
+          : p
+      )
     );
   };
 
@@ -3657,6 +3849,11 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
                         新着/未対応
                       </span>
                     )}
+                    {pendingConsultations(p).length > 0 && (
+                      <span className="bg-amber-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">
+                        面談希望
+                      </span>
+                    )}
                     {unread > 0 && (
                       <span className="flex items-center gap-0.5 bg-blue-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
                         <MessageCircle size={10} /> {unread}
@@ -3714,6 +3911,7 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
               assessReport(selectedPlayer.id, reportId, compensation, severeSymptom, observerName)
             }
             onResolveSos={() => resolveSos(selectedPlayer.id)}
+            onCloseConsultation={(requestId) => closeConsultation(selectedPlayer.id, requestId)}
             onResolveChatStatus={() => resolveChatStatus(selectedPlayer.id)}
             setCoachPlayers={setCoachPlayers}
           />
@@ -3740,6 +3938,7 @@ function PlayerDetailPanel({
   onAssessReport,
   onResolveSos,
   onResolveChatStatus,
+  onCloseConsultation,
   setCoachPlayers,
 }) {
   const report = latestReport(player);
@@ -3852,6 +4051,8 @@ function PlayerDetailPanel({
             </button>
           </div>
         </div>
+
+        <ConsultationInbox player={player} onClose={onCloseConsultation} />
 
         <div className="bg-white rounded-xl border border-slate-200 p-5">
           <h4 className="text-sm font-bold text-slate-700 mb-3">本日の日報</h4>
@@ -4074,37 +4275,40 @@ function isNextDayItem(text) {
   return text.includes("実施後") && text.includes("翌日");
 }
 
-// 「方針に迷ったとき」の面談申し込み（受付のみ。決済は後）
-// 医師との面談は実装だけ用意し、まだ公開しない。
-const CONSULTATION_KINDS = [
-  { value: "coach", label: "コーチと話す" },
-  { value: "trainer", label: "トレーナーと話す" },
-  { value: "video_review", label: "動画を送って評価してもらう" },
-  // { value: "doctor", label: "医師と話す" },  ← 公開範囲が決まるまで出さない
-];
+// 面談の申し込み（選手 → 指導者）
+//   申し込みは種類を分けない（誰と話すかは指導者側で決める。動画はチャットで送れる）。
+//   DB の kind 列には、既存の制約に合う 'coach' を入れる。
+//   医師との相談（kind: 'doctor'）は、公開範囲（健康医療相談／オンライン診療）が決まるまで出さない。
+const CONSULTATION_KIND_DEFAULT = "coach";
 
-function ConsultationRequestCard({ orgId, player }) {
+function formatDateTimeJa(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function ConsultationRequestCard({ orgId, player, setMyPlayer }) {
   const [open, setOpen] = useState(false);
-  const [kind, setKind] = useState("coach");
   const [note, setNote] = useState("");
   const [sending, setSending] = useState(false);
-  const [done, setDone] = useState(false);
   const [error, setError] = useState(null);
+  const pending = pendingConsultations(player);
 
   const submit = async () => {
     setSending(true);
     setError(null);
     try {
-      await sbInsert("consultation_requests", {
+      const [row] = await sbInsert("consultation_requests", {
         player_id: player.id,
         org_id: orgId,
-        kind,
+        kind: CONSULTATION_KIND_DEFAULT,
         note: note.trim() || null,
       });
-      setDone(true);
+      if (row && setMyPlayer) {
+        setMyPlayer((prev) => ({ ...prev, consultations: [...(prev.consultations || []), normalizeConsultation(row)] }));
+      }
       setNote("");
       setOpen(false);
-      setTimeout(() => setDone(false), 3000);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -4114,56 +4318,93 @@ function ConsultationRequestCard({ orgId, player }) {
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-      <p className="text-sm font-bold text-slate-700 mb-1">方針に迷ったとき</p>
-      <p className="text-[11px] text-slate-400 mb-3">
-        進め方に迷ったら、面談を申し込めます。申し込みを受け付けるところまでの対応です。
+      <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+        <MessageCircle size={16} className="text-blue-600" /> 面談を申し込む
       </p>
-      {done && <p className="text-xs text-green-600 mb-2">申し込みを受け付けました。</p>}
+      <p className="text-xs text-slate-400 mb-3">
+        進め方に迷ったときや、直接話したいときに。申し込むと指導者の画面に通知が出ます。
+      </p>
+      {pending.length > 0 && (
+        <div className="mb-3 space-y-1.5">
+          {pending.map((c) => (
+            <div key={c.id} className="bg-blue-50 rounded-lg px-3 py-2">
+              <p className="text-xs font-bold text-blue-700">申し込み済み（{formatDateTimeJa(c.createdAt)}）・指導者からの連絡待ち</p>
+              {c.note && <p className="text-xs text-blue-700/80 mt-0.5 whitespace-pre-wrap">{c.note}</p>}
+            </div>
+          ))}
+        </div>
+      )}
       {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
       {!open ? (
         <button
           onClick={() => setOpen(true)}
-          className="w-full py-2.5 rounded-lg border border-slate-300 text-slate-600 text-sm font-medium hover:bg-slate-50"
+          className="w-full py-3 rounded-lg border border-slate-300 text-slate-700 text-sm font-medium hover:bg-slate-50"
         >
-          面談を申し込む
+          {pending.length ? "もう一度申し込む" : "面談を申し込む"}
         </button>
       ) : (
         <div className="space-y-2">
-          <select
-            value={kind}
-            onChange={(e) => setKind(e.target.value)}
-            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
-          >
-            {CONSULTATION_KINDS.map((k) => (
-              <option key={k.value} value={k.value}>
-                {k.label}
-              </option>
-            ))}
-          </select>
           <textarea
             value={note}
             onChange={(e) => setNote(e.target.value)}
             rows={3}
-            placeholder="相談したいこと（任意）"
-            className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+            placeholder="話したいこと・都合のよい日時など（任意）"
+            className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm"
           />
           <div className="flex gap-2">
             <button
               onClick={() => setOpen(false)}
-              className="flex-1 py-2 rounded-lg border border-slate-300 text-slate-600 text-sm"
+              className="flex-1 py-3 rounded-lg border border-slate-300 text-slate-600 text-sm"
             >
               やめる
             </button>
             <button
               onClick={submit}
               disabled={sending}
-              className="flex-1 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium disabled:bg-slate-300"
+              className="flex-1 py-3 rounded-lg bg-blue-600 text-white text-sm font-bold disabled:bg-slate-300"
             >
               {sending ? "送信中..." : "申し込む"}
             </button>
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// 指導者側：選手からの面談の申し込み（未対応のものを上に出す）
+function ConsultationInbox({ player, onClose }) {
+  const pending = pendingConsultations(player);
+  const [busy, setBusy] = useState(null);
+  if (pending.length === 0) return null;
+  return (
+    <div className="bg-amber-50 border border-amber-200 rounded-xl p-5">
+      <p className="text-sm font-bold text-amber-800 flex items-center gap-1.5 mb-2">
+        <CalendarClock size={16} /> 面談の申し込み（{pending.length}件）
+      </p>
+      <div className="space-y-2">
+        {pending.map((c) => (
+          <div key={c.id} className="bg-white rounded-lg border border-amber-200 px-3 py-2.5">
+            <p className="text-xs text-slate-500">{formatDateTimeJa(c.createdAt)} に申し込み</p>
+            <p className="text-sm text-slate-800 whitespace-pre-wrap mt-0.5">{c.note || "（メモなし）"}</p>
+            <button
+              onClick={async () => {
+                setBusy(c.id);
+                try {
+                  await onClose(c.id);
+                } finally {
+                  setBusy(null);
+                }
+              }}
+              disabled={busy === c.id}
+              className="mt-2 px-3 py-2 rounded-lg bg-slate-800 text-white text-xs font-bold disabled:bg-slate-300"
+            >
+              対応済みにする
+            </button>
+          </div>
+        ))}
+      </div>
+      <p className="text-[11px] text-amber-700/80 mt-2">日程はチャットや「日程調整」で相談してください。</p>
     </div>
   );
 }
@@ -5292,33 +5533,233 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
   );
 }
 
-function UsageGuide() {
-  const [open, setOpen] = useState(true);
+// ------------------------------------------------------------------
+// 選手の「使い方」タブ（イラスト付き）
+//   初めてログインした端末では、最初にこのタブを開く。
+//   イラストは画面の一部を簡略化して描いたもの（画像ファイルは使わない）。
+// ------------------------------------------------------------------
+const PLAYER_TAB_DEFS = [
+  { key: "home", label: "ホーム", icon: Home },
+  { key: "menu", label: "メニュー", icon: Dumbbell },
+  { key: "report", label: "日報", icon: Send },
+  { key: "chat", label: "チャット", icon: MessageCircle },
+  { key: "guide", label: "使い方", icon: BookOpen },
+  { key: "more", label: "その他", icon: MoreHorizontal },
+];
+
+// 画面下のタブを小さく描き、押す場所を示す
+function GuideMiniNav({ active }) {
   return (
-    <div className="bg-blue-50 border border-blue-100 rounded-2xl p-4">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between text-sm font-bold text-blue-700"
-      >
-        <span className="flex items-center gap-1.5">
-          <Info size={16} /> このアプリの使い方
-        </span>
-        <span className="text-xs font-normal">{open ? "閉じる" : "開く"}</span>
-      </button>
-      {open && (
-        <ul className="mt-3 text-xs text-blue-700 space-y-1.5 list-disc list-inside">
-          <li>「今日のコンディション報告」で毎日、痛みの強さ・気分・本音を入力して送信してください。</li>
-          <li>
-            強い不安や痛みがあるときは「スタッフに連絡する（SOS）」をオンにして送信すると、スタッフに届きます。
-          </li>
-          <li>「面談予約」から公開されている枠をタップするだけで、面談を予約できます。</li>
-          <li>予約後にZoom等のURLが設定されると「面談に参加」ボタンから直接参加できます。</li>
-          <li>「指導者とのチャット」から直接メッセージのやり取りができます（返信者の立場も表示されます）。</li>
-          <li>「受傷日」を登録すると、同じ怪我をした過去の選手たちの平均復帰期間が目安として表示されます。</li>
-        </ul>
-      )}
-      {open && <InstallHint className="mt-3" />}
+    <div className="grid grid-cols-6 bg-white rounded-lg border border-slate-200 mt-3" aria-hidden="true">
+      {PLAYER_TAB_DEFS.map((t) => {
+        const Icon = t.icon;
+        const on = t.key === active;
+        return (
+          <div
+            key={t.key}
+            className={`relative flex flex-col items-center py-1.5 text-[9px] font-bold ${on ? "text-blue-600" : "text-slate-300"}`}
+          >
+            <Icon size={14} />
+            {t.label}
+            {on && <span className="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 rounded-full bg-orange-400 animate-ping" />}
+          </div>
+        );
+      })}
     </div>
+  );
+}
+
+function GuideCard({ n, title, tab, onGo, goLabel, children, art }) {
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="bg-gradient-to-br from-blue-50 to-slate-50 px-5 pt-4 pb-3">{art}</div>
+      <div className="p-5 pt-4">
+        <p className="text-base font-bold text-slate-800 flex items-center gap-2">
+          <span className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center shrink-0">
+            {n}
+          </span>
+          {title}
+        </p>
+        <div className="text-sm text-slate-600 leading-relaxed mt-2 space-y-1">{children}</div>
+        {tab && <GuideMiniNav active={tab} />}
+        {onGo && (
+          <button
+            onClick={onGo}
+            className="mt-3 w-full py-2.5 rounded-lg border border-blue-200 text-blue-700 text-sm font-bold hover:bg-blue-50 flex items-center justify-center gap-1"
+          >
+            {goLabel} <ArrowRight size={14} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function UsageGuideTab({ onGoTab }) {
+  return (
+    <>
+      <div className="bg-blue-600 text-white rounded-2xl p-5 shadow-sm">
+        <p className="text-lg font-bold flex items-center gap-2">
+          <BookOpen size={20} /> 使い方
+        </p>
+        <p className="text-sm text-blue-100 mt-1 leading-relaxed">
+          毎日の日報と、段階ごとのチェックで、復帰までの道のりを指導者と共有します。
+          画面の下のタブで切り替えます。
+        </p>
+      </div>
+
+      <GuideCard
+        n={1}
+        title="毎日、日報を送る"
+        tab="report"
+        onGo={() => onGoTab("report")}
+        goLabel="日報を書く"
+        art={
+          <div className="space-y-2" aria-hidden="true">
+            <div className="flex items-center justify-between text-[11px] text-slate-500">
+              <span>痛みの強さ</span>
+              <span className="font-bold text-blue-600">3</span>
+            </div>
+            <div className="h-2 rounded-full bg-slate-200 relative">
+              <div className="absolute inset-y-0 left-0 w-[30%] rounded-full bg-blue-500" />
+              <div className="absolute top-1/2 left-[30%] -translate-x-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-white border-2 border-blue-500" />
+            </div>
+            <div className="flex justify-between pt-1 text-lg">
+              {MENTAL_FACES.map((f, i) => (
+                <span key={i} className={i === 2 ? "rounded-full bg-blue-100 ring-2 ring-blue-400" : "opacity-50"}>
+                  {f}
+                </span>
+              ))}
+            </div>
+            <div className="rounded-lg bg-blue-600 text-white text-[11px] font-bold text-center py-1.5 flex items-center justify-center gap-1">
+              <Send size={11} /> 指導者に送信する
+            </div>
+          </div>
+        }
+      >
+        <p>痛み・疲労・睡眠・気分を、スライダーと顔のボタンで選んで送信します。1分ほどで終わります。</p>
+        <p>書きかけでアプリを閉じても、その日のうちなら続きから書けます。</p>
+      </GuideCard>
+
+      <GuideCard
+        n={2}
+        title="困ったときは SOS"
+        tab="report"
+        art={
+          <div className="rounded-lg border-2 border-red-400 bg-red-50 text-red-600 text-xs font-bold text-center py-2 flex items-center justify-center gap-1.5" aria-hidden="true">
+            <AlertTriangle size={14} /> スタッフに連絡します
+          </div>
+        }
+      >
+        <p>強い不安や痛みがあるときは、日報の「スタッフに連絡する（SOS）」をオンにして送信してください。スタッフの画面に目立つ印が付きます。</p>
+      </GuideCard>
+
+      <GuideCard
+        n={3}
+        title="GATE で段階を進める"
+        tab="home"
+        onGo={() => onGoTab("home")}
+        goLabel="ホームを見る"
+        art={
+          <div className="space-y-1.5" aria-hidden="true">
+            {["条件 1", "条件 2"].map((c, i) => (
+              <div key={c} className="flex items-center gap-2 bg-white rounded-lg border border-slate-200 px-2.5 py-1.5">
+                {i === 0 ? <CheckCircle2 size={14} className="text-green-600" /> : <Circle size={14} className="text-slate-300" />}
+                <span className="text-[11px] text-slate-600 flex-1">{c}</span>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full border ${i === 0 ? "border-green-300 text-green-700 bg-green-50" : "border-green-300 text-green-700"}`}>
+                  できた
+                </span>
+              </div>
+            ))}
+            <div className="rounded-lg bg-slate-800 text-white text-[11px] font-bold text-center py-1.5">
+              確認して次のPHASEへ進む →
+            </div>
+          </div>
+        }
+      >
+        <p>ホームには、いまの PHASE の条件（GATE）が並びます。できた項目は「できた」を押して記録します。</p>
+        <p>全部そろったら、自分で「次のPHASEへ進む」を押します。自動では進みません。</p>
+      </GuideCard>
+
+      <GuideCard
+        n={4}
+        title="今日のメニューを見る"
+        tab="menu"
+        onGo={() => onGoTab("menu")}
+        goLabel="メニューを見る"
+        art={
+          <div className="space-y-1.5" aria-hidden="true">
+            {["Heel Dig ISO", "Double-leg Hip Lift"].map((m) => (
+              <div key={m} className="bg-white rounded-lg border border-slate-200 px-2.5 py-1.5">
+                <p className="text-[11px] font-bold text-slate-700">{m}</p>
+                <p className="text-[10px] text-slate-400">ステップ 1/3 ・ 10回×2set</p>
+              </div>
+            ))}
+          </div>
+        }
+      >
+        <p>いまの PHASE までに始まった種目が、全部表示されます（前の PHASE の種目も続けます）。</p>
+        <p>体重や基準タイムを入れると、「+10%BW」「@82%」などが実際の重さ・タイムに換算されます。</p>
+      </GuideCard>
+
+      <GuideCard
+        n={5}
+        title="指導者とチャット"
+        tab="chat"
+        onGo={() => onGoTab("chat")}
+        goLabel="チャットを開く"
+        art={
+          <div className="space-y-1.5" aria-hidden="true">
+            <div className="flex justify-end">
+              <span className="bg-blue-600 text-white text-[11px] rounded-2xl px-3 py-1.5">フォームを見てください 📎</span>
+            </div>
+            <div className="flex">
+              <span className="bg-white border border-slate-200 text-slate-700 text-[11px] rounded-2xl px-3 py-1.5">
+                <span className="block text-[9px] text-slate-400 font-bold">トレーナー</span>
+                確認しました！
+              </span>
+            </div>
+          </div>
+        }
+      >
+        <p>メッセージや、写真・動画を送れます。指導者から返信があると、タブに赤い数字が付きます。</p>
+      </GuideCard>
+
+      <GuideCard
+        n={6}
+        title="面談の申し込み・予約"
+        tab="more"
+        onGo={() => onGoTab("more")}
+        goLabel="その他を開く"
+        art={
+          <div className="bg-white rounded-lg border border-slate-200 px-3 py-2 flex items-center justify-between" aria-hidden="true">
+            <span className="text-[11px] text-slate-600 flex items-center gap-1">
+              <CalendarClock size={12} className="text-blue-600" /> 10/3（金）18:00
+            </span>
+            <span className="text-[10px] font-bold text-blue-600">この枠で予約</span>
+          </div>
+        }
+      >
+        <p>話を聞いてほしいときは「その他」の「面談を申し込む」から。指導者に通知が届きます。</p>
+        <p>公開されている面談の枠があれば、ホームの「面談予約」から選べます。</p>
+      </GuideCard>
+
+      <GuideCard
+        n={7}
+        title="受傷日を登録する"
+        tab="more"
+        art={
+          <div className="bg-white rounded-lg border border-slate-200 px-3 py-2 text-[11px] text-slate-600 flex items-center gap-1.5" aria-hidden="true">
+            <CalendarDays size={12} className="text-blue-600" /> 受傷日 2026-09-10 ・ 受傷から19日
+          </div>
+        }
+      >
+        <p>「その他」で受傷日を登録すると、同じ怪我を完遂した先輩たちの平均期間が目安として表示されます。</p>
+      </GuideCard>
+
+      {/* ホーム画面にまだ追加していないときだけ出る（追加済み・パソコンでは何も出ない） */}
+      <InstallHint className="" />
+    </>
   );
 }
 
@@ -5494,13 +5935,19 @@ function PhaseTimelineComparison({ player, protocol }) {
 }
 
 function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, setSlots, phaseMenus, onLogout }) {
-  // 画面下のタブ：'home' | 'menu' | 'report' | 'chat' | 'more'
+  // 画面下のタブ：'home' | 'menu' | 'report' | 'chat' | 'guide' | 'more'
   // 更新などで読み込み直しても同じタブに戻れるよう、このタブの間だけ覚えておく
+  // この端末で初めてこの選手としてログインしたときは「使い方」を開く
   const TAB_KEY = "resprint.playerTab";
+  const guideSeenKey = `resprint.guideSeen.${player.id}`;
   const [tab, setTab] = useState(() => {
+    if (readDraft(guideSeenKey) === null) {
+      writeDraft(guideSeenKey, 1);
+      return "guide";
+    }
     try {
       const t = window.sessionStorage.getItem(TAB_KEY);
-      return ["home", "menu", "report", "chat", "more"].includes(t) ? t : "home";
+      return PLAYER_TAB_DEFS.some((d) => d.key === t) ? t : "home";
     } catch {
       return "home";
     }
@@ -5747,13 +6194,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
     setMyPlayer((prev) => ({ ...prev, treatments: prev.treatments.filter((t) => t.id !== id) }));
   };
 
-  const TABS = [
-    { key: "home", label: "ホーム", icon: Home },
-    { key: "menu", label: "メニュー", icon: Dumbbell },
-    { key: "report", label: "日報", icon: Send },
-    { key: "chat", label: "チャット", icon: MessageCircle, badge: unreadStaff },
-    { key: "more", label: "その他", icon: MoreHorizontal },
-  ];
+  const TABS = PLAYER_TAB_DEFS.map((t) => (t.key === "chat" ? { ...t, badge: unreadStaff } : t));
 
   return (
     <div className="max-w-md mx-auto px-4 pt-5 pb-28 space-y-5">
@@ -5766,9 +6207,6 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
           PHASE {player.currentPhase}/{phaseCountOf(protocol)}
         </span>
       </div>
-
-      {/* 免責文は、どのタブでも無条件で出す */}
-      <StandingNotice />
 
       {tab === "home" && (
         <>
@@ -6175,9 +6613,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
           <TreatmentCard player={player} onAddTreatments={addPlayerTreatments} onDeleteTreatment={deletePlayerTreatment} />
 
-          <ConsultationRequestCard orgId={orgId} player={player} />
-
-          <UsageGuide />
+          <ConsultationRequestCard orgId={orgId} player={player} setMyPlayer={setMyPlayer} />
 
           <button
             onClick={onLogout}
@@ -6185,40 +6621,52 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
           >
             <LogOut size={16} /> この端末から選手ログアウト
           </button>
+
+          {/* 免責文は「その他」の一番下に、入力内容にかかわらず常に同じ文面で出す */}
+          <StandingNotice />
           <p className="text-center text-[11px] text-slate-400">{APP_BUILD}</p>
         </>
       )}
+
+      {tab === "guide" && <UsageGuideTab onGoTab={changeTab} />}
 
       {/* 画面下のタブ（親指で届く位置） */}
       <nav
         className="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur border-t border-slate-200 print:hidden safe-nav"
         aria-label="選手メニュー"
       >
-        <div className="max-w-md mx-auto grid grid-cols-5">
-          {TABS.map((t) => {
-            const Icon = t.icon;
-            const active = tab === t.key;
-            return (
-              <button
-                key={t.key}
-                onClick={() => changeTab(t.key)}
-                aria-current={active ? "page" : undefined}
-                className={`relative flex flex-col items-center justify-center gap-0.5 min-h-[56px] text-[11px] font-bold ${
-                  active ? "text-blue-600" : "text-slate-400"
-                }`}
-              >
-                <Icon size={22} strokeWidth={active ? 2.4 : 2} />
-                {t.label}
-                {t.badge > 0 && (
-                  <span className="absolute top-1.5 left-1/2 ml-2 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] leading-[18px] text-center">
-                    {t.badge > 9 ? "9+" : t.badge}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
+        <BottomTabs tabs={TABS} active={tab} onChange={changeTab} />
       </nav>
+    </div>
+  );
+}
+
+// 画面下のタブの中身（選手・指導者で共通）
+function BottomTabs({ tabs, active, onChange }) {
+  return (
+    <div className="max-w-md mx-auto grid" style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}>
+      {tabs.map((t) => {
+        const Icon = t.icon;
+        const on = active === t.key;
+        return (
+          <button
+            key={t.key}
+            onClick={() => onChange(t.key)}
+            aria-current={on ? "page" : undefined}
+            className={`relative flex flex-col items-center justify-center gap-0.5 min-h-[56px] text-[11px] font-bold whitespace-nowrap ${
+              on ? "text-blue-600" : "text-slate-400"
+            }`}
+          >
+            <Icon size={22} strokeWidth={on ? 2.4 : 2} />
+            {t.label}
+            {t.badge > 0 && (
+              <span className="absolute top-1.5 left-1/2 ml-2 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] leading-[18px] text-center">
+                {t.badge > 9 ? "9+" : t.badge}
+              </span>
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }
