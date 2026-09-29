@@ -44,6 +44,8 @@ import {
   ChevronDown,
   Smartphone,
   X,
+  Home,
+  MoreHorizontal,
 } from "lucide-react";
 import {
   SUPABASE_URL,
@@ -206,11 +208,11 @@ function MediaUploadButton({ playerId, orgId, context, contextId, onUploaded, la
         type="button"
         onClick={() => inputRef.current?.click()}
         disabled={busy}
-        className="text-[11px] text-slate-500 hover:text-blue-600 underline disabled:opacity-40"
+        className="inline-flex items-center justify-center gap-1 min-h-[36px] px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-600 hover:text-blue-600 hover:border-blue-300 disabled:opacity-40"
       >
         {busy ? "アップロード中..." : label || "写真・動画を追加"}
       </button>
-      {error && <span className="text-[10px] text-red-500 mt-0.5">{error}</span>}
+      {error && <span className="text-xs text-red-500 mt-1">{error}</span>}
     </span>
   );
 }
@@ -238,7 +240,7 @@ function safeHref(url) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.5 (指導者パスワードを管理者が設定)";
+const APP_BUILD = "v15.6 (スマホ向けの画面・安全な更新)";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -266,6 +268,33 @@ function readSession(key) {
     // プライベートブラウズなどで localStorage が使えないことがある。
     // その場合は「保存されていない」として通常どおり動かす。
     return null;
+  }
+}
+
+// Enter で送信する入力欄用。日本語入力の変換確定の Enter では送信しない
+function isEnterKey(e) {
+  return e.key === "Enter" && !e.nativeEvent?.isComposing && e.keyCode !== 229;
+}
+
+// ------------------------------------------------------------------
+// 入力途中の下書き（日報・チャット）
+//   アプリの更新や電池切れで画面が読み込み直されても、書きかけが消えないようにする。
+//   この端末の中だけに保存し、送信したら消す。
+// ------------------------------------------------------------------
+function readDraft(key) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+function writeDraft(key, value) {
+  try {
+    if (value === null || value === undefined) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // 保存できなくても入力は続けられる
   }
 }
 
@@ -541,6 +570,14 @@ function normalizeSlot(row) {
   };
 }
 
+// 痛みの目盛りの説明（医師とコーチが定めた目安の言葉。値によって文面を変えるものではない）
+const VAS_ANCHORS = [
+  { v: 0, label: "完全に無痛・全く気にならない" },
+  { v: 3, label: "痛みはあるが、練習には集中できる（許容範囲）" },
+  { v: 5, label: "痛みが気になって思い通りの動きができない（代償動作が出る）" },
+  { v: 8, label: "これ以上やると確実に悪化する・かばうことすらできない" },
+  { v: 10, label: "これまで経験した最大の痛み・激痛" },
+];
 const MENTAL_FACES = ["😞", "😕", "😐", "🙂", "😄"];
 const PLAYER_FIELDS =
   "*,reports(*),messages(*),treatments(*),phase_history(*),player_exercise_progress(*)";
@@ -718,7 +755,7 @@ function classificationLabel(player) {
   if (!player?.bamicGrade || !player?.hamstringMuscle || !player?.hamstringLocation) return null;
   const m = { semimembranosus: "半膜様筋", semitendinosus: "半腱様筋", biceps_femoris: "大腿二頭筋" };
   const l = { proximal: "近位", mid_distal: "中間位〜遠位" };
-  return `BAMIC ${player.bamicGrade} / ${m[player.hamstringMuscle]} / ${l[player.hamstringLocation]}`;
+  return `BAMIC ${player.bamicGrade} / ${m[player.hamstringMuscle] ?? player.hamstringMuscle} / ${l[player.hamstringLocation] ?? player.hamstringLocation}`;
 }
 function phaseCountOf(protocol) {
   return protocol?.phaseCount || 5;
@@ -804,7 +841,87 @@ function getYouTubeEmbedUrl(url) {
 }
 
 // ==================================================================
-export default function RehabApp() {
+// ==================================================================
+// 新しいバージョンのお知らせ
+//   公開のたびに画面を勝手に読み込み直すと、日報やチャットを書いている途中の選手が困る。
+//   そこで、新しい版が出たら「更新する」ボタンを出し、押したときだけ読み込み直す。
+//   ・アプリを30分以上使っていなかった（裏に回っていた）ときは、戻ってきたときに自動で更新する
+//     （書きかけの日報・チャットは端末に下書きとして残るので消えない）
+//   ・確認は /version.json（ビルドごとに変わる）を見るだけ。開発サーバーでは行わない。
+// ==================================================================
+const UPDATE_CHECK_INTERVAL = 30 * 60 * 1000;
+const AUTO_RELOAD_AFTER_HIDDEN = 30 * 60 * 1000;
+
+async function fetchLatestBuild() {
+  const res = await fetch(`/version.json?t=${Date.now()}`, { cache: "no-store" });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return typeof data?.build === "string" ? data.build : null;
+}
+
+function UpdateNotice() {
+  const [available, setAvailable] = useState(false);
+  useEffect(() => {
+    if (!import.meta.env.PROD) return undefined;
+    let hiddenAt = null;
+    let latestKnown = false;
+    const check = async () => {
+      try {
+        const latest = await fetchLatestBuild();
+        latestKnown = Boolean(latest && latest !== __BUILD_ID__);
+        if (latestKnown) setAvailable(true);
+      } catch {
+        // 圏外などでは何もしない
+      }
+      return latestKnown;
+    };
+    const onVisibility = async () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+        return;
+      }
+      const longAway = hiddenAt && Date.now() - hiddenAt >= AUTO_RELOAD_AFTER_HIDDEN;
+      hiddenAt = null;
+      if ((await check()) && longAway) window.location.reload();
+    };
+    check();
+    const timer = setInterval(check, UPDATE_CHECK_INTERVAL);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+
+  if (!available) return null;
+  return (
+    <div
+      role="status"
+      className="fixed z-40 left-3 right-3 bottom-[calc(72px+env(safe-area-inset-bottom,0px))] sm:left-auto sm:right-4 sm:w-80 bg-slate-900 text-white rounded-xl shadow-lg px-4 py-3 flex items-center gap-3 print:hidden"
+    >
+      <p className="text-xs flex-1 leading-snug">
+        新しいバージョンがあります。日報・チャットの書きかけは消えません。
+      </p>
+      <button
+        onClick={() => window.location.reload()}
+        className="shrink-0 px-3 py-2 rounded-lg bg-blue-500 text-white text-xs font-bold"
+      >
+        更新する
+      </button>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <>
+      <RehabApp />
+      <UpdateNotice />
+    </>
+  );
+}
+
+function RehabApp() {
   // この端末に保存された組織ログインがあれば、それで始める。
   // v14 以前に保存されたもの（サーバー側のログイン状態がない）は使わず、ログインし直してもらう。
   const [org, setOrgState] = useState(() =>
@@ -997,7 +1114,7 @@ export default function RehabApp() {
             <div className="flex bg-slate-800 rounded-full p-1 gap-1">
               <button
                 onClick={() => handleSwitchMode("player")}
-                className={`px-3 sm:px-4 py-1.5 rounded-full text-xs sm:text-sm font-medium whitespace-nowrap transition-colors ${
+                className={`px-3 sm:px-4 min-h-[36px] py-1.5 rounded-full text-xs sm:text-sm font-medium whitespace-nowrap transition-colors ${
                   mode === "player" ? "bg-blue-600 text-white" : "text-slate-300 hover:text-white"
                 }`}
               >
@@ -1005,7 +1122,7 @@ export default function RehabApp() {
               </button>
               <button
                 onClick={() => handleSwitchMode("coach")}
-                className={`px-3 sm:px-4 py-1.5 rounded-full text-xs sm:text-sm font-medium whitespace-nowrap transition-colors ${
+                className={`px-3 sm:px-4 min-h-[36px] py-1.5 rounded-full text-xs sm:text-sm font-medium whitespace-nowrap transition-colors ${
                   mode === "coach" || mode === "coach-login"
                     ? "bg-blue-600 text-white"
                     : "text-slate-300 hover:text-white"
@@ -1115,7 +1232,7 @@ function LoginModeTabs({ mode, onChange }) {
       type="button"
       onClick={() => onChange(value)}
       aria-pressed={mode === value}
-      className={`flex-1 py-1.5 rounded-full text-xs font-bold transition-colors ${
+      className={`flex-1 py-2.5 rounded-full text-sm font-bold transition-colors ${
         mode === value ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"
       }`}
     >
@@ -1211,7 +1328,7 @@ function AdminLogin({ onChangeMode, onAuthed }) {
         autoComplete="current-password"
         value={pw}
         onChange={(e) => setPw(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+        onKeyDown={(e) => isEnterKey(e) && handleLogin()}
         className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-slate-500"
       />
       {error && <p className="text-red-500 text-sm mb-2 text-center">{error}</p>}
@@ -1260,7 +1377,7 @@ function InviteLinkCard({ invite, onClose }) {
         <p className="text-sm font-bold text-slate-700 flex items-center gap-1.5">
           <LinkIcon size={16} className="text-blue-600" /> 「{invite.name}」の招待リンク
         </p>
-        <button onClick={onClose} className="text-slate-400 hover:text-slate-600 p-1" aria-label="閉じる">
+        <button onClick={onClose} className="text-slate-400 hover:text-slate-600 p-2.5 -m-2" aria-label="閉じる">
           <X size={16} />
         </button>
       </div>
@@ -1553,7 +1670,7 @@ function OrgManager({ onBack }) {
               autoComplete="new-password"
               value={coachPwConfirm}
               onChange={(e) => setCoachPwConfirm(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+              onKeyDown={(e) => isEnterKey(e) && handleCreate()}
               placeholder="もう一度入力"
               className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
             />
@@ -1709,10 +1826,11 @@ function InstallHint({ className = "mt-5" }) {
         </div>
         <button
           onClick={handleClose}
-          className="text-slate-300 hover:text-slate-500 shrink-0"
+          className="text-slate-300 hover:text-slate-500 shrink-0 p-2.5 -m-2"
           title="今後表示しない"
+          aria-label="この案内を今後表示しない"
         >
-          <X size={14} />
+          <X size={16} />
         </button>
       </div>
     </div>
@@ -2009,7 +2127,7 @@ function OrgLogin({ onAuthed, invite }) {
         autoComplete="current-password"
         value={password}
         onChange={(e) => setPassword(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+        onKeyDown={(e) => isEnterKey(e) && handleLogin()}
         placeholder="組織パスワード"
         className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
@@ -2128,7 +2246,7 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
         autoComplete="current-password"
         value={pwInput}
         onChange={(e) => setPwInput(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+        onKeyDown={(e) => isEnterKey(e) && handleLogin()}
         placeholder="パスワード"
         className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-center tracking-widest focus:outline-none focus:ring-2 focus:ring-blue-500"
         autoFocus
@@ -2166,8 +2284,18 @@ function uploadedMediaKind(url) {
   return /\.(mp4|mov|webm|m4v|qt)(\?|$)/i.test(url) ? "video" : "image";
 }
 
-function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, playerId, orgId }) {
-  const [text, setText] = useState("");
+function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, playerId, orgId, draftKey, tall }) {
+  const [text, setText] = useState(() => (draftKey && readDraft(draftKey)?.text) || "");
+  const listRef = React.useRef(null);
+  // 書きかけのメッセージは端末に残す（更新・再読み込みで消えないように）
+  useEffect(() => {
+    if (draftKey) writeDraft(draftKey, text.trim() ? { text } : null);
+  }, [draftKey, text]);
+  // 新しいメッセージが来たら一番下（最新）を表示する
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length]);
   const [attachment, setAttachment] = useState(null); // { url, kind } 送信前の写真・動画
   const [role, setRole] = useState(roleOptions?.[0]?.value ?? null);
   const [sending, setSending] = useState(false);
@@ -2206,7 +2334,7 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, p
           <MessageCircle size={16} className="text-blue-600" /> {title}
         </p>
       )}
-      <div className="max-h-64 overflow-y-auto space-y-2 mb-3 pr-1">
+      <div ref={listRef} className={`${tall ? "max-h-[55vh]" : "max-h-64"} overflow-y-auto overscroll-contain space-y-2 mb-3 pr-1`}>
         {messages.length === 0 && (
           <p className="text-xs text-slate-400">まだメッセージはありません。</p>
         )}
@@ -2259,7 +2387,7 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, p
 
       <button
         onClick={() => setShowExtra((v) => !v)}
-        className="text-[11px] text-blue-600 hover:underline mb-2"
+        className="text-xs text-blue-600 hover:underline mb-1 py-2"
       >
         {showExtra ? "詳細入力を閉じる" : "＋ 痛みの種類・動画リンクなど詳細を追加"}
       </button>
@@ -2268,7 +2396,7 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, p
           <select
             value={painType}
             onChange={(e) => setPainType(e.target.value)}
-            className="border border-slate-300 rounded-lg px-2 py-1.5 text-xs bg-white"
+            className="border border-slate-300 rounded-lg px-2 py-2.5 text-sm bg-white"
           >
             <option value="">痛みの種類（任意）</option>
             {PAIN_TYPES.map((p) => (
@@ -2281,13 +2409,13 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, p
             value={timestampNote}
             onChange={(e) => setTimestampNote(e.target.value)}
             placeholder="例：0:30の動きを見てほしい"
-            className="border border-slate-300 rounded-lg px-2 py-1.5 text-xs"
+            className="border border-slate-300 rounded-lg px-3 py-2.5 text-sm"
           />
           <input
             value={videoUrl}
             onChange={(e) => setVideoUrl(e.target.value)}
             placeholder="動画リンク（URL）"
-            className="col-span-1 sm:col-span-2 border border-slate-300 rounded-lg px-2 py-1.5 text-xs"
+            className="col-span-1 sm:col-span-2 border border-slate-300 rounded-lg px-3 py-2.5 text-sm"
           />
         </div>
       )}
@@ -2300,7 +2428,7 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, p
           <button
             type="button"
             onClick={() => setAttachment(null)}
-            className="text-slate-400 hover:text-red-500 p-1"
+            className="text-slate-400 hover:text-red-500 p-2.5 -m-1"
             aria-label="添付を取り消す"
           >
             <X size={16} />
@@ -2335,14 +2463,14 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, p
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleSend()}
+          onKeyDown={(e) => isEnterKey(e) && handleSend()}
           placeholder="メッセージを入力"
-          className="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="flex-1 min-w-0 border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
         <button
           onClick={handleSend}
           disabled={sending}
-          className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:bg-slate-300"
+          className="px-4 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:bg-slate-300"
         >
           送信
         </button>
@@ -2377,15 +2505,16 @@ function CoachDashboard({
   ];
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-6">
-      <div className="flex gap-2 mb-6 border-b border-slate-300 flex-wrap print:hidden">
+    <div className="max-w-6xl mx-auto px-4 py-4 sm:py-6">
+      {/* スマホでは1行のまま横にスクロールできるタブにする */}
+      <div className="flex gap-1 sm:gap-2 mb-5 sm:mb-6 border-b border-slate-300 overflow-x-auto no-scrollbar -mx-4 px-4 sm:mx-0 sm:px-0 print:hidden">
         {tabs.map((t) => {
           const Icon = t.icon;
           return (
             <button
               key={t.key}
               onClick={() => setSubTab(t.key)}
-              className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
+              className={`flex items-center gap-1.5 px-3 sm:px-4 py-3 text-sm font-medium whitespace-nowrap shrink-0 border-b-2 -mb-px transition-colors ${
                 subTab === t.key
                   ? "border-blue-600 text-blue-700"
                   : "border-transparent text-slate-500 hover:text-slate-800"
@@ -3282,6 +3411,7 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme }) {
 // ---------- 選手管理（2ペイン） ----------
 function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayers, slots, setSlots, phaseMenus }) {
   const [selectedId, setSelectedId] = useState(null);
+  const detailRef = React.useRef(null);
   const [listView, setListView] = useState("active"); // 'active' | 'graduated'
   const [error, setError] = useState(null);
 
@@ -3489,7 +3619,13 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
             return (
               <li key={p.id}>
                 <button
-                  onClick={() => setSelectedId(p.id)}
+                  onClick={() => {
+                    setSelectedId(p.id);
+                    // スマホ（1列表示）では、選んだ選手の詳細まで画面を送る
+                    if (window.matchMedia("(max-width: 1023px)").matches) {
+                      setTimeout(() => detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+                    }
+                  }}
                   className={`w-full text-left px-4 py-3 flex items-center justify-between hover:bg-slate-50 transition-colors ${rowBg}`}
                 >
                   <div>
@@ -3544,11 +3680,19 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
         </ul>
       </div>
 
-      <div>
+      <div ref={detailRef} className="scroll-mt-20">
+        {selectedPlayer && (
+          <button
+            onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+            className="lg:hidden mb-3 flex items-center gap-1 text-sm text-blue-600 py-2 print:hidden"
+          >
+            <ChevronUp size={16} /> 選手一覧に戻る
+          </button>
+        )}
         {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
         {!selectedPlayer && (
           <div className="bg-white rounded-xl border border-slate-200 p-10 text-center text-slate-400 text-sm">
-            左のリストから選手を選択してください
+            リストから選手を選択してください
           </div>
         )}
         {selectedPlayer && (
@@ -3652,8 +3796,8 @@ function PlayerDetailPanel({
   return (
     <>
       <div className="space-y-5 print:hidden">
-        <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center justify-between">
-          <div>
+        <div className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="min-w-0">
             <h3 className="font-bold text-lg text-slate-800">{player.name}</h3>
             <p className="text-sm text-slate-400">
               {protocol?.name ?? "未設定"} ・ 現在{" "}
@@ -3671,7 +3815,7 @@ function PlayerDetailPanel({
               </p>
             )}
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             {player.completedAt ? (
               <span className="bg-green-100 text-green-700 text-xs font-bold px-3 py-1.5 rounded-full">
                 完全復帰
@@ -3694,14 +3838,14 @@ function PlayerDetailPanel({
             )}
             <button
               onClick={() => window.print()}
-              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 border border-blue-200 hover:border-blue-300 rounded-full px-3 py-1.5"
+              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 border border-blue-200 hover:border-blue-300 rounded-full px-3 py-2"
               title="レポートを印刷 / PDF出力"
             >
               <Printer size={14} /> レポート出力
             </button>
             <button
               onClick={onDelete}
-              className="flex items-center gap-1 text-xs text-slate-400 hover:text-red-500 border border-slate-200 hover:border-red-300 rounded-full px-3 py-1.5"
+              className="flex items-center gap-1 text-xs text-slate-400 hover:text-red-500 border border-slate-200 hover:border-red-300 rounded-full px-3 py-2"
               title="選手をデータベースから完全に削除する"
             >
               <Trash2 size={14} /> 削除
@@ -4171,7 +4315,7 @@ function GatePanel({
                 <div className="flex-1">
                   {/* 原案の文言をそのまま表示する */}
                   <p className="text-sm text-slate-800">{text}</p>
-                  {st.note && <p className="text-[10px] text-slate-500 mt-0.5">{st.note}</p>}
+                  {st.note && <p className="text-[11px] text-slate-500 mt-0.5">{st.note}</p>}
                   {(st.self?.video_url || st.staff?.video_url) && (
                     <AttachmentPreview
                       url={st.self?.video_url || st.staff?.video_url}
@@ -4189,18 +4333,18 @@ function GatePanel({
 
               {!st.auto && (
                 <div className="mt-2 ml-6">
-                  <div className="flex flex-wrap items-center gap-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
                     <button
                       onClick={() => record(idx, true)}
                       disabled={busyIdx === idx}
-                      className="text-[11px] px-2.5 py-1 rounded-full border border-green-300 text-green-700 hover:bg-green-50 disabled:opacity-40"
+                      className="text-sm min-h-[36px] px-4 py-1.5 rounded-full border border-green-300 text-green-700 hover:bg-green-50 disabled:opacity-40"
                     >
                       できた
                     </button>
                     <button
                       onClick={() => record(idx, false)}
                       disabled={busyIdx === idx}
-                      className="text-[11px] px-2.5 py-1 rounded-full border border-slate-300 text-slate-500 hover:bg-slate-50 disabled:opacity-40"
+                      className="text-sm min-h-[36px] px-4 py-1.5 rounded-full border border-slate-300 text-slate-500 hover:bg-slate-50 disabled:opacity-40"
                     >
                       できていない
                     </button>
@@ -4236,13 +4380,13 @@ function GatePanel({
         value={checkerName}
         onChange={(e) => setCheckerName(e.target.value)}
         placeholder={viewerRole === "self" ? "あなたの名前（任意）" : "確認した人（任意）"}
-        className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-xs mt-3"
+        className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-3"
       />
 
       {!allOk && missing.length > 0 && (
         <div className="mt-3 bg-slate-50 rounded-lg px-3 py-2">
-          <p className="text-[11px] font-bold text-slate-600 mb-1">足りないもの</p>
-          <ul className="text-[11px] text-slate-500 list-disc list-inside space-y-0.5">
+          <p className="text-xs font-bold text-slate-600 mb-1">足りないもの</p>
+          <ul className="text-xs text-slate-500 list-disc list-inside space-y-0.5">
             {missing.map((m, i) => (
               <li key={i}>{m}</li>
             ))}
@@ -4719,6 +4863,9 @@ function PlayerLogin({ orgId, masterProtocols, playerDirectory, setPlayerDirecto
   const savedLogin = readSession(PLAYER_SESSION_KEY);
   const hasSavedLogin = Boolean(savedLogin && savedLogin.orgId === orgId && savedLogin.id);
   const [restoring, setRestoring] = useState(hasSavedLogin);
+  // 通信できずに復帰できなかったとき（保存は消さずに、もう一度試せるようにする）
+  const [restoreFailed, setRestoreFailed] = useState(false);
+  const [restoreTry, setRestoreTry] = useState(0);
 
   useEffect(() => {
     const saved = readSession(PLAYER_SESSION_KEY);
@@ -4741,17 +4888,20 @@ function PlayerLogin({ orgId, masterProtocols, playerDirectory, setPlayerDirecto
         }
         writeSession(PLAYER_SESSION_KEY, null); // 選手が削除されている
       } catch {
-        // 通信できないときは、通常のログイン画面を出す
+        // 通信できないとき：ログインの保存は消さず、「もう一度試す」を出す
+        if (!cancelled) setRestoreFailed(true);
+        return;
       }
       if (!cancelled) setRestoring(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [orgId]);
+  }, [orgId, restoreTry]);
 
   const handleForgetDevice = () => {
     writeSession(PLAYER_SESSION_KEY, null);
+    setRestoreFailed(false);
     setRestoring(false);
   };
 
@@ -4798,13 +4948,32 @@ function PlayerLogin({ orgId, masterProtocols, playerDirectory, setPlayerDirecto
   if (restoring) {
     return (
       <div className="max-w-sm mx-auto mt-16 bg-white rounded-2xl shadow-lg p-8 border border-slate-200 text-center">
-        <Loader2 className="animate-spin text-blue-600 mx-auto" size={26} />
-        <p className="mt-4 text-sm text-slate-600">
-          <span className="font-bold text-slate-800">{savedLogin?.name}</span> さんとして開いています
-        </p>
+        {restoreFailed ? (
+          <>
+            <p className="text-sm text-slate-600">
+              通信できませんでした。電波のよいところで、もう一度お試しください。
+            </p>
+            <button
+              onClick={() => {
+                setRestoreFailed(false);
+                setRestoreTry((n) => n + 1);
+              }}
+              className="mt-4 w-full py-3 rounded-lg bg-blue-600 text-white font-bold text-sm"
+            >
+              もう一度試す
+            </button>
+          </>
+        ) : (
+          <>
+            <Loader2 className="animate-spin text-blue-600 mx-auto" size={26} />
+            <p className="mt-4 text-sm text-slate-600">
+              <span className="font-bold text-slate-800">{savedLogin?.name}</span> さんとして開いています
+            </p>
+          </>
+        )}
         <button
           onClick={handleForgetDevice}
-          className="mt-5 text-xs text-slate-400 hover:text-slate-600 underline"
+          className="mt-4 px-3 py-2 text-xs text-slate-400 hover:text-slate-600 underline"
         >
           別の人でログインする
         </button>
@@ -4840,7 +5009,7 @@ function PlayerLogin({ orgId, masterProtocols, playerDirectory, setPlayerDirecto
           maxLength={4}
           value={pin}
           onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-          onKeyDown={(e) => e.key === "Enter" && handlePinSubmit()}
+          onKeyDown={(e) => isEnterKey(e) && handlePinSubmit()}
           placeholder="••••"
           className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-center text-2xl tracking-[0.5em] focus:outline-none focus:ring-2 focus:ring-blue-500"
           autoFocus
@@ -5325,20 +5494,85 @@ function PhaseTimelineComparison({ player, protocol }) {
 }
 
 function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, setSlots, phaseMenus, onLogout }) {
-  const [tab, setTab] = useState("dashboard"); // 'dashboard' | 'report'
-  const [vas, setVas] = useState(3);
-  const [fatigue, setFatigue] = useState(3);
-  const [sleepQuality, setSleepQuality] = useState(7);
-  const [mental, setMental] = useState(3);
-  const [honne, setHonne] = useState("");
-  const [sos, setSos] = useState(false);
+  // 画面下のタブ：'home' | 'menu' | 'report' | 'chat' | 'more'
+  // 更新などで読み込み直しても同じタブに戻れるよう、このタブの間だけ覚えておく
+  const TAB_KEY = "resprint.playerTab";
+  const [tab, setTab] = useState(() => {
+    try {
+      const t = window.sessionStorage.getItem(TAB_KEY);
+      return ["home", "menu", "report", "chat", "more"].includes(t) ? t : "home";
+    } catch {
+      return "home";
+    }
+  });
+  const changeTab = (t) => {
+    setTab(t);
+    try {
+      window.sessionStorage.setItem(TAB_KEY, t);
+    } catch {
+      // 覚えられなくても動く
+    }
+    window.scrollTo(0, 0);
+  };
+
+  // チャット：スタッフからの未読（この端末で最後に見たメッセージより新しいもの）
+  const seenKey = `resprint.chatSeen.${player.id}`;
+  const lastStaffId = Math.max(0, ...player.messages.filter((m) => m.sender === "staff").map((m) => Number(m.id) || 0));
+  const [seenId, setSeenId] = useState(() => {
+    const saved = readDraft(seenKey);
+    if (saved !== null) return Number(saved) || 0;
+    // この端末で初めて開いたとき（v15.6 に更新した直後など）は、それまでのメッセージを既読として扱う
+    writeDraft(seenKey, lastStaffId);
+    return lastStaffId;
+  });
+  const unreadStaff = tab === "chat" ? 0 : player.messages.filter((m) => m.sender === "staff" && Number(m.id) > seenId).length;
+  useEffect(() => {
+    if (tab === "chat" && lastStaffId > seenId) {
+      setSeenId(lastStaffId);
+      writeDraft(seenKey, lastStaffId);
+    }
+  }, [tab, lastStaffId]);
+
+  // 日報の書きかけ（その日のうちなら、読み込み直しても残す）
+  const reportDraftKey = `resprint.draft.report.${player.id}`;
+  const [draft0] = useState(() => {
+    const d = readDraft(reportDraftKey);
+    return d && d.date === todayStr() ? d : {};
+  });
+  const [vas, setVas] = useState(draft0.vas ?? 3);
+  const [fatigue, setFatigue] = useState(draft0.fatigue ?? 3);
+  const [sleepQuality, setSleepQuality] = useState(draft0.sleepQuality ?? 7);
+  const [mental, setMental] = useState(draft0.mental ?? 3);
+  const [honne, setHonne] = useState(draft0.honne ?? "");
+  const [sos, setSos] = useState(draft0.sos ?? false);
   // 本人の申告（スタッフがいない選手でも基準を出せるように）
-  const [selfCompensation, setSelfCompensation] = useState(false);
-  const [selfSevereSymptom, setSelfSevereSymptom] = useState(false);
+  const [selfCompensation, setSelfCompensation] = useState(draft0.selfCompensation ?? false);
+  const [selfSevereSymptom, setSelfSevereSymptom] = useState(draft0.selfSevereSymptom ?? false);
   // PHASEで出し分ける項目
-  const [fearLevel, setFearLevel] = useState(0);
-  const [slippingContact, setSlippingContact] = useState(false);
-  const [rpe, setRpe] = useState(70);
+  const [fearLevel, setFearLevel] = useState(draft0.fearLevel ?? 0);
+  const [slippingContact, setSlippingContact] = useState(draft0.slippingContact ?? false);
+  const [rpe, setRpe] = useState(draft0.rpe ?? 70);
+  const draftTouched = React.useRef(false);
+  useEffect(() => {
+    if (!draftTouched.current) {
+      draftTouched.current = true; // 最初の表示では保存しない
+      return;
+    }
+    writeDraft(reportDraftKey, {
+      date: todayStr(),
+      vas,
+      fatigue,
+      sleepQuality,
+      mental,
+      honne,
+      sos,
+      selfCompensation,
+      selfSevereSymptom,
+      fearLevel,
+      slippingContact,
+      rpe,
+    });
+  }, [vas, fatigue, sleepQuality, mental, honne, sos, selfCompensation, selfSevereSymptom, fearLevel, slippingContact, rpe]);
   // 送信結果（基準の提示に使う）
   const [submitted, setSubmitted] = useState(null);
   // 日報に添える写真・動画（任意）
@@ -5410,6 +5644,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
         severeSymptom: selfSevereSymptom,
       });
       setSent(true);
+      writeDraft(reportDraftKey, null); // 送信できたので下書きを消す
       setHonne("");
       setSos(false);
       setSelfCompensation(false);
@@ -5512,44 +5747,31 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
     setMyPlayer((prev) => ({ ...prev, treatments: prev.treatments.filter((t) => t.id !== id) }));
   };
 
+  const TABS = [
+    { key: "home", label: "ホーム", icon: Home },
+    { key: "menu", label: "メニュー", icon: Dumbbell },
+    { key: "report", label: "日報", icon: Send },
+    { key: "chat", label: "チャット", icon: MessageCircle, badge: unreadStaff },
+    { key: "more", label: "その他", icon: MoreHorizontal },
+  ];
+
   return (
-    <div className="max-w-md mx-auto px-4 py-6 space-y-5">
+    <div className="max-w-md mx-auto px-4 pt-5 pb-28 space-y-5">
       <div className="flex items-center justify-between">
-        <div>
+        <div className="min-w-0">
           <p className="text-xs text-slate-400">おかえりなさい</p>
-          <h2 className="font-bold text-xl text-slate-800">{player.name} さん</h2>
+          <h2 className="font-bold text-xl text-slate-800 truncate">{player.name} さん</h2>
         </div>
-        <button onClick={onLogout} className="text-xs text-slate-400 flex items-center gap-1 hover:text-slate-600">
-          <LogOut size={14} /> ログアウト
-        </button>
+        <span className={`shrink-0 text-xs font-bold px-2.5 py-1 rounded-full bg-white border border-slate-200 ${PHASE_TEXT_COLORS[player.currentPhase]}`}>
+          PHASE {player.currentPhase}/{phaseCountOf(protocol)}
+        </span>
       </div>
 
-      {/* 要件①：閲覧用の「ダッシュボード」と入力用の「日報・SOS送信」をタブで分離 */}
-      <div className="flex bg-slate-200 rounded-full p-1 gap-1">
-        <button
-          onClick={() => setTab("dashboard")}
-          className={`flex-1 py-2 rounded-full text-sm font-bold transition-colors ${
-            tab === "dashboard" ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"
-          }`}
-        >
-          ダッシュボード
-        </button>
-        <button
-          onClick={() => setTab("report")}
-          className={`flex-1 py-2 rounded-full text-sm font-bold transition-colors ${
-            tab === "report" ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"
-          }`}
-        >
-          日報・SOS送信
-        </button>
-      </div>
+      {/* 免責文は、どのタブでも無条件で出す */}
+      <StandingNotice />
 
-      {tab === "dashboard" && (
+      {tab === "home" && (
         <>
-          <StandingNotice />
-
-          <UsageGuide />
-
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
             <div className="flex items-center justify-between mb-2">
               <p className="text-sm font-bold text-slate-700">復帰ロードマップ</p>
@@ -5589,36 +5811,6 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
             </div>
           </div>
 
-          {protocol?.videoUrl && (
-            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-              <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
-                <Youtube size={16} className="text-red-500" /> リハビリ参考動画
-              </p>
-              {embedUrl ? (
-                <div className="aspect-video w-full rounded-lg overflow-hidden bg-slate-100">
-                  <iframe
-                    src={embedUrl}
-                    title="リハビリ参考動画"
-                    className="w-full h-full"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                    allowFullScreen
-                  />
-                </div>
-              ) : (
-                <a
-                  href={safeHref(protocol.videoUrl)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center justify-center gap-2 py-3 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-blue-600 font-medium"
-                >
-                  <LinkIcon size={14} /> 動画リンクを開く
-                </a>
-              )}
-            </div>
-          )}
-
-          <InjuryDateCard orgId={orgId} player={player} protocol={protocol} setMyPlayer={setMyPlayer} />
-
           <GatePanel
             orgId={orgId}
             player={player}
@@ -5628,30 +5820,6 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
             onAdvance={(role, nm) => advanceOwnPhase(role, nm)}
             onComplete={completeOwn}
           />
-
-          <ConsultationRequestCard orgId={orgId} player={player} />
-
-          <PhaseTimelineComparison player={player} protocol={protocol} />
-
-          <CumulativeMenuPanel player={player} protocol={protocol} readOnly />
-
-          <OffsiteTrainingPanel orgId={orgId} player={player} readOnly />
-
-          <HamstringClassificationCard orgId={orgId} player={player} protocol={protocol} readOnly />
-
-          <AthleteMetricsCard
-            player={player}
-            onSaved={(patch) => setMyPlayer((prev) => ({ ...prev, ...patch }))}
-          />
-
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-            <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
-              <Dumbbell size={16} className="text-blue-600" /> 現在Phaseの推奨メニュー
-            </p>
-            <PhaseMenuCatalog menus={phaseMenus} protocolId={player.protocolId} phaseNumber={player.currentPhase} />
-          </div>
-
-          <TreatmentCard player={player} onAddTreatments={addPlayerTreatments} onDeleteTreatment={deletePlayerTreatment} />
 
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
             <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
@@ -5704,14 +5872,59 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
         </>
       )}
 
+      {tab === "menu" && (
+        <>
+          <CumulativeMenuPanel player={player} protocol={protocol} readOnly />
+
+          {protocol?.videoUrl && (
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+              <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+                <Youtube size={16} className="text-red-500" /> リハビリ参考動画
+              </p>
+              {embedUrl ? (
+                <div className="aspect-video w-full rounded-lg overflow-hidden bg-slate-100">
+                  <iframe
+                    src={embedUrl}
+                    title="リハビリ参考動画"
+                    className="w-full h-full"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                    allowFullScreen
+                  />
+                </div>
+              ) : (
+                <a
+                  href={safeHref(protocol.videoUrl)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center justify-center gap-2 py-3 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-blue-600 font-medium"
+                >
+                  <LinkIcon size={14} /> 動画リンクを開く
+                </a>
+              )}
+            </div>
+          )}
+
+          <AthleteMetricsCard
+            player={player}
+            onSaved={(patch) => setMyPlayer((prev) => ({ ...prev, ...patch }))}
+          />
+
+          <OffsiteTrainingPanel orgId={orgId} player={player} readOnly />
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+              <Dumbbell size={16} className="text-blue-600" /> 現在Phaseの推奨メニュー
+            </p>
+            <PhaseMenuCatalog menus={phaseMenus} protocolId={player.protocolId} phaseNumber={player.currentPhase} />
+          </div>
+
+        </>
+      )}
+
       {tab === "report" && (
         <>
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
             <p className="text-sm font-bold text-slate-700 mb-3">今日のコンディション報告</p>
-
-            <div className="mb-4">
-              <StandingNotice />
-            </div>
 
             <label className="text-xs text-slate-500 flex justify-between">
               <span>痛みの強さ（VAS）</span>
@@ -5725,19 +5938,23 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
               onChange={(e) => setVas(Number(e.target.value))}
               className="w-full mt-2 accent-blue-600"
             />
-            <div className="grid grid-cols-5 gap-1 text-center mt-2 mb-4">
-              {[
-                { v: 0, label: "完全に無痛・全く気にならない" },
-                { v: 3, label: "痛みはあるが、練習には集中できる（許容範囲）" },
-                { v: 5, label: "痛みが気になって思い通りの動きができない（代償動作が出る）" },
-                { v: 8, label: "これ以上やると確実に悪化する・かばうことすらできない" },
-                { v: 10, label: "これまで経験した最大の痛み・激痛" },
-              ].map((a) => (
-                <div key={a.v}>
-                  <p className="text-xs font-bold text-blue-600">{a.v}</p>
-                  <p className="text-[8px] leading-tight text-blue-700 mt-0.5">{a.label}</p>
-                </div>
-              ))}
+            {/* 目盛りの説明（スマホでも読める大きさで、いまの値に近いものを強調する） */}
+            <div className="mt-2 mb-4 space-y-1">
+              {VAS_ANCHORS.map((a, i) => {
+                const next = VAS_ANCHORS[i + 1]?.v ?? 11;
+                const current = vas >= a.v && vas < next;
+                return (
+                  <p
+                    key={a.v}
+                    className={`flex gap-2 text-xs leading-snug rounded-md px-2 py-1 ${
+                      current ? "bg-blue-50 text-blue-800 font-bold" : "text-slate-400"
+                    }`}
+                  >
+                    <span className="w-5 shrink-0 text-right">{a.v}</span>
+                    <span>{a.label}</span>
+                  </p>
+                );
+              })}
             </div>
 
             <label className="text-xs text-slate-500 flex justify-between">
@@ -5817,7 +6034,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
                   <AttachmentPreview url={reportMedia.url} kind={reportMedia.kind} />
                   <button
                     onClick={() => setReportMedia(null)}
-                    className="text-[10px] text-slate-400 hover:text-red-500 underline mt-1"
+                    className="text-xs text-slate-400 hover:text-red-500 underline mt-1 py-2"
                   >
                     取り消す
                   </button>
@@ -5827,21 +6044,21 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
             <div className="border border-slate-200 rounded-lg p-3 mb-3 space-y-2">
               <p className="text-xs font-bold text-slate-600">今日の状態</p>
-              <label className="flex items-start gap-2 text-xs text-slate-600">
+              <label className="flex items-start gap-3 text-sm text-slate-700 py-1.5">
                 <input
                   type="checkbox"
                   checked={selfSevereSymptom}
                   onChange={(e) => setSelfSevereSymptom(e.target.checked)}
-                  className="mt-0.5"
+                  className="mt-0.5 w-5 h-5 shrink-0 accent-blue-600"
                 />
                 歩行が困難な鋭い痛みがある
               </label>
-              <label className="flex items-start gap-2 text-xs text-slate-600">
+              <label className="flex items-start gap-3 text-sm text-slate-700 py-1.5">
                 <input
                   type="checkbox"
                   checked={selfCompensation}
                   onChange={(e) => setSelfCompensation(e.target.checked)}
-                  className="mt-0.5"
+                  className="mt-0.5 w-5 h-5 shrink-0 accent-blue-600"
                 />
                 かばう動き（代償動作）が出ている
               </label>
@@ -5869,16 +6086,16 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
               {player.currentPhase >= 6 && (
                 <div className="pt-2 border-t border-slate-100">
-                  <label className="flex items-start gap-2 text-xs text-slate-600">
+                  <label className="flex items-start gap-3 text-sm text-slate-700 py-1.5">
                     <input
                       type="checkbox"
                       checked={slippingContact}
                       onChange={(e) => setSlippingContact(e.target.checked)}
-                      className="mt-0.5"
+                      className="mt-0.5 w-5 h-5 shrink-0 accent-blue-600"
                     />
                     抜ける接地が出た
                   </label>
-                  <p className="text-[10px] text-slate-400 mt-1 ml-5">
+                  <p className="text-[11px] text-slate-400 mt-1 ml-8">
                     抜ける接地＝地面を蹴る → 脚が流れる → 前接地になる接地。
                   </p>
                 </div>
@@ -5905,7 +6122,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
             <button
               onClick={() => setSos((v) => !v)}
-              className={`w-full flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-bold mb-3 border-2 transition-colors ${
+              className={`w-full flex items-center justify-center gap-2 py-3 rounded-lg text-sm font-bold mb-3 border-2 transition-colors ${
                 sos ? "border-red-500 bg-red-50 text-red-600" : "border-slate-200 text-slate-400"
               }`}
             >
@@ -5930,16 +6147,78 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
             )}
           </div>
 
+        </>
+      )}
+
+      {tab === "chat" && (
+        <>
           <ChatPanel
             playerId={player.id}
             orgId={orgId}
             messages={player.messages}
             myRole="player"
             title="指導者とのチャット"
+            draftKey={`resprint.draft.chat.${player.id}`}
+            tall
             onSend={sendPlayerMessage}
           />
         </>
       )}
+
+      {tab === "more" && (
+        <>
+          <InjuryDateCard orgId={orgId} player={player} protocol={protocol} setMyPlayer={setMyPlayer} />
+
+          <PhaseTimelineComparison player={player} protocol={protocol} />
+
+          <HamstringClassificationCard orgId={orgId} player={player} protocol={protocol} readOnly />
+
+          <TreatmentCard player={player} onAddTreatments={addPlayerTreatments} onDeleteTreatment={deletePlayerTreatment} />
+
+          <ConsultationRequestCard orgId={orgId} player={player} />
+
+          <UsageGuide />
+
+          <button
+            onClick={onLogout}
+            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-600 hover:bg-slate-50"
+          >
+            <LogOut size={16} /> この端末から選手ログアウト
+          </button>
+          <p className="text-center text-[11px] text-slate-400">{APP_BUILD}</p>
+        </>
+      )}
+
+      {/* 画面下のタブ（親指で届く位置） */}
+      <nav
+        className="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur border-t border-slate-200 print:hidden safe-nav"
+        aria-label="選手メニュー"
+      >
+        <div className="max-w-md mx-auto grid grid-cols-5">
+          {TABS.map((t) => {
+            const Icon = t.icon;
+            const active = tab === t.key;
+            return (
+              <button
+                key={t.key}
+                onClick={() => changeTab(t.key)}
+                aria-current={active ? "page" : undefined}
+                className={`relative flex flex-col items-center justify-center gap-0.5 min-h-[56px] text-[11px] font-bold ${
+                  active ? "text-blue-600" : "text-slate-400"
+                }`}
+              >
+                <Icon size={22} strokeWidth={active ? 2.4 : 2} />
+                {t.label}
+                {t.badge > 0 && (
+                  <span className="absolute top-1.5 left-1/2 ml-2 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] leading-[18px] text-center">
+                    {t.badge > 9 ? "9+" : t.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </nav>
     </div>
   );
 }
@@ -6194,8 +6473,8 @@ function HamstringClassificationCard({ orgId, player, protocol, readOnly, onSave
 
   const summary =
     player.bamicGrade && player.hamstringMuscle && player.hamstringLocation
-      ? `BAMIC ${player.bamicGrade}／${MUSCLE_LABELS[player.hamstringMuscle]}／${
-          LOCATION_LABELS[player.hamstringLocation]
+      ? `BAMIC ${player.bamicGrade}／${MUSCLE_LABELS[player.hamstringMuscle] ?? player.hamstringMuscle ?? "—"}／${
+          LOCATION_LABELS[player.hamstringLocation] ?? player.hamstringLocation ?? "—"
         }`
       : null;
 

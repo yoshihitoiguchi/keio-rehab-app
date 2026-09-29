@@ -20,21 +20,13 @@ ReactDOM.createRoot(document.getElementById("root")).render(
 //     開発中のファイルがキャッシュされて、確認を混乱させないため。
 // ------------------------------------------------------------------
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
-  const hadController = Boolean(navigator.serviceWorker.controller);
-
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/sw.js").catch(() => {
       // 登録できなくても、アプリは通常どおり動きます
     });
   });
-
-  // 新しい内容が有効になったら、一度だけ読み込み直す
-  let reloading = false;
-  navigator.serviceWorker.addEventListener("controllerchange", () => {
-    if (!hadController || reloading) return;
-    reloading = true;
-    window.location.reload();
-  });
+  // v15.6 から：新しい内容が有効になっても、勝手に読み込み直さない。
+  // 入力中の選手の画面が突然切り替わらないよう、「更新する」ボタン（App.jsx の UpdateNotice）で案内する。
 } else if ("serviceWorker" in navigator) {
   // 開発サーバーで以前に登録されたものがあれば外す
   navigator.serviceWorker.getRegistrations().then((regs) => regs.forEach((r) => r.unregister()));

@@ -54,3 +54,23 @@ html {
     padding: 0 !important;
   }
 }
+
+/* 選手画面の下のタブ：ホームバーに重ならないようにする */
+.safe-nav {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* スライダー：横に動かすと値が変わり、縦に動かすと画面がスクロールする */
+input[type="range"] {
+  touch-action: pan-y;
+}
+
+/* 横スクロールするタブのスクロールバーを隠す */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

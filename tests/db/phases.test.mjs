@@ -335,6 +335,25 @@ for (let i = 0; i < 10; i++) await as(U5, "select public.coach_check('comm-d','x
 ok(/間違いが続いた/.test((await as(U5, "select public.coach_check('comm-d','coach-d-pass')")).error || ""), "[v21] 10回間違えると15分止まる");
 ok((await as(U1, "select value from app_settings where key = 'other_setting'")).rows?.length === 1, "[v21] 指導者パスワード以外の設定は、今までどおりメンバーが読める");
 
+// ===== v22：DB の控え（スナップショット） =====
+ok(!(await run("supabase_migration_v22_snapshot.sql")), "[v22] 適用 1 回目");
+ok(!(await run("supabase_migration_v22_snapshot.sql")), "[v22] 適用 2 回目（冪等）");
+const snapRows = (await db.query("select * from resprint_backup.take_snapshot('test-1')")).rows;
+const nReports = (await db.query("select count(*)::int n from reports")).rows[0].n;
+ok(snapRows.find((r) => r.table_name === "reports")?.row_count === nReports && !snapRows.some((r) => r.table_name === "org_login_failures"),
+   "[v22] 控えに全テーブルの行が入る（ログイン失敗の記録は除く）");
+ok(!!(await as(U1, "select * from resprint_backup.snapshots")).error, "[v22] 組織のメンバーは控えを読めない");
+ok(!!(await as(U1, "select * from resprint_backup.take_snapshot('x')")).error, "[v22] 組織のメンバーは控えを取れない");
+ok(!!(await as(null, "select * from resprint_backup.snapshots")).error, "[v22] 匿名キーでも控えを読めない");
+await db.exec("delete from reports where id = (select min(id) from reports)");
+await db.exec(`insert into public.reports overriding system value
+  select * from jsonb_populate_recordset(null::public.reports,
+    (select rows from resprint_backup.snapshots where label = 'test-1' and table_name = 'reports'))
+  on conflict do nothing`);
+ok((await db.query("select count(*)::int n from reports")).rows[0].n === nReports, "[v22] 消した日報を控えから戻せる");
+for (let i = 2; i <= 12; i++) await db.query(`select * from resprint_backup.take_snapshot('test-${i}', 10)`);
+ok((await db.query("select count(distinct label)::int n from resprint_backup.snapshots")).rows[0].n === 10, "[v22] 控えは新しい10回分だけ残る");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");
