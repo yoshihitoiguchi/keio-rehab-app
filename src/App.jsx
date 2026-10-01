@@ -242,7 +242,7 @@ function safeHref(url) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.7 (使い方タブ・指導者の下タブ・プロトコル編集)";
+const APP_BUILD = "v15.8 (管理者がID・パスワードを確認)";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -1432,6 +1432,71 @@ function InviteLinkCard({ invite, onClose }) {
 }
 
 // 組織の追加・一覧（管理者としてログインしているときだけ表示される）
+// 管理者用：組織のID・パスワードの控えを表示する（v24）
+//   控えは、v24 以降に設定・変更されたパスワードだけ。それ以前のものは「未記録」になる。
+function SecretRow({ label, value, at, mono = true, emptyNote }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // コピーできない環境では、長押しで選択してもらう
+    }
+  };
+  return (
+    <div className="flex items-center justify-between gap-2 py-1.5">
+      <div className="min-w-0">
+        <p className="text-[11px] text-slate-500">
+          {label}
+          {value && at ? `（${formatDateTimeJa(at)} 設定）` : ""}
+        </p>
+        {value ? (
+          <p className={`text-sm text-slate-800 break-all select-all ${mono ? "font-mono" : ""}`}>{value}</p>
+        ) : (
+          <p className="text-xs text-orange-600">{emptyNote}</p>
+        )}
+      </div>
+      {value && (
+        <button
+          onClick={copy}
+          className="shrink-0 px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs text-slate-600 hover:bg-slate-50"
+        >
+          {copied ? "コピーしました" : "コピー"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function OrgSecretsPanel({ org, data }) {
+  return (
+    <div className="mt-2 rounded-lg border border-blue-200 bg-blue-50/50 px-3 py-2 divide-y divide-blue-100">
+      <SecretRow label="組織ID" value={org.id} />
+      <SecretRow
+        label="組織パスワード"
+        value={data.password}
+        at={data.password_at}
+        emptyNote="未記録です。「パスワード変更」で設定し直すと、以後ここに表示されます。"
+      />
+      <SecretRow
+        label="指導者パスワード"
+        value={data.coach_password}
+        at={data.coach_password_at}
+        emptyNote={
+          org.has_coach_password
+            ? "未記録です。「指導者パスワードをリセット」で設定し直すと、以後ここに表示されます。"
+            : "まだ設定されていません。"
+        }
+      />
+      <p className="text-[10px] text-slate-400 pt-1.5">
+        この表示は管理者だけに見えます。画面を人に見せるときは閉じてください。
+      </p>
+    </div>
+  );
+}
+
 function OrgManager({ onBack }) {
   const [orgs, setOrgs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1445,6 +1510,27 @@ function OrgManager({ onBack }) {
   const [error, setError] = useState(null);
   const [done, setDone] = useState(null);
   const [invite, setInvite] = useState(null); // { name, link }
+  // 組織ごとの「ID・パスワードを確認」の表示（開いたものだけ読み込む。画面を離れると消える）
+  const [secrets, setSecrets] = useState({}); // { [orgId]: { password, coach_password, ... } | "loading" }
+
+  const fetchSecrets = (id) => sbRpc("admin_get_org_secrets", { p_id: id });
+  const toggleSecrets = async (org) => {
+    if (secrets[org.id]) {
+      setSecrets((prev) => ({ ...prev, [org.id]: undefined }));
+      return;
+    }
+    setError(null);
+    setSecrets((prev) => ({ ...prev, [org.id]: "loading" }));
+    try {
+      const data = await fetchSecrets(org.id);
+      setSecrets((prev) => ({ ...prev, [org.id]: data || {} }));
+    } catch (err) {
+      setSecrets((prev) => ({ ...prev, [org.id]: undefined }));
+      setError(err.message);
+    }
+  };
+  // パスワードを変えたあとは、開いている表示を閉じる（古い値を見せない）
+  const clearSecrets = (id) => setSecrets((prev) => ({ ...prev, [id]: undefined }));
 
   const load = async () => {
     setLoading(true);
@@ -1543,6 +1629,7 @@ function OrgManager({ onBack }) {
     try {
       await sbRpc("admin_set_org_password", { p_id: org.id, p_password: normalizeOrgPassword(next) });
       setDone(`「${org.name}」のパスワードを変更しました。新しい招待リンクを送ってください。`);
+      clearSecrets(org.id);
       setInvite({ name: org.name, link: makeInviteLink(org.id, normalizeOrgPassword(next)) });
       await load();
     } catch (err) {
@@ -1567,14 +1654,25 @@ function OrgManager({ onBack }) {
     try {
       await sbRpc("admin_set_coach_password", { p_id: org.id, p_password: normalizeOrgPassword(next) });
       setDone(`「${org.name}」の指導者パスワードを設定しました。`);
+      clearSecrets(org.id);
       await load();
     } catch (err) {
       setError(err.message);
     }
   };
 
-  // 既存の組織の招待リンクを作る（パスワードは保存していないので、入力してもらう）
-  const handleMakeInvite = (org) => {
+  // 既存の組織の招待リンクを作る。パスワードの控え（v24）があればそれを使い、なければ入力してもらう
+  const handleMakeInvite = async (org) => {
+    setError(null);
+    try {
+      const saved = await fetchSecrets(org.id);
+      if (saved?.password) {
+        setInvite({ name: org.name, link: makeInviteLink(org.id, saved.password) });
+        return;
+      }
+    } catch {
+      // 控えを読めないときは、入力してもらう
+    }
     const pw = window.prompt(
       `「${org.name}」の組織パスワードを入力してください。\n（招待リンクに入れるためだけに使います）`
     );
@@ -1721,7 +1819,8 @@ function OrgManager({ onBack }) {
           ) : (
             <ul className="divide-y divide-slate-100">
               {orgs.map((o) => (
-                <li key={o.id} className="py-3 flex items-start justify-between gap-3">
+                <li key={o.id} className="py-3">
+                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="text-sm font-bold text-slate-800 break-words">{o.name}</p>
                     <p className="text-[11px] text-slate-400 font-mono break-all">{o.id}</p>
@@ -1745,6 +1844,12 @@ function OrgManager({ onBack }) {
                   </div>
                   <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 max-w-[55%]">
                     <button
+                      onClick={() => toggleSecrets(o)}
+                      className="text-[11px] font-bold text-blue-600 hover:text-blue-800 underline"
+                    >
+                      {secrets[o.id] ? "確認を閉じる" : "ID・パスワードを確認"}
+                    </button>
+                    <button
                       onClick={() => handleMakeInvite(o)}
                       className="text-[11px] text-blue-600 hover:text-blue-800 underline"
                     >
@@ -1762,15 +1867,24 @@ function OrgManager({ onBack }) {
                     >
                       {o.has_coach_password ? "指導者パスワードをリセット" : "指導者パスワードを設定"}
                     </button>
-                    <button
-                      onClick={() => handleDelete(o)}
-                      className="text-slate-400 hover:text-red-500 p-1"
-                      title="この組織を削除"
-                      aria-label={`${o.name}を削除`}
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                    {o.id !== "default" && (
+                      <button
+                        onClick={() => handleDelete(o)}
+                        className="text-slate-400 hover:text-red-500 p-2"
+                        title="この組織を削除"
+                        aria-label={`${o.name}を削除`}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
                   </div>
+                 </div>
+                  {secrets[o.id] === "loading" && (
+                    <p className="mt-2 text-xs text-slate-400 flex items-center gap-2">
+                      <Loader2 size={12} className="animate-spin" /> 読み込み中...
+                    </p>
+                  )}
+                  {secrets[o.id] && secrets[o.id] !== "loading" && <OrgSecretsPanel org={o} data={secrets[o.id]} />}
                 </li>
               ))}
               {orgs.length === 0 && (

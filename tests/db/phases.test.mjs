@@ -374,6 +374,39 @@ ok(!(await run("supabase_rollback_v23.sql")), "[v23] 戻し用 SQL が通る");
 ok(one(await as(U4, "select public.coach_check('comm-b','coach-b-reset')"))?.ok === true, "[v23] 戻してもパスワードはそのまま使える");
 ok(!(await run("supabase_migration_v23_coach_password_log.sql")), "[v23] 戻した後にもう一度適用できる");
 
+// ===== v24：管理者がパスワードを確認できる =====
+ok(!(await run("supabase_migration_v24_org_secrets.sql")), "[v24] 適用 1 回目");
+ok(!(await run("supabase_migration_v24_org_secrets.sql")), "[v24] 適用 2 回目（冪等）");
+let sec = one(await as(ADMIN, "select public.admin_get_org_secrets('comm-b')"));
+ok(sec?.id === "comm-b" && sec.password === null && sec.coach_password === null, "[v24] 以前に設定したパスワードは確認できない（null）");
+await as(ADMIN, "select public.admin_set_org_password('comm-b','comm-b-newpass')");
+await as(ADMIN, "select public.admin_set_coach_password('comm-b','coach-b-shown')");
+sec = one(await as(ADMIN, "select public.admin_get_org_secrets('comm-b')"));
+ok(sec.password === "comm-b-newpass" && sec.coach_password === "coach-b-shown" && !!sec.password_at, "[v24] 設定し直すと、管理者は組織・指導者パスワードを確認できる");
+await as(U4, "select public.org_login('comm-b','comm-b-newpass')");
+ok(one(await as(U4, "select public.coach_change_password('comm-b','coach-b-shown','coach-by-coach')")) === true
+   && one(await as(ADMIN, "select public.admin_get_org_secrets('comm-b')")).coach_password === "coach-by-coach",
+   "[v24] 指導者が自分で変えたパスワードも、管理者は確認できる");
+const c24 = one(await as(ADMIN, "select public.admin_create_org('comm-e','E','comm-e-pass','coach-e-pass')"));
+sec = one(await as(ADMIN, "select public.admin_get_org_secrets('comm-e')"));
+ok(c24?.id === "comm-e" && sec.password === "comm-e-pass" && sec.coach_password === "coach-e-pass", "[v24] 新しく作った組織は、作成時のパスワードを確認できる");
+ok(!!(await as(U4, "select public.admin_get_org_secrets('comm-b')")).error, "[v24] 管理者以外は確認の関数を呼べない");
+ok(!!(await as(U4, "select * from resprint_private.org_secrets")).error && !!(await as(null, "select * from resprint_private.org_secrets")).error,
+   "[v24] メンバー・匿名キーは控えの表を直接読めない");
+ok(!!(await as(U4, "select resprint_private.save_secret('comm-b','coach','hijack')")).error, "[v24] メンバーは控えを書き換えられない");
+ok(one(await as(U4, "select public.coach_check('comm-b','coach-by-coach')"))?.ok === true, "[v24] 照合は今までどおり（ログインの動きは変わらない）");
+await db.exec("insert into players (id, org_id, name, pin) values ('p-e1','comm-e','E の選手','0000'); insert into reports (player_id, vas) values ('p-e1', 2)");
+const del24 = await as(ADMIN, "select public.admin_delete_org('comm-e')");
+ok(!del24.error && (await db.query("select (select count(*) from organizations where id='comm-e') + (select count(*) from protocols where org_id='comm-e') + (select count(*) from players where org_id='comm-e') + (select count(*) from reports where player_id='p-e1') as n")).rows[0].n == 0,
+   "[v24] データ（プロトコル・選手・日報）のある組織も削除できる " + (del24.error || ""));
+ok(/テンプレート/.test((await as(ADMIN, "select public.admin_delete_org('default')")).error || "") && (await db.query("select count(*)::int n from organizations where id='default'")).rows[0].n === 1, "[v24] default は削除できない");
+ok((await db.query("select count(*)::int n from protocols where org_id = 'comm-b'")).rows[0].n >= 1, "[v24] ほかの組織のデータは消えない");
+ok((await db.query("select count(*)::int n from resprint_private.org_secrets where org_id = 'comm-e'")).rows[0].n === 0, "[v24] 組織を削除すると控えも消える");
+ok(!(await run("supabase_rollback_v24.sql")), "[v24] 戻し用 SQL が通る");
+ok(one(await as(U4, "select public.coach_check('comm-b','coach-by-coach')"))?.ok === true
+   && (await db.query("select to_regnamespace('resprint_private') v")).rows[0].v === null, "[v24] 戻すと控えは消え、ログインはそのまま");
+ok(!(await run("supabase_migration_v24_org_secrets.sql")), "[v24] 戻した後にもう一度適用できる");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");
