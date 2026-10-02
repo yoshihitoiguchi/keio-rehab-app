@@ -245,7 +245,7 @@ function safeHref(url) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.10 (プッシュ通知)";
+const APP_BUILD = "v15.11 (ホーム画面への追加・面談の一覧)";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -980,8 +980,6 @@ function RehabApp() {
 
   // 招待リンクで開かれたとき（読み取ったらアドレス欄からは消える）
   const [invite, setInvite] = useState(() => readInviteFromUrl());
-  // 招待リンクでログインした直後の「ホーム画面に追加」の案内（スマホで、まだ追加していないときだけ）
-  const [installGuide, setInstallGuide] = useState(null); // { orgName, link } | null
   useEffect(() => {
     clearInviteFromUrl();
   }, []);
@@ -1150,9 +1148,6 @@ function RehabApp() {
       <OrgLogin
         invite={invite}
         onAuthed={(next) => {
-          if (invite && !isStandaloneApp() && (isIOSDevice() || isAndroidDevice())) {
-            setInstallGuide({ orgName: next.name, link: makeInviteLink(invite.o, invite.p) });
-          }
           setInvite(null);
           setOrg(next);
         }}
@@ -1264,14 +1259,6 @@ function RehabApp() {
           />
         )}
       </main>
-
-      {installGuide && (
-        <InstallGuide
-          orgName={installGuide.orgName}
-          link={installGuide.link}
-          onClose={() => setInstallGuide(null)}
-        />
-      )}
     </div>
   );
 }
@@ -2011,7 +1998,7 @@ function InstallHint({ className = "mt-5" }) {
               </p>
               <p className="text-[11px] text-slate-500 leading-relaxed mt-1">
                 ※ iPhone はホーム画面のアプリと Safari でログインが別です。アイコンから初めて開いたときは、
-                招待リンクをコピーして「コピーした招待リンクを貼り付けて入る」を押してください（最初の1回だけ）。
+                招待リンク（または引き継ぎコード）をコピーして「貼り付けて入る」を押してください（最初の1回だけ）。
               </p>
             </>
           ) : (
@@ -2042,8 +2029,8 @@ function InstallHint({ className = "mt-5" }) {
 }
 
 // ==================================================================
-// 招待リンクでログインした直後に出す「ホーム画面に追加」の案内（全画面）
-//   iPhone：リンクをコピー → 共有 →「ホーム画面に追加」→ アイコンから開いて貼り付け
+// 「ホーム画面に追加」の全画面案内（InstallGate）で使う部品
+//   iPhone：引き継ぎコードをコピー → 共有 →「ホーム画面に追加」→ アイコンから開いて貼り付け
 //   Android：追加できるならボタン1つで追加。できなければメニューからの手順
 //   LINE などの中のブラウザ：先に Safari／Chrome で開き直してもらう
 // ==================================================================
@@ -2070,72 +2057,147 @@ function ShareIconMark() {
   );
 }
 
-function InstallGuide({ orgName, link, onClose }) {
-  const { canInstall, install } = useInstallPrompt();
-  const [copied, setCopied] = useState(false);
-  const [installed, setInstalled] = useState(false);
-  const ios = isIOSDevice();
-  const android = isAndroidDevice();
-  const inApp = inAppBrowserName();
+// 引き継ぎコード（8桁）。貼り付けた文字の中から探す（「1234 5678」のように空白が入っていてもよい）
+function parseTransferCode(text) {
+  const t = String(text || "");
+  if (t.includes("join=")) return null; // 招待リンクは別扱い
+  const m = t.match(/(?:^|\D)(\d{4})[\s-]?(\d{4})(?:\D|$)/);
+  return m ? m[1] + m[2] : null;
+}
+const formatTransferCode = (code) => `${code.slice(0, 4)} ${code.slice(4)}`;
 
-  const copy = async () => {
+// スマホのブラウザで開いている選手に出す、全画面の「ホーム画面に追加」（v15.11）
+//   使い方を最後まで読んだあと（2回目以降は開いたとき）に出る。追加するまで先へ進めない。
+//   ただし、追加できない端末のために、下に小さく「今回だけブラウザで使う」を置く（作者の判断）。
+//   iPhone は Safari とホーム画面のアプリでログインが別なので、引き継ぎコードでそのまま引き継ぐ。
+const INSTALL_SKIP_KEY = "resprint.installSkip";
+function needsInstall() {
+  return (isIOSDevice() || isAndroidDevice()) && !isStandaloneApp();
+}
+function installSkipped() {
+  try {
+    return window.sessionStorage.getItem(INSTALL_SKIP_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function InstallGate({ orgId, player, onSkip }) {
+  const { canInstall, install } = useInstallPrompt();
+  const [installed, setInstalled] = useState(false);
+  const [code, setCode] = useState(null);
+  const [codeError, setCodeError] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const ios = isIOSDevice();
+  const inApp = inAppBrowserName();
+  const needsCode = ios || Boolean(inApp); // Android のホーム画面アプリはログインがそのまま残る
+  const requested = React.useRef(false);
+
+  const makeCode = async () => {
+    setCodeError(null);
+    setCopied(false);
     try {
-      await navigator.clipboard.writeText(link);
-      setCopied(true);
-    } catch {
-      window.prompt("このリンクをコピーしてください", link);
-      setCopied(true);
+      const r = await sbRpc("transfer_create", { p_org_id: orgId, p_player_id: player.id });
+      setCode(r?.code || null);
+    } catch (err) {
+      setCodeError(err.message);
     }
   };
+  useEffect(() => {
+    if (!needsCode || requested.current) return;
+    requested.current = true; // 二重に作ると先のコードが無効になるので、1回だけ
+    makeCode();
+  }, [needsCode]);
 
+  const copyText = code ? `RE:SPRINT 引き継ぎコード：${formatTransferCode(code)}` : "";
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(copyText);
+    } catch {
+      window.prompt("このコードをコピーしてください", copyText);
+    }
+    setCopied(true);
+  };
   const doInstall = async () => {
     const ok = await install();
     if (ok) setInstalled(true);
   };
+  const skip = () => {
+    try {
+      window.sessionStorage.setItem(INSTALL_SKIP_KEY, "1");
+    } catch {
+      // 覚えられなくても、この画面は閉じる
+    }
+    onSkip();
+  };
 
-  const copyButton = (
-    <button
-      onClick={copy}
-      className={`mt-2 w-full py-2.5 rounded-xl text-sm font-bold ${
-        copied ? "bg-green-600 text-white" : "bg-blue-600 text-white hover:bg-blue-700"
-      }`}
-    >
-      {copied ? "✓ コピーしました" : "招待リンクをコピーする"}
-    </button>
+  const codeBox = (
+    <div className="mt-2">
+      {code ? (
+        <>
+          <p className="text-2xl font-mono font-bold tracking-widest text-slate-800 text-center bg-slate-100 rounded-xl py-3 select-all">
+            {formatTransferCode(code)}
+          </p>
+          <button
+            onClick={copy}
+            className={`mt-2 w-full py-3 rounded-xl text-sm font-bold ${
+              copied ? "bg-green-600 text-white" : "bg-blue-600 text-white hover:bg-blue-700"
+            }`}
+          >
+            {copied ? "✓ コピーしました" : "引き継ぎコードをコピーする"}
+          </button>
+          <p className="text-[11px] text-slate-400 mt-1.5">
+            30分だけ有効です。
+            <button onClick={makeCode} className="underline ml-1">
+              作り直す
+            </button>
+          </p>
+        </>
+      ) : codeError ? (
+        <p className="text-xs text-red-500">
+          コードを作れませんでした：{codeError}
+          <button onClick={makeCode} className="underline ml-1">
+            もう一度
+          </button>
+        </p>
+      ) : (
+        <p className="text-xs text-slate-400 flex items-center gap-2">
+          <Loader2 size={12} className="animate-spin" /> コードを用意しています...
+        </p>
+      )}
+    </div>
   );
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/70 flex items-end sm:items-center justify-center print:hidden" role="dialog" aria-modal="true">
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto p-6 safe-bottom">
-        <div className="flex flex-col items-center text-center mb-5">
-          <img src="/apple-touch-icon.png" alt="" className="w-16 h-16 rounded-2xl shadow mb-3" />
-          <p className="text-xs text-green-700 font-bold mb-1">✓「{orgName}」にログインしました</p>
-          <h2 className="text-lg font-bold text-slate-800">ホーム画面に追加しましょう</h2>
-          <p className="text-xs text-slate-500 mt-1">
-            次からはホーム画面のアイコンを押すだけで開けます（1分で終わります）
+    <div className="fixed inset-0 z-50 bg-white overflow-y-auto print:hidden" role="dialog" aria-modal="true">
+      <div className="max-w-md mx-auto px-6 pt-10 pb-10 safe-top safe-bottom">
+        <div className="flex flex-col items-center text-center mb-6">
+          <img src="/apple-touch-icon.png" alt="" className="w-20 h-20 rounded-2xl shadow mb-4" />
+          <h2 className="text-xl font-bold text-slate-800">ホーム画面に追加してください</h2>
+          <p className="text-sm text-slate-500 mt-2 leading-relaxed">
+            RE:SPRINT は、ホーム画面のアイコンから開いて使います。
+            アイコンを押すだけで開け、通知も受け取れるようになります（1分で終わります）。
           </p>
         </div>
 
         {inApp ? (
-          <ol className="space-y-4">
+          <ol className="space-y-5">
             <GuideStep n={1} title={`${inApp} の中では追加できません`}>
               {ios ? (
                 <>画面の右下（または右上）の「…」や共有ボタンから、<b>「Safari で開く」</b>を選んでください。</>
               ) : (
                 <>画面の右上の「︙」から、<b>「他のアプリで開く」→ Chrome</b> を選んでください。</>
               )}
-              <br />開き直すと、自動でログインしてこの案内が出ます。
             </GuideStep>
-            <GuideStep n={2} title="うまく開けないときは">
-              リンクをコピーして、{ios ? "Safari" : "Chrome"} のアドレス欄に貼り付けて開いてください。
-              {copyButton}
+            <GuideStep n={2} title="開き直した画面で、引き継ぎコードを貼り付ける">
+              下のコードをコピーしておき、開き直したログイン画面の<b>「貼り付けて入る」</b>を押すと、そのまま続きから使えます。
+              {codeBox}
             </GuideStep>
           </ol>
         ) : ios ? (
-          <ol className="space-y-4">
-            <GuideStep n={1} title="招待リンクをコピーする">
-              ホーム画面のアプリで最初に1回だけ使います。
-              {copyButton}
+          <ol className="space-y-5">
+            <GuideStep n={1} title="引き継ぎコードをコピーする">
+              ホーム画面のアプリで最初に1回だけ使います（パスワードや暗証番号の入れ直しは要りません）。
+              {codeBox}
             </GuideStep>
             <GuideStep n={2} title="共有ボタンから「ホーム画面に追加」">
               Safari の画面の下（iPad は上）にある共有ボタン
@@ -2144,49 +2206,50 @@ function InstallGuide({ orgName, link, onClose }) {
               見当たらないときは一覧を下にスクロールしてください。
             </GuideStep>
             <GuideStep n={3} title="ホーム画面のアイコンから開いて、貼り付ける">
-              RE:SPRINT のアイコンを開き、<b>「コピーした招待リンクを貼り付けて入る」</b>を押します。
-              これで完了です。次からはアイコンを押すだけで開けます。
+              RE:SPRINT のアイコンを開き、<b>「貼り付けて入る」</b>を押します。
+              {player.name} さんのまま、続きから使えます。
             </GuideStep>
           </ol>
-        ) : android ? (
-          canInstall && !installed ? (
-            <ol className="space-y-4">
-              <GuideStep n={1} title="下のボタンを押して「追加」を選ぶ">
-                <button
-                  onClick={doInstall}
-                  className="mt-2 w-full py-3 rounded-xl bg-blue-600 text-white text-sm font-bold hover:bg-blue-700"
-                >
-                  ホーム画面に追加する
-                </button>
-              </GuideStep>
-              <GuideStep n={2} title="ホーム画面の RE:SPRINT アイコンから開く">
-                ログインしたままなので、アイコンを押すだけで使えます。
-              </GuideStep>
-            </ol>
-          ) : installed ? (
-            <p className="text-sm text-green-700 font-bold text-center py-4">
-              ✓ 追加しました。ホーム画面の RE:SPRINT アイコンから開けます。
+        ) : canInstall && !installed ? (
+          <ol className="space-y-5">
+            <GuideStep n={1} title="下のボタンを押して「インストール」を選ぶ">
+              <button
+                onClick={doInstall}
+                className="mt-2 w-full py-3.5 rounded-xl bg-blue-600 text-white text-base font-bold hover:bg-blue-700"
+              >
+                ホーム画面に追加する
+              </button>
+            </GuideStep>
+            <GuideStep n={2} title="ホーム画面の RE:SPRINT アイコンから開く">
+              ログインしたままなので、アイコンを押すだけで続きから使えます。
+            </GuideStep>
+          </ol>
+        ) : installed ? (
+          <div className="text-center py-6">
+            <CheckCircle2 size={40} className="text-green-600 mx-auto" />
+            <p className="text-base font-bold text-green-700 mt-3">追加しました</p>
+            <p className="text-sm text-slate-500 mt-1">
+              このページを閉じて、ホーム画面の RE:SPRINT アイコンから開いてください。
             </p>
-          ) : (
-            <ol className="space-y-4">
-              <GuideStep n={1} title="Chrome の右上「︙」を押す" />
-              <GuideStep n={2} title="「ホーム画面に追加」（または「アプリをインストール」）を選ぶ" />
-              <GuideStep n={3} title="ホーム画面の RE:SPRINT アイコンから開く">
-                ログインしたままなので、アイコンを押すだけで使えます。
-              </GuideStep>
-            </ol>
-          )
-        ) : null}
+          </div>
+        ) : (
+          <ol className="space-y-5">
+            <GuideStep n={1} title="ブラウザの右上「︙」を押す" />
+            <GuideStep n={2} title="「ホーム画面に追加」（または「アプリをインストール」）を選ぶ" />
+            <GuideStep n={3} title="ホーム画面の RE:SPRINT アイコンから開く">
+              ログインしたままなので、アイコンを押すだけで続きから使えます。
+            </GuideStep>
+          </ol>
+        )}
 
-        <button
-          onClick={onClose}
-          className="w-full mt-6 py-2.5 rounded-xl border border-slate-300 text-slate-600 text-sm font-medium hover:bg-slate-50"
-        >
-          {installed ? "閉じる" : "あとで（このまま使う）"}
-        </button>
-        <p className="text-[10px] text-slate-400 text-center mt-2">
-          あとで追加したいときは、選手画面の「使い方」タブに手順があります。
-        </p>
+        <div className="mt-10 pt-4 border-t border-slate-100 text-center">
+          <button onClick={skip} className="text-xs text-slate-400 underline py-2 px-3">
+            今回だけブラウザで使う
+          </button>
+          <p className="text-[10px] text-slate-300 mt-1">
+            追加できない端末のための入口です。次に開いたときは、またこの画面が出ます。
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -2234,13 +2297,42 @@ function OrgLogin({ onAuthed, invite }) {
 
   const handleLogin = () => loginWith(orgCode, password);
 
+  // 引き継ぎコード（ブラウザ側で作った8桁）で入る：組織と選手のログインがそのまま引き継がれる
+  const loginWithTransfer = async (code) => {
+    setError(null);
+    setBusy(true);
+    try {
+      await ensureAnonymousSession();
+      const r = await sbRpc("transfer_redeem", { p_code: code });
+      if (!r || !r.org) {
+        setError("引き継ぎコードが違うか、期限（30分）が切れています。ブラウザ側の画面で作り直してください。");
+        return;
+      }
+      if (r.player) {
+        // 選手のログインも引き継ぐ（暗証番号の入れ直しは不要）
+        writeSession(PLAYER_SESSION_KEY, { orgId: r.org.id, id: r.player.id, name: r.player.name });
+      }
+      setInviteText("");
+      onAuthed({ id: r.org.id, name: r.org.name });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleInvite = (text) => {
     const inv = parseInvite(text);
-    if (!inv) {
-      setError("招待リンクを読み取れませんでした。管理者から届いたリンクをそのまま貼り付けてください。");
+    if (inv) {
+      loginWith(inv.o, inv.p, { fromInvite: true });
       return;
     }
-    loginWith(inv.o, inv.p, { fromInvite: true });
+    const code = parseTransferCode(text);
+    if (code) {
+      loginWithTransfer(code);
+      return;
+    }
+    setError("招待リンク・引き継ぎコードを読み取れませんでした。コピーしたものをそのまま貼り付けてください。");
   };
 
   const pasteInvite = async () => {
@@ -2291,9 +2383,9 @@ function OrgLogin({ onAuthed, invite }) {
         </p>
       )}
       <div className="rounded-xl border border-blue-100 bg-blue-50 p-3 mb-5">
-        <p className="text-xs font-bold text-blue-700 mb-1">招待リンクで入る</p>
+        <p className="text-xs font-bold text-blue-700 mb-1">招待リンク・引き継ぎコードで入る</p>
         <p className="text-[11px] text-blue-700/80 leading-relaxed mb-2">
-          管理者から届いたリンクをコピーして、ここで貼り付けるだけで入れます。
+          管理者から届いたリンク、またはブラウザ側の画面でコピーした引き継ぎコードを、ここで貼り付けるだけで入れます。
         </p>
         <button
           type="button"
@@ -2301,13 +2393,13 @@ function OrgLogin({ onAuthed, invite }) {
           disabled={busy}
           className="w-full py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:bg-slate-300 mb-2"
         >
-          コピーした招待リンクを貼り付けて入る
+          貼り付けて入る
         </button>
         <input
           value={inviteText}
           onChange={(e) => {
             setInviteText(e.target.value);
-            if (parseInvite(e.target.value)) handleInvite(e.target.value);
+            if (parseInvite(e.target.value) || parseTransferCode(e.target.value)) handleInvite(e.target.value);
           }}
           placeholder="ここに長押しで貼り付けてもOK"
           autoCapitalize="none"
@@ -2771,7 +2863,18 @@ function CoachDashboard({
           setPhaseMenus={setPhaseMenus}
         />
       )}
-      {subTab === "scheduling" && <CoachScheduling orgId={orgId} slots={slots} setSlots={setSlots} />}
+      {subTab === "scheduling" && (
+        <div className="space-y-6">
+          <MeetingsBoard
+            slots={slots}
+            setSlots={setSlots}
+            coachPlayers={coachPlayers}
+            setCoachPlayers={setCoachPlayers}
+            onOpenPlayers={() => setSubTab("players")}
+          />
+          <CoachScheduling orgId={orgId} slots={slots} setSlots={setSlots} />
+        </div>
+      )}
       {subTab === "settings" && (
         <div className="max-w-md mx-auto space-y-5">
           <NotifyToggle orgId={orgId} role="coach" />
@@ -2885,6 +2988,207 @@ function CoachSettings({ orgId }) {
 }
 
 // ---------- 日程調整：3者の空き時間登録 → 自動照合 → 公開 ----------
+// ---------- 日程調整：決まった面談・公開中の枠の一覧 ----------
+//   ・これからの面談：選手名・日時・参加できるスタッフ・オンライン会議URL・予約の取り消し
+//   ・公開中の枠：まだ予約のない枠（公開をやめられる）
+//   ・終わった面談：日時を過ぎたもの
+function MeetingsBoard({ slots, setSlots, coachPlayers, setCoachPlayers, onOpenPlayers }) {
+  const [error, setError] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+  const [showPast, setShowPast] = useState(false);
+  const now = new Date();
+  const byTime = (a, b) => a.datetime.localeCompare(b.datetime);
+  const isFuture = (s) => parseDatetime(s.datetime) > now;
+  const upcoming = slots.filter((s) => s.bookedBy && isFuture(s)).sort(byTime);
+  const open = slots.filter((s) => !s.bookedBy && isFuture(s)).sort(byTime);
+  const past = slots.filter((s) => s.bookedBy && !isFuture(s)).sort(byTime).reverse();
+  const playerOf = (id) => coachPlayers.find((p) => p.id === id) || null;
+  const rolesOf = (s) => (s.matchedRoles || []).map((r) => SCHEDULING_ROLE_LABELS[r] || r).join("・");
+
+  const saveZoomUrl = async (slotId, url) => {
+    setError(null);
+    try {
+      await sbUpdate("slots", slotId, { zoom_url: url.trim() || null });
+      setSlots((prev) => prev.map((s) => (s.id === slotId ? { ...s, zoomUrl: url.trim() || null } : s)));
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  // 予約の取り消し：枠を空きに戻し、選手にチャットで知らせる（通知も届く）
+  const cancelBooking = async (slot) => {
+    const player = playerOf(slot.bookedBy);
+    const name = player?.name ?? "この選手";
+    if (!window.confirm(`${name} の面談（${slot.datetime}）の予約を取り消しますか？\n\n枠は空きに戻り、選手にはチャットで知らせます。`)) return;
+    setBusyId(slot.id);
+    setError(null);
+    try {
+      await sbUpdate("slots", slot.id, { booked_by: null });
+      if (player) {
+        await sbUpdate("players", player.id, { booked_slot_id: null });
+        const [msg] = await sbInsert("messages", {
+          player_id: player.id,
+          sender: "staff",
+          staff_role: "coach",
+          content: `【面談の取り消し】${slot.datetime} の面談の予約を取り消しました。あらためて日程を相談させてください。`,
+        });
+        setCoachPlayers((prev) =>
+          prev.map((p) =>
+            p.id === player.id
+              ? { ...p, bookedSlotId: null, messages: msg ? [...p.messages, normalizeMessage(msg)] : p.messages }
+              : p
+          )
+        );
+      }
+      setSlots((prev) => prev.map((s) => (s.id === slot.id ? { ...s, bookedBy: null } : s)));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // 公開をやめる（まだ予約のない枠だけ）
+  const removeOpenSlot = async (slot) => {
+    if (!window.confirm(`${slot.datetime} の枠の公開をやめますか？`)) return;
+    setBusyId(slot.id);
+    setError(null);
+    try {
+      await sbDelete("slots", slot.id);
+      setSlots((prev) => prev.filter((s) => s.id !== slot.id));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-5">
+      <h3 className="font-bold text-slate-700 text-sm mb-1 flex items-center gap-1.5">
+        <CalendarClock size={16} className="text-blue-600" /> 決まった面談
+        <span className="text-xs font-normal text-slate-400">これから {upcoming.length}件</span>
+      </h3>
+      {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
+
+      {upcoming.length === 0 ? (
+        <p className="text-sm text-slate-400 py-2">これからの面談の予約はありません。</p>
+      ) : (
+        <ul className="space-y-2 mt-2">
+          {upcoming.map((s) => {
+            const player = playerOf(s.bookedBy);
+            return (
+              <li key={s.id} className="border border-blue-200 bg-blue-50/50 rounded-lg p-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-slate-800">{s.datetime}</p>
+                    <p className="text-sm text-slate-700 break-words">{player?.name ?? "（選手が見つかりません）"}</p>
+                    <p className="text-[11px] text-slate-500">
+                      {rolesOf(s) || "参加スタッフ未設定"}
+                      {player?.injuryDate ? `・受傷後${diffDaysBetween(player.injuryDate, s.datetime)}日` : ""}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => cancelBooking(s)}
+                    disabled={busyId === s.id}
+                    className="shrink-0 px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs text-slate-600 hover:text-red-600 hover:border-red-300 disabled:opacity-40"
+                  >
+                    予約を取り消す
+                  </button>
+                </div>
+                <MeetingUrlField slot={s} onSave={saveZoomUrl} />
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <h4 className="font-bold text-slate-600 text-xs mt-5 mb-1">公開中の枠（まだ予約なし）{open.length}件</h4>
+      {open.length === 0 ? (
+        <p className="text-xs text-slate-400">公開中の空き枠はありません。下の「自動照合して公開」で枠を公開できます。</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {open.map((s) => (
+            <li key={s.id} className="flex items-center justify-between gap-2 border border-slate-200 rounded-lg px-3 py-2">
+              <span className="text-sm text-slate-700">
+                {s.datetime}
+                <span className="block text-[11px] text-slate-400">{rolesOf(s)}</span>
+              </span>
+              <button
+                onClick={() => removeOpenSlot(s)}
+                disabled={busyId === s.id}
+                className="shrink-0 px-3 py-2 rounded-lg text-xs text-slate-500 border border-slate-200 hover:text-red-600 hover:border-red-300 disabled:opacity-40"
+              >
+                公開をやめる
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {past.length > 0 && (
+        <div className="mt-5">
+          <button onClick={() => setShowPast((v) => !v)} className="text-xs text-blue-600 underline py-2">
+            終わった面談 {past.length}件を{showPast ? "閉じる" : "見る"}
+          </button>
+          {showPast && (
+            <ul className="space-y-1 mt-1">
+              {past.map((s) => (
+                <li key={s.id} className="flex items-center justify-between gap-2 bg-slate-50 rounded-lg px-3 py-2 text-xs">
+                  <span className="text-slate-600">
+                    {s.datetime}・{playerOf(s.bookedBy)?.name ?? "（選手が見つかりません）"}
+                  </span>
+                  <span className="font-bold text-green-600 shrink-0">実施済み</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+      <p className="text-[11px] text-slate-400 mt-4">
+        選手ごとの記録は
+        <button onClick={onOpenPlayers} className="underline mx-0.5">
+          「選手」タブ
+        </button>
+        の詳細でも見られます。
+      </p>
+    </div>
+  );
+}
+
+// オンライン会議URLの入力（面談1件ごと）
+function MeetingUrlField({ slot, onSave }) {
+  const [url, setUrl] = useState(slot.zoomUrl || "");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  return (
+    <div className="flex items-center gap-2 mt-2">
+      <Video size={14} className="text-slate-400 shrink-0" />
+      <input
+        value={url}
+        onChange={(e) => {
+          setUrl(e.target.value);
+          setSaved(false);
+        }}
+        placeholder="オンライン会議URL（Zoomなど・任意）"
+        className="flex-1 min-w-0 border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
+      />
+      <button
+        onClick={async () => {
+          setSaving(true);
+          await onSave(slot.id, url);
+          setSaving(false);
+          setSaved(true);
+        }}
+        disabled={saving}
+        className="shrink-0 px-3 py-2 rounded-lg bg-slate-800 text-white text-xs font-medium disabled:bg-slate-300"
+      >
+        {saved ? "保存済み" : "保存"}
+      </button>
+    </div>
+  );
+}
+
 function CoachScheduling({ orgId, slots, setSlots }) {
   const [availability, setAvailability] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -4860,12 +5164,15 @@ function GatePanel({
         )}
       </div>
 
-      <input
-        value={checkerName}
-        onChange={(e) => setCheckerName(e.target.value)}
-        placeholder={viewerRole === "self" ? "あなたの名前（任意）" : "確認した人（任意）"}
-        className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-3"
-      />
+      {/* 確認した人の名前は、スタッフが記録するときだけ（選手本人は、ログインしている本人なので不要） */}
+      {viewerRole === "staff" && (
+        <input
+          value={checkerName}
+          onChange={(e) => setCheckerName(e.target.value)}
+          placeholder="確認した人（任意）"
+          className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-3"
+        />
+      )}
 
       {!allOk && missing.length > 0 && (
         <div className="mt-3 bg-slate-50 rounded-lg px-3 py-2">
@@ -5850,7 +6157,18 @@ function GuideCard({ n, title, tab, onGo, goLabel, children, art }) {
   );
 }
 
-function UsageGuideTab({ onGoTab, protocol }) {
+function UsageGuideTab({ onGoTab, protocol, onReachEnd }) {
+  // 一番下まで読んだら知らせる
+  const endRef = React.useRef(null);
+  useEffect(() => {
+    const el = endRef.current;
+    if (!el || !onReachEnd || typeof IntersectionObserver === "undefined") return undefined;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) onReachEnd();
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
   // 「続ける種目」の説明は、その設定を持つプロトコルの選手にだけ出す
   const rule = protocol?.continueRule ?? null;
   const total = protocol ? phaseCountOf(protocol) : 0;
@@ -6050,8 +6368,8 @@ function UsageGuideTab({ onGoTab, protocol }) {
         <p>「その他」で受傷日を登録すると、同じ怪我を完遂した先輩たちの平均期間が目安として表示されます。</p>
       </GuideCard>
 
-      {/* ホーム画面にまだ追加していないときだけ出る（追加済み・パソコンでは何も出ない） */}
-      <InstallHint className="" />
+      {/* ここまで読んだことを知るための目印。スマホのブラウザでは、ここで「ホーム画面に追加」の画面に切り替わる */}
+      <div ref={endRef} className="h-px" aria-hidden="true" />
     </>
   );
 }
@@ -6233,11 +6551,16 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
   // この端末で初めてこの選手としてログインしたときは「使い方」を開く
   const TAB_KEY = "resprint.playerTab";
   const guideSeenKey = `resprint.guideSeen.${player.id}`;
+  // 初めてこの選手として開いたか（この画面を開いている間は変わらない）
+  const [firstVisit] = useState(() => readDraft(guideSeenKey) === null);
+  // 使い方を一番下まで読んだか／「今回だけブラウザで使う」を選んだか
+  const [guideRead, setGuideRead] = useState(false);
+  const [installSkip, setInstallSkip] = useState(() => installSkipped());
+  useEffect(() => {
+    if (firstVisit) writeDraft(guideSeenKey, 1);
+  }, []);
   const [tab, setTab] = useState(() => {
-    if (readDraft(guideSeenKey) === null) {
-      writeDraft(guideSeenKey, 1);
-      return "guide";
-    }
+    if (firstVisit) return "guide";
     try {
       const t = window.sessionStorage.getItem(TAB_KEY);
       return PLAYER_TAB_DEFS.some((d) => d.key === t) ? t : "home";
@@ -6989,7 +7312,15 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
         </>
       )}
 
-      {tab === "guide" && <UsageGuideTab onGoTab={changeTab} protocol={protocol} />}
+      {tab === "guide" && (
+        <UsageGuideTab onGoTab={changeTab} protocol={protocol} onReachEnd={() => setGuideRead(true)} />
+      )}
+
+      {/* スマホのブラウザで開いているとき：ホーム画面に追加するまで、この画面で止める
+          （初めての選手は、使い方を最後まで読むまでは出さない） */}
+      {needsInstall() && !installSkip && !(firstVisit && tab === "guide" && !guideRead) && (
+        <InstallGate orgId={orgId} player={player} onSkip={() => setInstallSkip(true)} />
+      )}
 
       {/* 画面下のタブ（親指で届く位置） */}
       <nav

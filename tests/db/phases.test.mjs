@@ -488,6 +488,32 @@ ok(!(await run("supabase_rollback_v27.sql")) && (await db.query("select to_regpr
 ok(!(await run2("insert into messages (player_id, sender, content) values ('p-b1','player','戻した後')")), "[v27] 戻した後もチャットは動く");
 ok(!(await run("supabase_migration_v27_push.sql")), "[v27] 戻した後にもう一度適用できる");
 
+// ===== v28：引き継ぎコード =====
+ok(!(await run("supabase_migration_v28_transfer_code.sql")), "[v28] 適用 1 回目");
+ok(!(await run("supabase_migration_v28_transfer_code.sql")), "[v28] 適用 2 回目（冪等）");
+const tc = one(await as(U4, "select public.transfer_create('comm-b','p-b1')"));
+ok(/^\d{8}$/.test(tc?.code || ""), "[v28] ログイン中の端末は、8桁の引き継ぎコードを作れる");
+ok(!!(await as(U1, "select public.transfer_create('comm-b','p-b1')")).error, "[v28] その組織にログインしていない人は作れない");
+ok(!!(await as(U4, "select public.transfer_create('comm-b','p1')")).error, "[v28] ほかの組織の選手のコードは作れない");
+const U6 = randomUUID();
+await db.exec(`insert into auth.users (id, is_anonymous) values ('${U6}', true)`);
+ok((await as(U6, "select count(*)::int as n from players where org_id = 'comm-b'")).rows?.[0]?.n === 0, "[v28] 引き継ぐ前の新しい端末は、選手を読めない");
+ok(one(await as(U6, "select public.transfer_redeem('00000000')")) === null, "[v28] 間違ったコードでは入れない");
+const rd = one(await as(U6, `select public.transfer_redeem('${tc.code.slice(0, 4)} ${tc.code.slice(4)}')`));
+ok(rd?.org?.id === "comm-b" && rd?.player?.id === "p-b1" && rd.player.name === "B の選手", "[v28] 正しいコード（空白入りでも）で、組織と選手が引き継がれる");
+ok((await as(U6, "select count(*)::int as n from players where org_id = 'comm-b'")).rows?.[0]?.n >= 1, "[v28] 引き継いだ端末は、その組織のデータを読める");
+ok(one(await as(U6, `select public.transfer_redeem('${tc.code}')`))?.org?.id === "comm-b", "[v28] 期限内なら貼り直しても使える");
+const tc2 = one(await as(U4, "select public.transfer_create('comm-b')"));
+ok(tc2.code !== tc.code && one(await as(U6, `select public.transfer_redeem('${tc.code}')`)) === null, "[v28] 作り直すと、前のコードは使えなくなる");
+ok(one(await as(U6, `select public.transfer_redeem('${tc2.code}')`))?.player === null, "[v28] 選手なし（組織だけ）の引き継ぎもできる");
+await db.exec("update resprint_private.transfer_codes set expires_at = now() - interval '1 minute'");
+ok(one(await as(U6, `select public.transfer_redeem('${tc2.code}')`)) === null, "[v28] 期限（30分）を過ぎたコードは使えない");
+ok(!!(await as(U6, "select * from resprint_private.transfer_codes")).error, "[v28] コードの表はアプリから読めない");
+const U7 = randomUUID();
+await db.exec(`insert into auth.users (id, is_anonymous) values ('${U7}', true)`);
+for (let i = 0; i < 10; i++) await as(U7, `select public.transfer_redeem('1111${String(1000 + i)}')`);
+ok(/間違いが続いた/.test((await as(U7, "select public.transfer_redeem('12345678')")).error || ""), "[v28] 10回間違えると15分止まる");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

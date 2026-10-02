@@ -80,6 +80,8 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/rpc/org_login") return { id: "default", name: "テスト組織" };
   if (p === "/rest/v1/rpc/org_renew") return true;
   if (p === "/rest/v1/rpc/coach_check") return { set: true, ok: json?.p_password === "coach" };
+  if (p === "/rest/v1/rpc/transfer_create") { st.transferCreated = (st.transferCreated || 0) + 1; return { code: "48151623", expires_at: iso(new Date(Date.now() + 1800000)) }; }
+  if (p === "/rest/v1/rpc/transfer_redeem") return json?.p_code === "48151623" ? { org: { id: "default", name: "テスト組織" }, player: { id: "p-1", name: "山田 太郎" } } : null;
   if (p === "/rest/v1/organizations") return [{ id: "default", name: "テスト組織" }];
   if (p === "/rest/v1/protocols") return [protocol, otherProtocol];
   if (p === "/rest/v1/player_directory") return [{ id: "p-1", name: "山田 太郎" }];
@@ -104,7 +106,8 @@ function respond(st, url, method, body) {
   if (method !== "GET") return [Array.isArray(json) ? json[0] : json || {}];
   return [];
 }
-async function newPage(st, { seenGuide = true } = {}) {
+// skipInstall：スマホのブラウザで出る「ホーム画面に追加」の全画面を、あらかじめ「今回だけブラウザで使う」にしておく
+async function newPage(st, { seenGuide = true, skipInstall = true } = {}) {
   const ctx = await browser.createBrowserContext();
   const p = await ctx.newPage();
   await p.emulate({ viewport: { width: 390, height: 844, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -117,7 +120,7 @@ async function newPage(st, { seenGuide = true } = {}) {
     if (r.method() === "OPTIONS") return r.respond({ status: 204, headers: cors });
     r.respond({ status: 200, contentType: "application/json", headers: cors, body: JSON.stringify(respond(st, r.url(), r.method(), r.postData())) });
   });
-  await p.evaluateOnNewDocument((seen) => { try { localStorage.setItem("resprint.installGuideSeen", "1"); if (seen) localStorage.setItem("resprint.guideSeen.p-1", "1"); } catch {} }, seenGuide);
+  await p.evaluateOnNewDocument((seen, skip) => { try { if (seen) localStorage.setItem("resprint.guideSeen.p-1", "1"); if (skip) sessionStorage.setItem("resprint.installSkip", "1"); } catch {} }, seenGuide, skipInstall);
   return p;
 }
 const text = (p) => p.evaluate(() => document.body.innerText);
@@ -173,6 +176,45 @@ try {
     await clickText(p, "ホーム", "nav button"); await sleep(300);
     ok(!(await text(p)).includes("面談をしましょう"), "受傷から2週間たっていない選手には、面談の案内は出ない");
     ok(p.errs.length === 0, "例外なし " + p.errs.join("|"));
+  });
+
+  await step("選手：ホーム画面への追加（全画面）と引き継ぎコード", async () => {
+    const st = makeState({ injuryDaysAgo: 3 });
+    const p = await newPage(st, { seenGuide: false, skipInstall: false });
+    await playerLogin(p);
+    let t = await text(p);
+    ok(t.includes("毎日、日報を送る") && !t.includes("ホーム画面に追加してください"), "初めての選手：使い方を読んでいる間は、追加の画面は出ない");
+    await p.evaluate(() => window.scrollTo(0, document.body.scrollHeight)); await sleep(1200);
+    t = await text(p);
+    ok(t.includes("ホーム画面に追加してください") && t.includes("引き継ぎコードをコピーする"), "使い方を一番下まで読むと、全画面の「ホーム画面に追加してください」に切り替わる");
+    ok(t.includes("4815 1623") && st.transferCreated === 1, "iPhone では引き継ぎコードが1回だけ作られて表示される");
+    ok(await p.evaluate(() => !document.elementFromPoint(195, 820).closest("nav")), "追加の画面が全体を覆い、下のタブは押せない");
+    ok(await noOverflow(p), "横にはみ出さない");
+    await clickText(p, "今回だけブラウザで使う"); await sleep(500);
+    t = await text(p);
+    ok(!t.includes("ホーム画面に追加してください") && t.includes("毎日、日報を送る"), "「今回だけブラウザで使う」で先へ進める");
+    await clickText(p, "ホーム", "nav button"); await sleep(400);
+    ok(!(await text(p)).includes("あなたの名前") && !(await p.$('input[placeholder^="あなたの名前"]')), "GATE に「あなたの名前」の入力欄は出ない");
+    ok(p.errs.length === 0, "例外なし " + p.errs.join("|"));
+
+    // 2回目以降（使い方は既読）：開いたらすぐ追加の画面
+    const p2 = await newPage(makeState({ injuryDaysAgo: 3 }), { seenGuide: true, skipInstall: false });
+    await playerLogin(p2);
+    ok((await text(p2)).includes("ホーム画面に追加してください"), "登録済みの選手がスマホのブラウザで開くと、すぐ追加の画面になる");
+
+    // ホーム画面のアプリ側：引き継ぎコードを貼ると、組織・選手のログインがそのまま引き継がれる
+    const p3 = await newPage(makeState({ injuryDaysAgo: 3 }));
+    await p3.goto(BASE, { waitUntil: "networkidle0" });
+    t = await text(p3);
+    ok(t.includes("招待リンク・引き継ぎコードで入る") && t.includes("貼り付けて入る"), "ログイン画面に、引き継ぎコードの貼り付け口がある");
+    const box = 'input[placeholder^="ここに長押し"]';
+    await p3.type(box, "RE:SPRINT 引き継ぎコード：9999 9999"); await sleep(1200);
+    ok((await text(p3)).includes("引き継ぎコードが違うか"), "違うコードでは入れず、案内が出る");
+    await p3.click(box, { clickCount: 3 }); await p3.keyboard.press("Backspace");
+    await p3.type(box, "RE:SPRINT 引き継ぎコード：4815 1623"); await sleep(2500);
+    t = await text(p3);
+    ok(t.includes("山田 太郎 さん") && !t.includes("あなたの名前を選んでください"), "正しいコードを貼ると、暗証番号なしでその選手の画面が開く");
+    ok(p3.errs.length === 0, "例外なし " + p3.errs.join("|"));
   });
 
   await step("選手：面談の案内と予約", async () => {
@@ -268,9 +310,32 @@ try {
     await clickText(p, "日程調整", "nav button"); await sleep(900);
     t = await text(p);
     ok(t.includes("2人以上") && (t.match(/公開対象/g) || []).length === 1, "コーチ＋ドクターの2人が一致した日時だけが公開対象（1人だけの日時は対象外）");
+    ok(t.includes("決まった面談") && t.includes("公開中の枠（まだ予約なし）1件"), "日程調整に、決まった面談と公開中の枠の一覧がある");
     await clickText(p, "自動照合して公開"); await sleep(900);
     const posted = st.posts.find((x) => x.p === "/rest/v1/slots");
     ok(posted?.b?.length === 1 && posted.b[0].matched_roles.sort().join() === "coach,doctor", "公開されるのは2人以上が一致した枠だけ");
+    ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
+  });
+
+  await step("指導者：決まった面談の管理", async () => {
+    const st = makeState({ injuryDaysAgo: 20, booked: true });
+    const p = await newPage(st);
+    const confirms = []; p.on("dialog", async (d) => { confirms.push(d.message()); await d.accept(); });
+    await coachLogin(p);
+    await clickText(p, "日程調整", "nav button"); await sleep(900);
+    let t = await text(p);
+    ok(t.includes("これから 1件") && t.includes("山田 太郎") && t.includes("コーチ・ドクター") && t.includes("受傷後23日"), "決まった面談に、日時・選手名・参加スタッフ・受傷後の日数が出る");
+    await p.type('input[placeholder^="オンライン会議URL"]', "https://zoom.example/j/1");
+    await clickText(p, "保存"); await sleep(600);
+    ok(st.patches.some((x) => x.p === "/rest/v1/slots" && x.b.zoom_url === "https://zoom.example/j/1"), "オンライン会議URLを保存できる");
+    await clickText(p, "予約を取り消す"); await sleep(1200);
+    t = await text(p);
+    ok(confirms.length === 1 && st.patches.some((x) => x.p === "/rest/v1/slots" && x.b.booked_by === null)
+       && st.patches.some((x) => x.p === "/rest/v1/players" && x.b.booked_slot_id === null), "予約を取り消すと、枠が空きに戻る（確認つき）");
+    ok(st.posts.some((x) => x.p === "/rest/v1/messages" && x.b.sender === "staff" && x.b.content.includes("【面談の取り消し】")), "取り消しは選手にチャットで知らされる");
+    ok(t.includes("これから 0件") && t.includes("公開中の枠（まだ予約なし）1件"), "一覧がすぐ更新される（枠は公開中に戻る）");
+    await clickText(p, "公開をやめる"); await sleep(800);
+    ok((await text(p)).includes("公開中の枠（まだ予約なし）0件"), "予約のない枠は、公開をやめられる");
     ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
   });
 } finally {
