@@ -408,6 +408,37 @@ try {
     ok(t.includes("今日の日報 0/1") && t.includes("日報なし"), "指導者の一覧に「今日の日報 0/1」と「日報なし」が出る");
   });
 
+  await step("指導者：選手の詳細をタブで分ける", async () => {
+    const st = makeState({ injuryDaysAgo: 3 });
+    st.messages.push({ id: 6, player_id: "p-1", sender: "player", content: "質問があります", is_read: false, created_at: iso(now) });
+    const c = await newPage(st);
+    await coachLogin(c);
+    let t = await text(c);
+    const chips = await c.$$eval("button", (a) => a.map((n) => n.innerText.replace(/\d+/g, "").trim()).filter((x) => ["日報", "GATE", "メニュー", "記録", "チャット"].includes(x)));
+    ok(["日報", "GATE", "記録", "チャット"].every((x) => chips.includes(x)), "選手の詳細に「日報／GATE／メニュー／記録／チャット」の切り替えがある");
+    ok(t.includes("本日の日報") && !t.includes("治療介入の記録") && !t.includes("さんとのチャット"), "最初は日報だけが出る（1ページに全部は並べない）");
+    ok(!st.patches.some((x) => x.p === "/rest/v1/messages"), "選手を開いただけでは、チャットを既読にしない");
+    const h1 = await c.evaluate(() => document.documentElement.scrollHeight);
+    ok(h1 < 2600, "詳細の長さが短くなった（" + h1 + "px。以前は約4,700px）");
+    await clickText(c, "チャット"); await sleep(900);
+    t = await text(c);
+    ok(t.includes("質問があります") && st.patches.some((x) => x.p === "/rest/v1/messages" && x.b.is_read === true), "チャットのタブを開くと、メッセージが見えて既読になる");
+    await clickText(c, "記録"); await sleep(500);
+    ok((await text(c)).includes("治療介入の記録"), "記録のタブに、治療の記録などがある");
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+
+    // 選手側：重複していた表示・空のカードが出ない
+    const p = await newPage(makeState({ injuryDaysAgo: 3 }));
+    await playerLogin(p);
+    t = await text(p);
+    ok(!t.includes("足りないもの") && !t.includes("現在のステップ"), "選手ホーム：条件の繰り返し表示をやめた");
+    await clickText(p, "メニュー", "nav button"); await sleep(900);
+    t = await text(p);
+    ok(!t.includes("患部外トレーニング") && !t.includes("いまの PHASE のメニュー"), "メニュー：中身のないカードは出さない");
+    await clickText(p, "その他", "nav button"); await sleep(900);
+    ok(!(await text(p)).includes("未到達"), "その他：記録のない PHASE の空の棒を並べない");
+  });
+
   await step("表記の統一", async () => {
     const bad = /Phase |フェーズ|スタッフ|Supabase|おかえりなさい|🏃|📋|📎|⚠️|v15\./;
     const p = await newPage(makeState({ injuryDaysAgo: 20 }));

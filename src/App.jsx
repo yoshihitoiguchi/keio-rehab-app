@@ -257,7 +257,7 @@ function safeHref(url) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.14";
+const APP_BUILD = "v15.15";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -774,15 +774,17 @@ function StandingNotice() {
 }
 
 // 「今日の入力に当てはまる基準」を並べて示すだけのコンポーネント
-function CriteriaResult({ report }) {
+function CriteriaResult({ report, staffView }) {
   const matched = matchedCriteria(report);
   return (
     <div className="space-y-2">
-      <div className="bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
-        <p className="text-xs text-blue-700 font-bold">入力はチーム全員に共有されました</p>
-      </div>
+      {!staffView && (
+        <div className="bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
+          <p className="text-xs text-blue-700 font-bold">指導者に送信しました</p>
+        </div>
+      )}
       <div>
-        <p className="text-xs font-bold text-slate-700 mb-1.5">今日の入力に当てはまる基準</p>
+        {!staffView && <p className="text-xs font-bold text-slate-700 mb-1.5">今日の入力に当てはまる基準</p>}
         {matched.length === 0 ? (
           <div className="border border-slate-200 rounded-lg px-3 py-2">
             <p className="text-sm text-slate-700">継続</p>
@@ -3851,7 +3853,7 @@ function MenuLibraryManagement({ orgId, masterProtocols, phaseMenus, setPhaseMen
 function PhaseMenuCatalog({ menus, protocolId, phaseNumber }) {
   const relevant = menus.filter((m) => m.protocolId === protocolId && m.phaseNumber === phaseNumber);
   if (relevant.length === 0) {
-    return <p className="text-sm text-slate-400">このPhaseに登録されたメニューはまだありません。</p>;
+    return <p className="text-sm text-slate-400">この PHASE のメニューは、まだありません。</p>;
   }
   return (
     <div className="space-y-3">
@@ -4665,6 +4667,14 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
   );
 }
 
+const DETAIL_TABS = [
+  { key: "report", label: "日報" },
+  { key: "gate", label: "GATE" },
+  { key: "menu", label: "メニュー" },
+  { key: "record", label: "記録" },
+  { key: "chat", label: "チャット" },
+];
+
 function PlayerDetailPanel({
   orgId,
   player,
@@ -4692,7 +4702,14 @@ function PlayerDetailPanel({
   // モックではなく、指導者が読み込んでいる実際の選手一覧が計算元になる。
   const avg = protocol ? computeAvgRecoveryFromPlayers(allPlayers, protocol.id) : null;
 
+  // 詳細の中のタブ。選手を切り替えたら「日報」に戻す
+  const [dtab, setDtab] = useState("report");
+  useEffect(() => setDtab("report"), [player.id]);
+  const unreadChat = player.messages.filter((m) => m.sender === "player" && !m.isRead).length;
+
+  // チャットのタブを開いたときに、選手からのメッセージを既読にする
   useEffect(() => {
+    if (dtab !== "chat" || unreadChat === 0) return;
     const markRead = async () => {
       try {
         await sb(
@@ -4711,7 +4728,7 @@ function PlayerDetailPanel({
       }
     };
     markRead();
-  }, [player.id]);
+  }, [player.id, dtab, unreadChat]);
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -4796,159 +4813,199 @@ function PlayerDetailPanel({
           </div>
         </div>
 
-        <MeetingReminder player={player} slots={slots} viewer="staff" />
-
-        <ConsultationInbox player={player} onClose={onCloseConsultation} />
-
-        <div className="bg-white rounded-xl border border-slate-200 p-5">
-          <h4 className="text-sm font-bold text-slate-700 mb-3">本日の日報</h4>
-          {!report && <p className="text-sm text-slate-400">まだ報告がありません。</p>}
-          {report && (
-            <div className="grid grid-cols-3 gap-3">
-              <div className="bg-slate-50 rounded-lg p-3 text-center">
-                <p className="text-xs text-slate-400 mb-1">痛み(VAS)</p>
-                <p className="text-2xl font-bold text-slate-800">{report.vas}</p>
-              </div>
-              <div className="bg-slate-50 rounded-lg p-3 text-center">
-                <p className="text-xs text-slate-400 mb-1">メンタル</p>
-                <p className="text-2xl">{MENTAL_FACES[report.mental - 1]}</p>
-              </div>
-              <div className="bg-slate-50 rounded-lg p-3 text-center flex flex-col justify-center">
-                <p className="text-xs text-slate-400 mb-1">SOS</p>
-                <p className={`text-sm font-bold ${player.sos ? "text-red-500" : "text-slate-400"}`}>
-                  {player.sos ? "あり" : "なし"}
-                </p>
-              </div>
-              <div className="bg-slate-50 rounded-lg p-3 text-center">
-                <p className="text-xs text-slate-400 mb-1">疲労度</p>
-                <p className="text-2xl font-bold text-orange-500">{report.fatigue ?? "-"}</p>
-              </div>
-              <div className="bg-slate-50 rounded-lg p-3 text-center">
-                <p className="text-xs text-slate-400 mb-1">睡眠の質</p>
-                <p className="text-2xl font-bold text-blue-500">{report.sleepQuality ?? "-"}</p>
-              </div>
-              <div className="col-span-3 bg-slate-50 rounded-lg p-3">
-                <p className="text-xs text-slate-400 mb-1">本音</p>
-                <p className="text-sm text-slate-700">{report.honne || "（未記入）"}</p>
-              </div>
-            </div>
-          )}
-          {report && (
-            <ObservationRecord
-              key={report.id}
-              report={{
-                ...report,
-                prevVas:
-                  player.reports.length > 1 ? player.reports[player.reports.length - 2].vas : null,
-              }}
-              onAssess={onAssessReport}
-            />
-          )}
-          {player.reports.length > 1 && (
-            <div className="mt-4 pt-4 border-t border-slate-100">
-              <p className="text-xs font-bold text-slate-600 mb-2">コンディション推移（直近14件）</p>
-              <SimpleTrendChart reports={player.reports} />
-            </div>
-          )}
-        </div>
-
-        <GatePanel
-          orgId={orgId}
-          player={player}
-          protocol={protocol}
-          phaseInfo={phaseInfo}
-          viewerRole="staff"
-        />
-
-        <ImagingFindingsCard player={player} onSave={onSaveImagingFindings} />
-
-        <AthleteMetricsCard
-          player={player}
-          onSaved={(patch) =>
-            setCoachPlayers((prev) => prev.map((p) => (p.id === player.id ? { ...p, ...patch } : p)))
-          }
-        />
-
-        <HamstringClassificationCard
-          orgId={orgId}
-          player={player}
-          protocol={protocol}
-          onSaved={(patch) =>
-            setCoachPlayers((prev) => prev.map((p) => (p.id === player.id ? { ...p, ...patch } : p)))
-          }
-        />
-
-        <CumulativeMenuPanel player={player} protocol={protocol} />
-
-        <OffsiteTrainingPanel orgId={orgId} player={player} />
-
-        <div className="bg-white rounded-xl border border-slate-200 p-5">
-          <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
-            <Dumbbell size={16} className="text-blue-600" /> いまの PHASE のメニュー
-          </h4>
-          <PhaseMenuCatalog menus={phaseMenus} protocolId={player.protocolId} phaseNumber={player.currentPhase} />
-        </div>
-
-        <TreatmentCard player={player} onAddTreatments={onAddTreatments} onDeleteTreatment={onDeleteTreatment} />
-
-        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-3">
-            <p className="text-sm font-bold text-slate-700 flex items-center gap-1.5">
-              <MessageCircle size={16} className="text-blue-600" /> {player.name} さんとのチャット
-            </p>
-            <div className="flex items-center gap-2">
-              <span
-                className={`text-xs font-bold px-2.5 py-1 rounded-full ${
-                  player.supportStatus === "resolved"
-                    ? "bg-green-100 text-green-700"
-                    : player.supportStatus === "in_progress"
-                    ? "bg-blue-100 text-blue-700"
-                    : "bg-slate-100 text-slate-500"
-                }`}
-              >
-                {player.supportStatus === "resolved"
-                  ? "解決済み"
-                  : player.supportStatus === "in_progress"
-                  ? `対応中：${CHAT_STAFF_ROLE_LABELS[player.supportAssigneeRole] || "指導者"}`
-                  : "未対応"}
-              </span>
-              {player.supportStatus !== "resolved" && (
-                <button
-                  onClick={onResolveChatStatus}
-                  className="text-xs text-slate-400 hover:text-green-600 underline"
-                >
-                  解決済みにする
-                </button>
+        {/* 詳細は5つに分けて表示する（1ページに並べると長く、チャットが一番下になってしまうため） */}
+        <div className="flex gap-1 bg-slate-200 rounded-full p-1 sticky top-[60px] z-10 overflow-x-auto no-scrollbar">
+          {DETAIL_TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setDtab(t.key)}
+              className={`flex-1 min-w-[56px] py-2 rounded-full text-sm font-bold whitespace-nowrap flex items-center justify-center gap-1 ${
+                dtab === t.key ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"
+              }`}
+            >
+              {t.label}
+              {t.key === "chat" && unreadChat > 0 && (
+                <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] leading-[18px] text-center">
+                  {unreadChat > 9 ? "9+" : unreadChat}
+                </span>
               )}
-            </div>
-          </div>
-          <ChatPanel
-            playerId={player.id}
-            orgId={orgId}
-            messages={player.messages}
-            myRole="staff"
-            title=""
-            roleOptions={CHAT_STAFF_ROLES}
-            onSend={onSendMessage}
-            hideHeader
-          />
+            </button>
+          ))}
         </div>
 
-        <div className="bg-white rounded-xl border border-slate-200 p-5">
-          <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
-            <History size={16} className="text-blue-600" /> 面談履歴（{myMeetings.length}件）
-          </h4>
-          {myMeetings.length === 0 && (
-            <p className="text-sm text-slate-400">まだ面談の予約・実施履歴がありません。</p>
-          )}
-          <ul className="space-y-2">
-            {myMeetings.map((s) => {
-              const held = parseDatetime(s.datetime) <= new Date();
-              const daysAfter = player.injuryDate ? diffDaysBetween(player.injuryDate, s.datetime) : null;
-              return <MeetingRow key={s.id} slot={s} held={held} daysAfter={daysAfter} onSaveZoomUrl={onSaveZoomUrl} />;
-            })}
-          </ul>
-        </div>
+        {dtab === "report" && (
+          <>
+          <MeetingReminder player={player} slots={slots} viewer="staff" />
+
+          <ConsultationInbox player={player} onClose={onCloseConsultation} />
+
+          <div className="bg-white rounded-xl border border-slate-200 p-5">
+            <h4 className="text-sm font-bold text-slate-700 mb-3">本日の日報</h4>
+            {!report && <p className="text-sm text-slate-400">まだ報告がありません。</p>}
+            {report && (
+              <div className="grid grid-cols-3 gap-3">
+                <div className="bg-slate-50 rounded-lg p-3 text-center">
+                  <p className="text-xs text-slate-400 mb-1">痛み(VAS)</p>
+                  <p className="text-2xl font-bold text-slate-800">{report.vas}</p>
+                </div>
+                <div className="bg-slate-50 rounded-lg p-3 text-center">
+                  <p className="text-xs text-slate-400 mb-1">メンタル</p>
+                  <p className="text-2xl">{MENTAL_FACES[report.mental - 1]}</p>
+                </div>
+                <div className="bg-slate-50 rounded-lg p-3 text-center flex flex-col justify-center">
+                  <p className="text-xs text-slate-400 mb-1">SOS</p>
+                  <p className={`text-sm font-bold ${player.sos ? "text-red-500" : "text-slate-400"}`}>
+                    {player.sos ? "あり" : "なし"}
+                  </p>
+                </div>
+                <div className="bg-slate-50 rounded-lg p-3 text-center">
+                  <p className="text-xs text-slate-400 mb-1">疲労度</p>
+                  <p className="text-2xl font-bold text-orange-500">{report.fatigue ?? "-"}</p>
+                </div>
+                <div className="bg-slate-50 rounded-lg p-3 text-center">
+                  <p className="text-xs text-slate-400 mb-1">睡眠の質</p>
+                  <p className="text-2xl font-bold text-blue-500">{report.sleepQuality ?? "-"}</p>
+                </div>
+                <div className="col-span-3 bg-slate-50 rounded-lg p-3">
+                  <p className="text-xs text-slate-400 mb-1">本音</p>
+                  <p className="text-sm text-slate-700">{report.honne || "（未記入）"}</p>
+                </div>
+              </div>
+            )}
+            {report && (
+              <ObservationRecord
+                key={report.id}
+                report={{
+                  ...report,
+                  prevVas:
+                    player.reports.length > 1 ? player.reports[player.reports.length - 2].vas : null,
+                }}
+                onAssess={onAssessReport}
+              />
+            )}
+            {player.reports.length > 1 && (
+              <div className="mt-4 pt-4 border-t border-slate-100">
+                <p className="text-xs font-bold text-slate-600 mb-2">コンディション推移（直近14件）</p>
+                <SimpleTrendChart reports={player.reports} />
+              </div>
+            )}
+          </div>
+          </>
+        )}
+
+        {dtab === "gate" && (
+          <>
+          <GatePanel
+            orgId={orgId}
+            player={player}
+            protocol={protocol}
+            phaseInfo={phaseInfo}
+            viewerRole="staff"
+          />
+          </>
+        )}
+
+        {dtab === "menu" && (
+          <>
+          <AthleteMetricsCard
+            player={player}
+            onSaved={(patch) =>
+              setCoachPlayers((prev) => prev.map((p) => (p.id === player.id ? { ...p, ...patch } : p)))
+            }
+          />
+
+          <CumulativeMenuPanel player={player} protocol={protocol} />
+
+          <OffsiteTrainingPanel orgId={orgId} player={player} />
+
+          <div className="bg-white rounded-xl border border-slate-200 p-5">
+            <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+              <Dumbbell size={16} className="text-blue-600" /> いまの PHASE のメニュー
+            </h4>
+            <PhaseMenuCatalog menus={phaseMenus} protocolId={player.protocolId} phaseNumber={player.currentPhase} />
+          </div>
+          </>
+        )}
+
+        {dtab === "record" && (
+          <>
+          <ImagingFindingsCard player={player} onSave={onSaveImagingFindings} />
+
+          <HamstringClassificationCard
+            orgId={orgId}
+            player={player}
+            protocol={protocol}
+            onSaved={(patch) =>
+              setCoachPlayers((prev) => prev.map((p) => (p.id === player.id ? { ...p, ...patch } : p)))
+            }
+          />
+
+          <TreatmentCard player={player} onAddTreatments={onAddTreatments} onDeleteTreatment={onDeleteTreatment} />
+
+          <div className="bg-white rounded-xl border border-slate-200 p-5">
+            <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+              <History size={16} className="text-blue-600" /> 面談履歴（{myMeetings.length}件）
+            </h4>
+            {myMeetings.length === 0 && (
+              <p className="text-sm text-slate-400">まだ面談の予約・実施履歴がありません。</p>
+            )}
+            <ul className="space-y-2">
+              {myMeetings.map((s) => {
+                const held = parseDatetime(s.datetime) <= new Date();
+                const daysAfter = player.injuryDate ? diffDaysBetween(player.injuryDate, s.datetime) : null;
+                return <MeetingRow key={s.id} slot={s} held={held} daysAfter={daysAfter} onSaveZoomUrl={onSaveZoomUrl} />;
+              })}
+            </ul>
+          </div>
+          </>
+        )}
+
+        {dtab === "chat" && (
+          <>
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-sm font-bold text-slate-700 flex items-center gap-1.5">
+                <MessageCircle size={16} className="text-blue-600" /> {player.name} さんとのチャット
+              </p>
+              <div className="flex items-center gap-2">
+                <span
+                  className={`text-xs font-bold px-2.5 py-1 rounded-full ${
+                    player.supportStatus === "resolved"
+                      ? "bg-green-100 text-green-700"
+                      : player.supportStatus === "in_progress"
+                      ? "bg-blue-100 text-blue-700"
+                      : "bg-slate-100 text-slate-500"
+                  }`}
+                >
+                  {player.supportStatus === "resolved"
+                    ? "解決済み"
+                    : player.supportStatus === "in_progress"
+                    ? `対応中：${CHAT_STAFF_ROLE_LABELS[player.supportAssigneeRole] || "指導者"}`
+                    : "未対応"}
+                </span>
+                {player.supportStatus !== "resolved" && (
+                  <button
+                    onClick={onResolveChatStatus}
+                    className="text-xs text-slate-400 hover:text-green-600 underline"
+                  >
+                    解決済みにする
+                  </button>
+                )}
+              </div>
+            </div>
+            <ChatPanel
+              playerId={player.id}
+              orgId={orgId}
+              messages={player.messages}
+              myRole="staff"
+              title=""
+              roleOptions={CHAT_STAFF_ROLES}
+              onSend={onSendMessage}
+              hideHeader
+            />
+          </div>
+          </>
+        )}
       </div>
 
       <PrintSummary player={player} protocol={protocol} phaseInfo={phaseInfo} avg={avg} myMeetings={myMeetings} />
@@ -5451,7 +5508,7 @@ function GatePanel({
         />
       )}
 
-      {!allOk && missing.length > 0 && (
+      {viewerRole === "staff" && !allOk && missing.length > 0 && (
         <div className="mt-3 bg-slate-50 rounded-lg px-3 py-2">
           <p className="text-xs font-bold text-slate-600 mb-1">足りないもの</p>
           <ul className="text-xs text-slate-500 list-disc list-inside space-y-0.5">
@@ -5564,6 +5621,7 @@ function ObservationRecord({ report, onAssess }) {
       <div className="mt-3">
         <p className="text-[10px] text-slate-400 mb-1">この日の入力に当てはまる基準</p>
         <CriteriaResult
+          staffView
           report={{
             vas: report.vas,
             prevVas: report.prevVas ?? null,
@@ -6776,6 +6834,10 @@ function PhaseTimelineComparison({ player, protocol }) {
     ...phaseRange(protocol).map((n) => Math.max(ownDurations[n] || 0, globalAvg.find((g) => g.phase_number === n)?.avg_days || 0))
   );
   const hasAnyGlobal = globalAvg.some((g) => g.sample_size > 0);
+  // 自分か先輩の記録がある PHASE だけ並べる（空の棒を並べない）
+  const shownPhases = phaseRange(protocol).filter(
+    (n) => ownDurations[n] !== undefined || globalAvg.some((g) => g.phase_number === n && g.sample_size > 0)
+  );
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
@@ -6786,13 +6848,10 @@ function PhaseTimelineComparison({ player, protocol }) {
         <p className="text-xs text-slate-400">読み込み中...</p>
       ) : (
         <>
-          {!hasAnyGlobal && (
-            <p className="text-xs text-slate-400 mb-3">
-              件数が少ないため参考値です。
-            </p>
-          )}
+
+          {shownPhases.length === 0 && <p className="text-sm text-slate-400">まだ記録がありません。</p>}
           <div className="space-y-3">
-            {phaseRange(protocol).map((n) => {
+            {shownPhases.map((n) => {
               const own = ownDurations[n];
               const g = globalAvg.find((x) => x.phase_number === n);
               return (
@@ -6800,7 +6859,7 @@ function PhaseTimelineComparison({ player, protocol }) {
                   <div className="flex items-center justify-between text-[10px] mb-1">
                     <span className={`font-bold ${PHASE_TEXT_COLORS[n]}`}>PHASE {n}</span>
                     <span className="text-slate-400">
-                      {own !== undefined ? `あなた: ${own}日` : "未到達"}
+                      {own !== undefined ? `あなた: ${own}日` : ""}
                       {g && g.sample_size > 0
                         ? ` ／ 平均: ${g.avg_days}日（${g.sample_size}件${
                             g.sample_size < 3 ? "・件数が少ないため参考値" : ""
@@ -6826,12 +6885,12 @@ function PhaseTimelineComparison({ player, protocol }) {
               );
             })}
           </div>
-          <div className="flex gap-4 mt-3 text-[10px] text-slate-400">
+          <div className={`flex gap-4 mt-3 text-[10px] text-slate-400 ${shownPhases.length === 0 ? "hidden" : ""}`}>
             <span className="flex items-center gap-1">
               <span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> あなた（上段）
             </span>
             <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-slate-400 inline-block" /> 全組織平均（下段）
+              <span className="w-2 h-2 rounded-full bg-slate-400 inline-block" /> 先輩の平均（下段）
             </span>
           </div>
         </>
@@ -7178,12 +7237,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
           />
 
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-sm font-bold text-slate-700">復帰ロードマップ</p>
-              <span className={`text-xs font-bold ${PHASE_TEXT_COLORS[player.currentPhase]}`}>
-                現在のステップ：{player.currentPhase}/{phaseCountOf(protocol)}
-              </span>
-            </div>
+            <p className="text-sm font-bold text-slate-700 mb-2">復帰ロードマップ</p>
             <p className="text-2xl font-extrabold text-slate-800 mb-1">全体復帰まであと {remainingWeeks} 週間</p>
             <p className="text-xs text-slate-400 mb-3">{protocol?.name}</p>
 
@@ -7208,14 +7262,9 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
             <ContinuingLane protocol={protocol} currentPhase={player.currentPhase} />
 
-            <div className="mt-4 bg-slate-50 rounded-lg p-3">
-              <p className="text-xs font-bold text-slate-600 mb-1">現在：{phaseInfo?.title}</p>
-              <ul className="text-xs text-slate-500 list-disc list-inside space-y-0.5">
-                {phaseInfo?.conditions.map((c, i) => (
-                  <li key={i}>{c}</li>
-                ))}
-              </ul>
-            </div>
+            <p className="mt-4 text-sm font-bold text-slate-700">
+              <span className={PHASE_TEXT_COLORS[player.currentPhase]}>PHASE {player.currentPhase}</span>　{phaseInfo?.title}
+            </p>
           </div>
 
           {continueRule && (
@@ -7339,12 +7388,14 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
           <OffsiteTrainingPanel orgId={orgId} player={player} readOnly />
 
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-            <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
-              <Dumbbell size={16} className="text-blue-600" /> いまの PHASE のメニュー
-            </p>
-            <PhaseMenuCatalog menus={phaseMenus} protocolId={player.protocolId} phaseNumber={player.currentPhase} />
-          </div>
+          {phaseMenus.some((m) => m.protocolId === player.protocolId && m.phaseNumber === player.currentPhase) && (
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+              <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+                <Dumbbell size={16} className="text-blue-600" /> いまの PHASE のメニュー
+              </p>
+              <PhaseMenuCatalog menus={phaseMenus} protocolId={player.protocolId} phaseNumber={player.currentPhase} />
+            </div>
+          )}
 
         </>
       )}
@@ -7387,7 +7438,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
             <label className="text-xs text-slate-500 flex justify-between">
               <span>疲労度</span>
-              <span className="font-bold text-orange-500">{fatigue}</span>
+              <span className="font-bold text-blue-600">{fatigue}</span>
             </label>
             <input
               type="range"
@@ -7395,7 +7446,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
               max={10}
               value={fatigue}
               onChange={(e) => setFatigue(Number(e.target.value))}
-              className="w-full mt-2 accent-orange-500"
+              className="w-full mt-2 accent-blue-600"
             />
             <div className="flex justify-between text-[10px] text-slate-400 mb-4">
               <span>0（疲労なし）</span>
@@ -7404,7 +7455,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
             <label className="text-xs text-slate-500 flex justify-between">
               <span>睡眠の質</span>
-              <span className="font-bold text-blue-500">{sleepQuality}</span>
+              <span className="font-bold text-blue-600">{sleepQuality}</span>
             </label>
             <input
               type="range"
@@ -7412,7 +7463,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
               max={10}
               value={sleepQuality}
               onChange={(e) => setSleepQuality(Number(e.target.value))}
-              className="w-full mt-2 accent-blue-500"
+              className="w-full mt-2 accent-blue-600"
             />
             <div className="flex justify-between text-[10px] text-slate-400 mb-4">
               <span>0（最悪）</span>
@@ -7503,7 +7554,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
                     max={10}
                     value={fearLevel}
                     onChange={(e) => setFearLevel(Number(e.target.value))}
-                    className="w-full mt-1 accent-slate-600"
+                    className="w-full mt-1 accent-blue-600"
                   />
                   <div className="flex justify-between text-[10px] text-slate-400">
                     <span>0（なし）</span>
@@ -7542,7 +7593,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
                     step={5}
                     value={rpe}
                     onChange={(e) => setRpe(Number(e.target.value))}
-                    className="w-full mt-1 accent-slate-600"
+                    className="w-full mt-1 accent-blue-600"
                   />
                 </div>
               )}
@@ -8350,20 +8401,21 @@ function OffsiteTrainingPanel({ orgId, player, readOnly, onChanged }) {
   const regionsInUse = Array.from(new Set(items.map((i) => i.region).filter(Boolean)));
 
   if (loading) {
+    if (readOnly) return null;
     return (
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm flex items-center gap-2 text-slate-400 text-sm">
-        <Loader2 size={16} className="animate-spin" /> 患部外トレーニングを読み込み中...
+        <Loader2 size={16} className="animate-spin" /> 読み込み中
       </div>
     );
   }
 
+  // 選手側：まだ何も選ばれていなければ、カードごと出さない
+  if (readOnly && selected.length === 0) return null;
+
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-      <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
-        <Dumbbell size={16} className="text-blue-600" /> 患部外トレーニング（全11領域）
-      </p>
-      <p className="text-[11px] text-slate-400 mb-3">
-        {readOnly ? "指導者が選んだ領域です。" : "この選手に必要な領域だけ選びます。"}
+      <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+        <Dumbbell size={16} className="text-blue-600" /> 患部外トレーニング
       </p>
 
       {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
