@@ -36,7 +36,8 @@ const site = await safe(async () => {
   const html = await (await fetch(SITE, { cache: "no-store" })).text();
   const js = html.match(/\/assets\/index-[^"]+\.js/)?.[0];
   const code = js ? await (await fetch(SITE + js)).text() : "";
-  const build = code.match(/v1\d(\.\d+)? \([^)"]{1,40}\)/)?.[0] || "(不明)";
+  // v15.14 から、ビルド番号は "v15.14" のように番号だけ（それ以前は "v15.13 (説明)" の形）
+  const build = code.match(/"(v1\d(?:\.\d+)?(?: \([^)"]{1,40}\))?)"/)?.[1] || "(不明)";
   const sw = (await fetch(SITE + "/sw.js", { cache: "no-store" })).status;
   return { build, sw };
 });
