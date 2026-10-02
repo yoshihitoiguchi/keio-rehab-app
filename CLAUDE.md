@@ -173,6 +173,8 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `slots` / `staff_availability` | 三者面談の日程調整 |
 | `consultation_requests` | 相談リクエスト（医師枠は未公開） |
 | `media_attachments` | 写真・動画。`expires_at` は90日 |
+| `staff_notes` | 指導者どうしの申し送りメモ（選手ごと。選手の画面には出さない。ただし組織の中の仕切りは画面だけなので、API を直接使えば同じ組織の人は読める）（v30） |
+| `exercise_logs` | 「今日やった種目」の記録（選手・種目・日付で1件）（v30） |
 | `player_metric_history` / `player_exercise_progress` | 記録の推移 |
 
 ### ビュー
@@ -233,6 +235,7 @@ PGRST204 エラーになった経緯がある。v12 で復旧済み）。
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
+| v30_operations | **適用済み（2026-10-03）** | `staff_notes`（申し送りメモ）・`exercise_logs`（今日やった種目）・規約の同意（`terms_status` ほか）・リマインド（日報・面談）・毎日の自動バックアップ。`pg_cron` を有効化。戻し方 `supabase_rollback_v30.sql` |
 | v29_push_wording | **適用済み（2026-10-03）** | SOS の通知の文面を「選手から SOS の連絡があります」に（表記の統一） |
 | v28_transfer_code | **適用済み（2026-10-03）** | 引き継ぎコード（`transfer_create` / `transfer_redeem`、`resprint_private.transfer_codes`）。ブラウザ → ホーム画面のアプリへログインを引き継ぐ。30分有効 |
 | v27_push | **適用済み（2026-10-02）** | プッシュ通知。宛先 `resprint_private.push_subscriptions`・設定 `push_config`（url・secret）・`push_subscribe` などの関数・`messages`／`consultation_requests`／`players.sos` のトリガー。`pg_net` を有効化。戻し方 `supabase_rollback_v27.sql` |
@@ -321,10 +324,10 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 公開の確認は、本番の JS に番号が入っているかで行う（`curl` で `/assets/index-*.js` を取り、`v15.14` を探す）。
 
 ```js
-const APP_BUILD = "v15.17";
+const APP_BUILD = "v15.18";
 ```
 
-本番に出ているのは `v15.17`（2026-10-03 公開）。
+本番に出ているのは `v15.18`（2026-10-03 公開）。
 
 過去に「全く改善されてない」が3回続き、原因が
 **App.jsx をリポジトリ直下に置いていて `src/` に入っていなかった**ことだった。
@@ -437,6 +440,13 @@ const APP_BUILD = "v15.17";
 - **iPhone はホーム画面に追加したアプリからだけ使える**（iOS 16.4 以上）。端末ごとに本人が許可する。
 - 選手ログアウトでその選手あての登録を、組織から抜けるとその端末の登録をすべて消す。アプリを開くたびに登録を更新する（`refreshPush`）。
 - 指導者は個人ごとに分かれていないので、「指導者モードで通知をオンにした端末すべて」に届く。
+- **定期実行（pg_cron、v30）**：時刻は UTC で登録してある（日本時間 = UTC + 9時間）。
+  `resprint-meeting-reminders`（10分ごと：面談の24〜12時間前に1回・1時間前に1回、選手と指導者へ）／
+  `resprint-report-reminders`（毎日 11:00 UTC ＝ 20時：その日の日報がまだの選手へ「今日の日報がまだです」）／
+  `resprint-daily-backup`（毎日 18:30 UTC ＝ 3時30分：`resprint_backup.daily()`。30回分を残す）。
+  同じ通知を二度送らないよう `resprint_private.reminder_log` に記録する。面談の日時（`slots.datetime`）は日本時間として扱う。
+  予定の確認：`select jobname, schedule, active from cron.job;`／実行の記録：`select * from cron.job_run_details order by start_time desc limit 20;`
+  止めるとき：`select cron.unschedule(jobid) from cron.job where jobname like 'resprint-%';`
 - **通知の案内（`NotifyPrompt`、v15.12）**：通知がまだオフの端末で、最初に全画面で「通知をオンにしてください」を出す（選手・指導者とも）。
   選手は、使い方を読み終え、ホーム画面への追加の画面（`InstallGate`）を抜けたあと。「あとで」で閉じられる（そのタブを閉じるまで。
   `sessionStorage` の `resprint.notifySkip.<役割>`）。オンにするまで、開くたびに出る。通知を使えない端末・端末の設定で拒否されているときは出さない。
@@ -595,6 +605,20 @@ v16 後も残る穴（優先順。2026-09-27 のレビューで確認したも�
 ---
 
 ## 変更履歴
+
+### 2026-10-03（v15.18：Claude Code）
+- 暗証番号の再設定：指導者の選手詳細に「暗証番号を再設定」（`players.pin` を書き換える。数字4桁）。
+- 毎日の自動バックアップ（v30・pg_cron）。控えを残す回数を 10 → 30 に。
+- 利用規約・個人情報の取り扱いへの同意：管理者画面の一番下で文面を登録（`TermsEditor`）。登録すると、選手に全画面で1回表示して同意を記録（`TermsGate`）。
+  文面を変えると版が上がり、もう一度表示。**文面は未登録（弁護士の確認待ち）。登録するまで、選手には何も出ない。文面を勝手に作らないこと。**
+- リマインドの通知：日報（毎日20時）・面談（24〜12時間前と1時間前）。上の「プッシュ通知」の定期実行を参照。
+- 全員に連絡：指導者の選手一覧の下の「全員に連絡」（`BroadcastBox`）。現役の選手全員のチャットに同じ文を入れる（通知も届く）。
+- 申し送りメモ：選手詳細の「記録」タブ（`StaffNotes`）。
+- 今日やった種目：選手のメニューの種目ごとに「やった」（`exercise_logs`）。指導者には「今日 実施／未実施・7日で n 回」。
+- 記録の書き出し（CSV）：指導者の「その他」（`ExportCard`）。選手一覧・日報・PHASE の日数・治療の記録。初期設定は名前を番号に置き換える（自由記述も外す）。
+- 復帰までの記録：復帰した選手の「その他」の一番上（`RecoverySummary`）。
+- ダイアログに複数行・数字入力の指定を追加。規約の問い合わせが想定外の形で返っても、同意の画面を出さないようにした。
+- 検証：SQL 223＋26、送信役 8、画面 136。実機への通知の到達・定期実行の実際の動作は未確認。
 
 ### 2026-10-03（v15.17：Claude Code）
 - スクリーンショットでの点検（2回目：ログイン・登録・指導者の各タブ・管理者）で見つけた点を修正。

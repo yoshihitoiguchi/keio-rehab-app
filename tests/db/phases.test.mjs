@@ -526,6 +526,63 @@ ok((await as(U1, "select value from app_settings where org_id = 'comm-b' and key
    && !!((await as(U1, "insert into app_settings (org_id, key, value) values ('comm-b','meeting_url','https://evil.example')")).error),
    "[v15.13] ほかの組織の人は、読むことも書き換えることもできない");
 
+// ===== v30：申し送りメモ・種目の記録・規約の同意・リマインド・自動バックアップ =====
+await db.exec(`alter table reports add column if not exists date text; alter table players add column if not exists completed_at timestamptz;
+  alter table slots add column if not exists booked_by text;
+  create or replace function net.http_post(url text, body jsonb default '{}', params jsonb default '{}', headers jsonb default '{}', timeout_milliseconds int default 5000)
+    returns bigint language sql as $f$ insert into net.calls (url, body, headers) values (url, body, headers) returning id::bigint $f$;
+  insert into resprint_private.push_config (key, value) values ('url','https://example.test/api/push'), ('secret','s3cret') on conflict (key) do update set value = excluded.value;`);
+ok(!(await run("supabase_migration_v30_operations.sql")), "[v30] 適用 1 回目");
+ok(!(await run("supabase_migration_v30_operations.sql")), "[v30] 適用 2 回目（冪等）");
+// (1)(2) メモと種目の記録
+ok(!(await as(U4, "insert into staff_notes (player_id, author_role, body) values ('p-b1','trainer','左ハムの張りが残る')")).error
+   && (await as(U6, "select body from staff_notes where player_id = 'p-b1'")).rows?.length === 1, "[v30] 同じ組織の人は、申し送りメモを書ける・読める");
+ok((await as(U1, "select body from staff_notes")).rows?.length === 0 && !!(await as(U1, "insert into staff_notes (player_id, body) values ('p-b1','x')")).error
+   && !!(await as(null, "select * from staff_notes")).error, "[v30] ほかの組織・匿名キーからは、メモを読めない・書けない");
+const exB = (await db.query("select e.id from exercises e join protocols p on p.id = e.protocol_id where p.org_id = 'comm-b' limit 1")).rows[0]?.id
+  ?? (await db.query("insert into exercises (org_id, protocol_id, name) values ('comm-b','comm-b-proto-hamstring-10','RDL') returning id")).rows[0].id;
+ok(!(await as(U4, `insert into exercise_logs (player_id, exercise_id, done_on) values ('p-b1', ${exB}, current_date)`)).error
+   && !!(await as(U4, `insert into exercise_logs (player_id, exercise_id, done_on) values ('p-b1', ${exB}, current_date)`)).error,
+   "[v30] 「今日やった種目」を記録できる（同じ日・同じ種目は1件だけ）");
+ok(!!(await as(U1, `insert into exercise_logs (player_id, exercise_id, done_on) values ('p-b1', ${exB}, current_date - 1)`)).error, "[v30] ほかの組織の人は記録できない");
+// (3) 規約
+ok(one(await as(U4, "select public.terms_status('p-b1')")) === null, "[v30] 文面を登録するまでは、同意の画面は出ない（null）");
+ok(!!(await as(U4, "select public.admin_set_terms('勝手な規約')")).error, "[v30] 管理者以外は文面を登録できない");
+ok(one(await as(ADMIN, "select public.admin_set_terms('  利用規約 第1版  ')"))?.version === 1, "[v30] 管理者が文面を登録すると第1版になる");
+let ts = one(await as(U4, "select public.terms_status('p-b1')"));
+ok(ts?.version === 1 && ts.body === "利用規約 第1版" && ts.accepted === false, "[v30] 選手には、まだ同意していない文面が返る");
+ok(one(await as(U4, "select public.terms_accept('p-b1', 1)")) === true && one(await as(U4, "select public.terms_status('p-b1')"))?.accepted === true, "[v30] 同意すると記録される");
+ok(one(await as(ADMIN, "select public.admin_set_terms('利用規約 第1版')"))?.changed === false, "[v30] 同じ文面なら版は上がらない");
+ok(one(await as(ADMIN, "select public.admin_set_terms('利用規約 第2版')"))?.version === 2 && one(await as(U4, "select public.terms_status('p-b1')"))?.accepted === false, "[v30] 文面を変えると版が上がり、もう一度同意が必要になる");
+ok(one(await as(ADMIN, "select public.admin_get_terms()"))?.accepted_count === 0 && !!(await as(U1, "select public.terms_status('p-b1')")).error, "[v30] 管理者は同意の人数を見られる／ほかの組織の選手の状態は見られない");
+ok(one(await as(ADMIN, "select public.admin_set_terms('')"))?.version === 3 && one(await as(U4, "select public.terms_status('p-b1')")) === null, "[v30] 文面を空にすると、同意の画面は出なくなる");
+// (4) リマインド
+await as(U4, `select public.push_subscribe('comm-b','player','p-b1','${EP("player2")}','k','a')`);
+await as(U4, `select public.push_subscribe('comm-b','coach',null,'${EP("coach2")}','k','a')`);
+await db.exec("delete from net.calls; update players set sos = false");
+const today30 = (await db.query("select to_char(now() at time zone 'Asia/Tokyo', 'YYYY-MM-DD') d")).rows[0].d;
+ok((await db.query("select resprint_private.run_report_reminders() n")).rows[0].n === 1 && (await calls())[0]?.body.body === "今日の日報がまだです"
+   && (await calls())[0].body.subscriptions[0].endpoint === EP("player2"), "[v30] 日報がまだの選手（通知オン）に、日報のリマインドが届く");
+ok((await db.query("select resprint_private.run_report_reminders() n")).rows[0].n === 0, "[v30] 同じ日に二度は送らない");
+await db.exec(`delete from net.calls; delete from resprint_private.reminder_log; insert into reports (player_id, vas, date) values ('p-b1', 2, '${today30}')`);
+ok((await db.query("select resprint_private.run_report_reminders() n")).rows[0].n === 0 && (await calls()).length === 0, "[v30] 今日の日報を出した選手には送らない");
+const jst = (mins) => `(select to_char((now() + interval '${mins} minutes') at time zone 'Asia/Tokyo', 'YYYY-MM-DD HH24:MI'))`;
+await db.exec(`delete from net.calls; delete from slots where org_id = 'comm-b';
+  insert into slots (org_id, datetime, booked_by) values ('comm-b', ${jst(40)}, 'p-b1'), ('comm-b', ${jst(18 * 60)}, 'p-b1'), ('comm-b', ${jst(5 * 60)}, 'p-b1'), ('comm-b', ${jst(30)}, null), ('comm-b', ${jst(-30)}, 'p-b1')`);
+ok((await db.query("select resprint_private.run_meeting_reminders() n")).rows[0].n === 2, "[v30] 面談のリマインド：1時間以内の1件と、24〜12時間前の1件だけが対象（5時間後・予約なし・過ぎたものは対象外）");
+cl = await calls();
+ok(cl.length === 4 && cl.filter((c) => c.body.body === "まもなく面談の時間です").length === 2 && cl.filter((c) => c.body.body === "面談の予定が近づいています").length === 2
+   && cl.some((c) => c.body.subscriptions[0].endpoint === EP("coach2")) && cl.some((c) => c.body.subscriptions[0].endpoint === EP("player2")),
+   "[v30] 選手と指導者の両方に届く");
+ok((await db.query("select resprint_private.run_meeting_reminders() n")).rows[0].n === 0, "[v30] 同じ面談に同じリマインドを二度は送らない");
+ok(!!(await as(U4, "select resprint_private.run_meeting_reminders()")).error, "[v30] リマインドの関数はアプリから呼べない");
+// (5) 自動バックアップ
+ok((await db.query("select resprint_backup.daily() n")).rows[0].n > 5 && (await db.query("select count(*)::int n from resprint_backup.snapshots where label like '自動 %' and table_name = 'staff_notes'")).rows[0].n === 1,
+   "[v30] 毎日のバックアップが取れる（新しい表も含まれる）");
+ok(!!(await as(U4, "select resprint_backup.daily()")).error, "[v30] バックアップの関数はアプリから呼べない");
+ok(!(await run("supabase_rollback_v30.sql")) && (await db.query("select count(*)::int n from staff_notes")).rows[0].n === 1, "[v30] 戻し用 SQL が通る（メモのデータは残す）");
+ok(!(await run("supabase_migration_v30_operations.sql")), "[v30] 戻した後にもう一度適用できる");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

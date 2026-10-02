@@ -68,7 +68,7 @@ function makeState({ phase = 5, injuryDaysAgo = 20, booked = false, checks = [],
   };
   st.player = () => ({ id: "p-1", org_id: "default", name: "山田 太郎", pin: "1111", protocol_id: st.protocolId, current_phase: st.phase, checklist: [], sos: false,
     injury_date: st.injury, booked_slot_id: st.slots.find((s) => s.booked_by === "p-1")?.id ?? null,
-    reports: st.reports || [], messages: st.messages, treatments: [], phase_history: [], player_exercise_progress: [], consultation_requests: st.consult });
+    completed_at: st.completedAt || null, reports: st.reports || [], messages: st.messages, treatments: [], phase_history: st.phaseHistory || [], player_exercise_progress: [], consultation_requests: st.consult });
   return st;
 }
 function respond(st, url, method, body) {
@@ -80,6 +80,18 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/rpc/org_login") return { id: "default", name: "テスト組織" };
   if (p === "/rest/v1/rpc/org_renew") return true;
   if (p === "/rest/v1/rpc/coach_check") return { set: true, ok: json?.p_password === "coach" };
+  if (p === "/rest/v1/rpc/terms_status") return st.terms ? { version: st.terms.version, body: st.terms.body, accepted: Boolean(st.termsAccepted) } : null;
+  if (p === "/rest/v1/rpc/terms_accept") { st.termsAccepted = json.p_version; return true; }
+  if (p === "/rest/v1/staff_notes") {
+    if (method === "POST") { const row = { id: 50 + (st.notes || []).length, created_at: iso(new Date()), ...json }; st.notes = [row, ...(st.notes || [])]; return [row]; }
+    if (method === "DELETE") { st.notes = []; return null; }
+    return st.notes || [];
+  }
+  if (p === "/rest/v1/exercise_logs") {
+    if (method === "POST") { st.logs = [...(st.logs || []), json]; return [json]; }
+    if (method === "DELETE") { st.logs = []; return null; }
+    return st.logs || [];
+  }
   if (p === "/rest/v1/rpc/transfer_create") { st.transferCreated = (st.transferCreated || 0) + 1; return { code: "48151623", expires_at: iso(new Date(Date.now() + 1800000)) }; }
   if (p === "/rest/v1/rpc/transfer_redeem") return json?.p_code === "48151623" ? { org: { id: "default", name: "テスト組織" }, player: { id: "p-1", name: "山田 太郎" } } : null;
   if (p === "/rest/v1/organizations") return [{ id: "default", name: "テスト組織" }];
@@ -100,6 +112,7 @@ function respond(st, url, method, body) {
   }
   if (p === "/rest/v1/reports" && method === "POST") { st.reports = [...(st.reports || []), { id: 900, created_at: iso(new Date()), ...json }]; return [json]; }
   if (p === "/rest/v1/messages") {
+    if (method === "POST" && Array.isArray(json)) { const rows = json.map((j, i) => ({ id: 300 + i, is_read: false, created_at: iso(new Date()), ...j })); st.messages.push(...rows); return rows; }
     if (method === "POST") { const row = { id: 100 + st.messages.length, is_read: false, created_at: iso(new Date()), ...json }; st.messages.push(row); return [row]; }
     return st.messages;
   }
@@ -462,6 +475,80 @@ try {
     ok((await text(c)).includes("怪我の名称"), "「プロトコルを追加」で追加フォームが開く");
     await clickText(c, "日程調整", "nav button"); await sleep(800);
     ok((await c.$$('input[type="date"]')).length === 1 && (await c.$$("select")).length <= 3, "日程調整：日付は1つの入力欄で選べる（年・月・日の3つのプルダウンをやめた）");
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+  });
+
+  await step("運用の機能（v15.18）", async () => {
+    // 規約の同意
+    const st = makeState({ injuryDaysAgo: 3 });
+    st.terms = { version: 2, body: "これはテスト用の規約の文面です。" };
+    const p = await newPage(st);
+    await playerLogin(p);
+    let t = await text(p);
+    ok(t.includes("利用規約・個人情報の取り扱い") && t.includes("これはテスト用の規約の文面です。") && t.includes("同意して使う"), "規約の文面が登録されていると、選手に同意の画面が出る");
+    await clickText(p, "同意して使う"); await sleep(700);
+    ok(st.termsAccepted === 2 && !(await text(p)).includes("同意して使う"), "同意すると記録され、画面が閉じる");
+    await p.reload({ waitUntil: "networkidle0" }); await sleep(1500);
+    ok(!(await text(p)).includes("同意して使う"), "同意済みなら、次からは出ない");
+    // 今日やった種目
+    await clickText(p, "メニュー", "nav button"); await sleep(900);
+    await clickText(p, "やった"); await sleep(600);
+    ok(st.logs?.length === 1 && st.logs[0].player_id === "p-1" && /^\d{4}-\d{2}-\d{2}$/.test(st.logs[0].done_on) && (await text(p)).includes("今日やった"), "メニューの種目に「やった」を記録できる");
+    ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
+
+    // 復帰した選手：復帰までの記録
+    const stR = makeState({ injuryDaysAgo: 40, phase: 10 });
+    stR.completedAt = iso(now);
+    stR.phaseHistory = [{ id: 1, phase_number: 1, entered_at: iso(new Date(Date.now() - 40 * 86400000)), left_at: iso(new Date(Date.now() - 30 * 86400000)) }];
+    const pr = await newPage(stR);
+    await playerLogin(pr);
+    await clickText(pr, "その他", "nav button"); await sleep(700);
+    t = await text(pr);
+    ok(t.includes("復帰までの記録") && t.includes("40") && t.includes("受傷から復帰まで"), "復帰した選手に、復帰までの記録が出る");
+
+    // 指導者：暗証番号の再設定・申し送りメモ・全員に連絡・書き出し
+    const st2 = makeState({ injuryDaysAgo: 3 });
+    st2.logs = [{ exercise_id: 5, done_on: (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })() }];
+    const c = await newPage(st2);
+    await coachLogin(c);
+    await clickText(c, "暗証番号を再設定"); await sleep(400);
+    await c.type('[role="dialog"] input', "12a4");
+    await clickText(c, "再設定する", '[role="dialog"] button'); await sleep(500);
+    ok(!st2.patches.some((x) => x.b && x.b.pin) && (await text(c)).includes("数字4桁で入力"), "数字4桁でない暗証番号は受け付けない");
+    await clickText(c, "暗証番号を再設定"); await sleep(400);
+    await c.type('[role="dialog"] input', "4826");
+    await clickText(c, "再設定する", '[role="dialog"] button'); await sleep(700);
+    ok(st2.patches.some((x) => x.p === "/rest/v1/players" && x.b.pin === "4826") && (await text(c)).includes("暗証番号を再設定しました"), "指導者が選手の暗証番号を再設定できる");
+    await clickText(c, "閉じる", '[role="dialog"] button'); await sleep(300);
+    await clickText(c, "全員に連絡"); await sleep(300);
+    await c.type('textarea[placeholder="お知らせの内容"]', "明日の練習は15時からです");
+    for (const e of await c.$$("button")) if ((await e.evaluate((n) => n.innerText.trim())) === "送る") { await e.click(); break; }
+    await sleep(400);
+    ok((await text(c)).includes("1名に送りますか？"), "全員への連絡は、送る前に人数を確かめる");
+    await clickText(c, "送る", '[role="dialog"] button'); await sleep(800);
+    const bc = st2.posts.find((x) => x.p === "/rest/v1/messages" && Array.isArray(x.b));
+    ok(bc?.b?.length === 1 && bc.b[0].sender === "staff" && bc.b[0].content === "明日の練習は15時からです", "現役の選手全員のチャットに同じ文が入る");
+    for (const e of await c.$$("button")) { const tt = await e.evaluate((x) => x.innerText.trim()); const inNav = await e.evaluate((x) => !!x.closest("nav")); if (tt === "記録" && !inNav) { await e.click(); break; } }
+    await sleep(700);
+    await c.type('textarea[placeholder^="例：左ハム"]', "張りが残る");
+    await clickText(c, "残す"); await sleep(600);
+    ok(st2.notes?.[0]?.body === "張りが残る" && st2.notes[0].player_id === "p-1" && (await text(c)).includes("選手の画面には出ません"), "申し送りメモを残せる");
+    for (const e of await c.$$("button")) { const tt = await e.evaluate((x) => x.innerText.trim()); const inNav = await e.evaluate((x) => !!x.closest("nav")); if (tt === "メニュー" && !inNav) { await e.click(); break; } }
+    await sleep(900);
+    ok((await text(c)).includes("今日 実施・7日で1回") && (await text(c)).includes("今日 未実施"), "指導者は、種目ごとの実施状況を見られる");
+    await clickText(c, "その他", "nav button"); await sleep(700);
+    t = await text(c);
+    ok(t.includes("記録の書き出し") && t.includes("名前を番号に置き換える"), "指導者の「その他」に、記録の書き出しがある");
+    const csv = await c.evaluate(async () => {
+      let captured = null;
+      const orig = URL.createObjectURL;
+      URL.createObjectURL = (blob) => { captured = blob; return orig.call(URL, blob); };
+      [...document.querySelectorAll("button")].find((b) => b.innerText.includes("選手一覧")).click();
+      await new Promise((r) => setTimeout(r, 200));
+      URL.createObjectURL = orig;
+      return captured ? await captured.text() : null;
+    });
+    ok(csv && csv.includes("選手,プロトコル,PHASE") && csv.includes("選手001") && !csv.includes("山田"), "書き出した CSV は、名前が番号に置き換わっている");
     ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
   });
 

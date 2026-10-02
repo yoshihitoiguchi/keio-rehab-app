@@ -48,6 +48,8 @@ import {
   BookOpen,
   Bell,
   Repeat,
+  Megaphone,
+  Download,
   Pencil,
   Save,
 } from "lucide-react";
@@ -270,7 +272,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.17";
+const APP_BUILD = "v15.18";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -348,9 +350,21 @@ function DialogHost() {
       <div className="bg-white w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl p-5 safe-bottom">
         <p className="text-base font-bold text-slate-800">{spec.title}</p>
         {spec.body && <p className="text-sm text-slate-500 mt-2 leading-relaxed whitespace-pre-wrap">{spec.body}</p>}
-        {spec.kind === "text" && (
+        {spec.kind === "text" && spec.multiline && (
+          <textarea
+            autoFocus
+            rows={4}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder={spec.placeholder || ""}
+            className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-3"
+          />
+        )}
+        {spec.kind === "text" && !spec.multiline && (
           <input
             autoFocus
+            inputMode={spec.inputMode}
+            maxLength={spec.maxLength}
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => isEnterKey(e) && submit()}
@@ -2063,6 +2077,7 @@ function OrgManager({ onBack }) {
             </ul>
           )}
         </div>
+        <TermsEditor />
         <p className="text-center text-[11px] text-slate-400">{APP_BUILD}</p>
       </div>
     </div>
@@ -3007,6 +3022,7 @@ function CoachDashboard({
         <div className="max-w-md mx-auto space-y-5">
           <NotifyToggle orgId={orgId} role="coach" />
           <MeetingUrlSetting orgId={orgId} />
+          <ExportCard players={coachPlayers} protocols={masterProtocols} loading={coachLoading} />
           <CoachSettings orgId={orgId} />
           {/* 免責文は「その他」の一番下に、常に同じ文面で出す */}
           <StandingNotice />
@@ -4366,6 +4382,29 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
   // PHASEを進める／復帰を記録するのは選手本人だけにした（指導者側からは行わない）。
   // スタッフはGATE項目のチェックと観察の記録を担当する。
 
+  // 選手が暗証番号を忘れたとき：指導者が新しい4桁を決めて、本人に伝える
+  const resetPin = async (target) => {
+    const next = await askText(`${target.name} の暗証番号を再設定`, {
+      body: "新しい暗証番号（数字4桁）を決めて、本人に伝えてください。",
+      placeholder: "数字4桁",
+      inputMode: "numeric",
+      maxLength: 4,
+      okLabel: "再設定する",
+    });
+    if (next === null) return;
+    if (!/^\d{4}$/.test(next.trim())) {
+      setError("暗証番号は数字4桁で入力してください。");
+      return;
+    }
+    try {
+      await sbUpdate("players", target.id, { pin: next.trim() });
+      setError(null);
+      showMessage("暗証番号を再設定しました", { body: `${target.name} に新しい暗証番号を伝えてください。` });
+    } catch (err) {
+      setError(errText(err));
+    }
+  };
+
   const deletePlayer = async (playerId, playerName) => {
     const confirmed = await askConfirm(`「${playerName}」のデータを削除しますか？`, {
       body: "日報・チャットなどの記録もすべて消えます。この操作は取り消せません。",
@@ -4623,6 +4662,7 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
             </li>
           )}
         </ul>
+        {listView === "active" && <BroadcastBox players={visiblePlayers} setCoachPlayers={setCoachPlayers} />}
       </div>
 
       <div ref={detailRef} className="scroll-mt-20">
@@ -4650,6 +4690,7 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
             phaseMenus={phaseMenus}
             toggleChecklist={toggleChecklist}
             onDelete={() => deletePlayer(selectedPlayer.id, selectedPlayer.name)}
+            onResetPin={() => resetPin(selectedPlayer)}
             onSendMessage={(content, role, extra) => sendCoachMessage(selectedPlayer.id, content, role, extra)}
             onSaveZoomUrl={saveZoomUrl}
             onAddTreatments={(types, note, date) => addTreatments(selectedPlayer.id, types, note, date)}
@@ -4695,6 +4736,7 @@ function PlayerDetailPanel({
   onResolveSos,
   onResolveChatStatus,
   onCloseConsultation,
+  onResetPin,
   setCoachPlayers,
 }) {
   const report = latestReport(player);
@@ -4804,6 +4846,12 @@ function PlayerDetailPanel({
               title="レポートを印刷 / PDF出力"
             >
               <Printer size={14} /> レポート出力
+            </button>
+            <button
+              onClick={onResetPin}
+              className="flex items-center gap-1 text-xs text-slate-600 border border-slate-200 rounded-full px-3 py-2"
+            >
+              <KeyRound size={14} /> 暗証番号を再設定
             </button>
             <button
               onClick={onDelete}
@@ -4931,6 +4979,8 @@ function PlayerDetailPanel({
 
         {dtab === "record" && (
           <>
+          <StaffNotes player={player} />
+
           <ImagingFindingsCard player={player} onSave={onSaveImagingFindings} />
 
           <HamstringClassificationCard
@@ -5016,11 +5066,11 @@ function PlayerDetailPanel({
 }
 
 // ---------- コンディション推移の簡易折れ線グラフ（外部ライブラリ不使用） ----------
-function SimpleTrendChart({ reports }) {
+function SimpleTrendChart({ reports, limit = 14 }) {
   const width = 320;
   const height = 110;
   const padding = 8;
-  const recent = reports.slice(-14);
+  const recent = limit ? reports.slice(-limit) : reports;
   if (recent.length < 2) return <p className="text-xs text-slate-400">記録が2件になるとグラフが出ます。</p>;
 
   const xStep = (width - padding * 2) / (recent.length - 1);
@@ -7657,6 +7707,8 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
       {tab === "more" && (
         <>
+          <RecoverySummary player={player} protocol={protocol} />
+
           <InjuryDateCard orgId={orgId} player={player} protocol={protocol} setMyPlayer={setMyPlayer} />
 
           <PhaseTimelineComparison player={player} protocol={protocol} />
@@ -7679,6 +7731,9 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
           <p className="text-center text-[11px] text-slate-400">{APP_BUILD}</p>
         </>
       )}
+
+      {/* 利用規約への同意（文面が登録されていて、まだ同意していないときだけ） */}
+      <TermsGate playerId={player.id} />
 
       {tab === "guide" && (
         <UsageGuideTab onGoTab={changeTab} protocol={protocol} onReachEnd={() => setGuideRead(true)} />
@@ -7710,8 +7765,8 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 //   アプリを閉じていても、端末に通知が届くようにする。端末ごとに本人が許可する必要がある。
 //   通知の文面は短い定型文だけ（選手名・メッセージの本文は出さない）。
 const NOTIFY_EVENTS = {
-  player: "指導者からメッセージが届いたとき、面談が決まったとき",
-  coach: "選手からメッセージ・面談の申し込み・面談の予約・SOS があったとき",
+  player: "指導者からメッセージが届いたとき、面談が決まったとき・近づいたとき、夜8時に日報がまだのとき",
+  coach: "選手からメッセージ・面談の申し込み・面談の予約・SOS があったとき、面談が近づいたとき",
 };
 function NotifyToggle({ orgId, role, playerId }) {
   const [state, setState] = useState("loading"); // loading | unsupported | denied | on | off
@@ -7889,6 +7944,418 @@ function NotifyPrompt({ orgId, role, playerId }) {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------
+// 利用規約・個人情報の取り扱いへの同意（選手。v30）
+//   文面は管理者が登録する。登録がなければ何も出ない。文面が変わると、もう一度出る。
+// ------------------------------------------------------------------
+function TermsGate({ playerId }) {
+  const [terms, setTerms] = useState(null); // { version, body } | null
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    let active = true;
+    sbRpc("terms_status", { p_player_id: playerId })
+      .then((r) => active && setTerms(r && typeof r.body === "string" && r.body && r.accepted === false ? r : null))
+      .catch(() => {}); // 読めないときは出さない（アプリは使える）
+    return () => {
+      active = false;
+    };
+  }, [playerId]);
+  if (!terms) return null;
+  const accept = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await sbRpc("terms_accept", { p_player_id: playerId, p_version: terms.version });
+      setTerms(null);
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="fixed inset-0 z-[55] bg-white flex flex-col print:hidden" role="dialog" aria-modal="true">
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 flex flex-col px-5 safe-top">
+        <h2 className="text-lg font-bold text-slate-800 pt-6 pb-3">利用規約・個人情報の取り扱い</h2>
+        <div className="flex-1 min-h-0 overflow-y-auto border border-slate-200 rounded-xl p-4 text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">
+          {terms.body}
+        </div>
+        {error && <p className="text-xs text-red-500 mt-2">{error}</p>}
+        <div className="py-4 safe-bottom">
+          <button
+            onClick={accept}
+            disabled={busy}
+            className="w-full py-3.5 rounded-xl bg-blue-600 text-white font-bold disabled:bg-slate-300"
+          >
+            同意して使う
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 管理者：規約の文面の登録
+function TermsEditor() {
+  const [body, setBody] = useState("");
+  const [info, setInfo] = useState(null); // { version, accepted_count }
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [error, setError] = useState(null);
+  const load = () =>
+    sbRpc("admin_get_terms")
+      .then((r) => {
+        setBody(r?.body || "");
+        setInfo(r || null);
+      })
+      .catch((err) => setError(errText(err)))
+      .finally(() => setLoading(false));
+  useEffect(() => {
+    load();
+  }, []);
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    setMsg(null);
+    try {
+      const r = await sbRpc("admin_set_terms", { p_body: body });
+      setMsg(r?.changed ? "保存しました。選手には次に開いたときに表示されます。" : "変更はありません。");
+      await load();
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+      <h3 className="font-bold text-slate-700 text-sm mb-1">利用規約・個人情報の取り扱い</h3>
+      <p className="text-xs text-slate-400 mb-3">
+        {info?.body
+          ? `第${info.version}版・同意済み ${info.accepted_count}名。文面を変えると、全員にもう一度表示されます。`
+          : "文面を登録すると、選手に最初の1回だけ表示して同意を記録します。空のままなら何も出ません。"}
+      </p>
+      <textarea
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        rows={8}
+        disabled={loading}
+        placeholder="ここに文面を貼り付け"
+        className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm"
+      />
+      {error && <p className="text-xs text-red-500 mt-2">{error}</p>}
+      {msg && <p className="text-xs text-green-600 mt-2">{msg}</p>}
+      <button
+        onClick={save}
+        disabled={saving || loading}
+        className="mt-3 px-4 py-2.5 rounded-lg bg-slate-800 text-white text-sm font-bold disabled:bg-slate-300"
+      >
+        {saving ? "保存中..." : "保存する"}
+      </button>
+    </div>
+  );
+}
+
+// 指導者：組織の選手全員へのお知らせ（各選手のチャットに同じ文を入れる。通知も届く）
+function BroadcastBox({ players, setCoachPlayers }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [role, setRole] = useState(CHAT_STAFF_ROLES[0].value);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState(null);
+  const targets = players.filter((p) => !p.completedAt);
+  if (targets.length === 0) return null;
+  const send = async () => {
+    const content = text.trim();
+    if (!content) return;
+    const sure = await askConfirm(`${targets.length}名に送りますか？`, { body: content, okLabel: "送る" });
+    if (!sure) return;
+    setSending(true);
+    setError(null);
+    try {
+      const rows = await sbInsert(
+        "messages",
+        targets.map((p) => ({ player_id: p.id, sender: "staff", staff_role: role, content }))
+      );
+      const byPlayer = {};
+      (rows || []).forEach((r) => {
+        (byPlayer[r.player_id] = byPlayer[r.player_id] || []).push(normalizeMessage(r));
+      });
+      setCoachPlayers((prev) =>
+        prev.map((p) => (byPlayer[p.id] ? { ...p, messages: [...p.messages, ...byPlayer[p.id]] } : p))
+      );
+      setText("");
+      setOpen(false);
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setSending(false);
+    }
+  };
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="w-full py-2.5 text-sm font-bold text-blue-700 border-t border-slate-200 flex items-center justify-center gap-1.5"
+      >
+        <Megaphone size={15} /> 全員に連絡
+      </button>
+    );
+  }
+  return (
+    <div className="border-t border-slate-200 p-3 space-y-2 bg-slate-50">
+      <p className="text-xs font-bold text-slate-600">現役の選手 {targets.length}名のチャットに送ります</p>
+      <select value={role} onChange={(e) => setRole(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm bg-white">
+        {CHAT_STAFF_ROLES.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}として送る
+          </option>
+        ))}
+      </select>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={3}
+        placeholder="お知らせの内容"
+        className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm"
+      />
+      {error && <p className="text-xs text-red-500">{error}</p>}
+      <div className="flex gap-2">
+        <button onClick={() => setOpen(false)} className="flex-1 py-2.5 rounded-lg border border-slate-300 bg-white text-sm text-slate-600">
+          やめる
+        </button>
+        <button
+          onClick={send}
+          disabled={sending || !text.trim()}
+          className="flex-1 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-bold disabled:bg-slate-300"
+        >
+          {sending ? "送信中..." : "送る"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// 指導者どうしの申し送りメモ（選手の画面には出さない）
+function StaffNotes({ player }) {
+  const [notes, setNotes] = useState([]);
+  const [text, setText] = useState("");
+  const [role, setRole] = useState(CHAT_STAFF_ROLES[0].value);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    let active = true;
+    setNotes([]);
+    sbSelect("staff_notes", `?player_id=eq.${encodeURIComponent(player.id)}&select=*&order=created_at.desc`)
+      .then((rows) => active && setNotes(rows || []))
+      .catch((err) => active && setError(errText(err)));
+    return () => {
+      active = false;
+    };
+  }, [player.id]);
+  const add = async () => {
+    const body = text.trim();
+    if (!body) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const [row] = await sbInsert("staff_notes", { player_id: player.id, author_role: role, body });
+      setNotes((prev) => [row, ...prev]);
+      setText("");
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const remove = async (id) => {
+    if (!(await askConfirm("このメモを削除しますか？", { okLabel: "削除する", danger: true }))) return;
+    try {
+      await sbDelete("staff_notes", id);
+      setNotes((prev) => prev.filter((n) => n.id !== id));
+    } catch (err) {
+      setError(errText(err));
+    }
+  };
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-5">
+      <h4 className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+        <ClipboardList size={16} className="text-blue-600" /> 申し送りメモ
+      </h4>
+      <p className="text-xs text-slate-400 mb-3">指導者どうしの引き継ぎ用です。選手の画面には出ません。</p>
+      <div className="flex gap-2 mb-2">
+        <select value={role} onChange={(e) => setRole(e.target.value)} aria-label="書く人の立場" className="border border-slate-300 rounded-lg px-2 py-2.5 text-sm bg-white shrink-0">
+          {CHAT_STAFF_ROLES.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={add}
+          disabled={saving || !text.trim()}
+          className="ml-auto px-4 py-2.5 rounded-lg bg-slate-800 text-white text-sm font-bold disabled:bg-slate-300"
+        >
+          残す
+        </button>
+      </div>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={2}
+        placeholder="例：左ハムの張りが残る。次回は RDL の負荷を据え置き"
+        className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm"
+      />
+      {error && <p className="text-xs text-red-500 mt-2">{error}</p>}
+      <ul className="mt-3 space-y-2">
+        {notes.map((n) => (
+          <li key={n.id} className="bg-slate-50 rounded-lg px-3 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] text-slate-500">
+                {CHAT_STAFF_ROLE_LABELS[n.author_role] || "指導者"}・{formatDateTimeJa(n.created_at)}
+              </p>
+              <button onClick={() => remove(n.id)} className="text-slate-300 hover:text-red-500 p-2 -m-2" aria-label="このメモを削除">
+                <Trash2 size={14} />
+              </button>
+            </div>
+            <p className="text-sm text-slate-800 whitespace-pre-wrap mt-0.5">{n.body}</p>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// 記録の書き出し（CSV）。表計算ソフトでそのまま開ける形（先頭に BOM）
+function downloadCsv(filename, header, rows) {
+  const esc = (v) => {
+    const t = v === null || v === undefined ? "" : String(v);
+    return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+  };
+  const text = [header, ...rows].map((r) => r.map(esc).join(",")).join("\r\n");
+  const blob = new Blob(["﻿" + text], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+function buildExports(players, protocols, anonymous) {
+  const nameOf = (p, i) => (anonymous ? `選手${String(i + 1).padStart(3, "0")}` : p.name);
+  const protoOf = (p) => protocols.find((m) => m.id === p.protocolId)?.name || "";
+  const dateOnly = (iso) => (iso ? String(iso).slice(0, 10) : "");
+  const daysBetween = (a, b) => (a && b ? Math.round((new Date(b) - new Date(a)) / 86400000) : "");
+  return {
+    players: {
+      file: "選手一覧.csv",
+      header: ["選手", "プロトコル", "PHASE", "受傷日", "復帰日", "受傷から復帰までの日数", "BAMIC", "損傷筋", "部位"],
+      rows: players.map((p, i) => [
+        nameOf(p, i), protoOf(p), p.currentPhase, p.injuryDate || "", dateOnly(p.completedAt),
+        daysBetween(p.injuryDate, p.completedAt), p.bamicGrade || "",
+        MUSCLE_LABELS[p.hamstringMuscle] || p.hamstringMuscle || "", LOCATION_LABELS[p.hamstringLocation] || p.hamstringLocation || "",
+      ]),
+    },
+    reports: {
+      file: "日報.csv",
+      header: ["選手", "日付", "痛み", "疲労度", "睡眠の質", "気分", "恐怖心", "RPE", "本音"],
+      rows: players.flatMap((p, i) =>
+        p.reports.map((r) => [nameOf(p, i), r.date || "", r.vas ?? "", r.fatigue ?? "", r.sleepQuality ?? "", r.mental ?? "", r.fear ?? "", r.rpe ?? "", anonymous ? "" : r.honne || ""])
+      ),
+    },
+    phases: {
+      file: "PHASEの日数.csv",
+      header: ["選手", "PHASE", "開始日", "終了日", "日数"],
+      rows: players.flatMap((p, i) =>
+        p.phaseHistory.map((h) => [nameOf(p, i), h.phaseNumber, dateOnly(h.enteredAt), dateOnly(h.leftAt), daysBetween(h.enteredAt, h.leftAt)])
+      ),
+    },
+    treatments: {
+      file: "治療の記録.csv",
+      header: ["選手", "日付", "処置", "メモ"],
+      rows: players.flatMap((p, i) =>
+        p.treatments.map((t) => [nameOf(p, i), t.treatedDate || dateOnly(t.createdAt), TREATMENT_LABELS[t.type] || t.type, anonymous ? "" : t.note || ""])
+      ),
+    },
+  };
+}
+function ExportCard({ players, protocols, loading }) {
+  const [anonymous, setAnonymous] = useState(true);
+  const data = buildExports(players, protocols, anonymous);
+  const items = [
+    ["players", "選手一覧"],
+    ["reports", "日報"],
+    ["phases", "PHASE の日数"],
+    ["treatments", "治療の記録"],
+  ];
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+      <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
+        <Download size={16} className="text-blue-600" /> 記録の書き出し
+      </p>
+      <label className="flex items-start gap-3 text-sm text-slate-700 mb-3">
+        <input type="checkbox" checked={anonymous} onChange={(e) => setAnonymous(e.target.checked)} className="mt-0.5 w-5 h-5 shrink-0 accent-blue-600" />
+        名前を番号に置き換える（自由記述も外す）
+      </label>
+      <div className="grid grid-cols-2 gap-2">
+        {items.map(([key, label]) => (
+          <button
+            key={key}
+            disabled={loading || data[key].rows.length === 0}
+            onClick={() => downloadCsv(data[key].file, data[key].header, data[key].rows)}
+            className="py-2.5 rounded-lg border border-slate-300 text-sm text-slate-700 disabled:opacity-40"
+          >
+            {label}
+            <span className="block text-[11px] text-slate-400">{data[key].rows.length}件</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// 復帰した選手：復帰までの記録（PHASE ごとの日数と、日報の推移）
+function RecoverySummary({ player, protocol }) {
+  if (!player.completedAt) return null;
+  const durations = computeOwnPhaseDurations(player.phaseHistory);
+  const total =
+    player.injuryDate ? Math.max(0, Math.round((new Date(player.completedAt) - new Date(player.injuryDate)) / 86400000)) : null;
+  const phases = phaseRange(protocol).filter((n) => durations[n] !== undefined);
+  const max = Math.max(1, ...phases.map((n) => durations[n]));
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+      <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+        <Trophy size={16} className="text-amber-500" /> 復帰までの記録
+      </p>
+      {total !== null && (
+        <p className="text-2xl font-extrabold text-slate-800">
+          {total}
+          <span className="text-sm font-bold text-slate-500 ml-1">日（受傷から復帰まで）</span>
+        </p>
+      )}
+      <div className="space-y-2 mt-3">
+        {phases.map((n) => (
+          <div key={n}>
+            <div className="flex items-center justify-between text-xs mb-1">
+              <span className={`font-bold ${PHASE_TEXT_COLORS[n]}`}>PHASE {n}</span>
+              <span className="text-slate-500">{durations[n]}日</span>
+            </div>
+            <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+              <div className={`h-full ${PHASE_BG_COLORS[n]}`} style={{ width: `${Math.max(4, (durations[n] / max) * 100)}%` }} />
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="text-xs font-bold text-slate-600 mt-4 mb-2">日報の推移（全期間）</p>
+      <SimpleTrendChart reports={player.reports} limit={null} />
     </div>
   );
 }
@@ -8696,6 +9163,7 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
   const [exercises, setExercises] = useState([]);
   const [steps, setSteps] = useState([]);
   const [progress, setProgress] = useState([]);
+  const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -8716,12 +9184,18 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
         "player_exercise_progress",
         `?player_id=eq.${encodeURIComponent(player.id)}&select=*`
       ),
+      // 「今日やった」の記録（直近7日分）。読めなくてもメニューは出す
+      sbSelect(
+        "exercise_logs",
+        `?player_id=eq.${encodeURIComponent(player.id)}&done_on=gte.${localDateStr(new Date(Date.now() - 6 * 86400000))}&select=exercise_id,done_on`
+      ).catch(() => []),
     ])
-      .then(([e, s, p]) => {
+      .then(([e, s, p, l]) => {
         if (!active) return;
         setExercises(e || []);
         setSteps(s || []);
         setProgress(p || []);
+        setLogs(l || []);
       })
       .catch((err) => active && setError(errText(err)))
       .finally(() => active && setLoading(false));
@@ -8731,6 +9205,32 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
   }, [protocol?.id, player.id]);
 
   const progressOf = (exId) => progress.find((p) => p.exercise_id === exId);
+  // 「今日やった」：選手が自分で付ける。指導者は、今日と直近7日の回数を見られる
+  const today = todayStr();
+  const doneToday = (exId) => logs.some((l) => l.exercise_id === exId && l.done_on === today);
+  const doneCount = (exId) => logs.filter((l) => l.exercise_id === exId).length;
+  const toggleDone = async (exId) => {
+    const was = doneToday(exId);
+    // 先に画面を変えて、失敗したら戻す
+    setLogs((prev) =>
+      was ? prev.filter((l) => !(l.exercise_id === exId && l.done_on === today)) : [...prev, { exercise_id: exId, done_on: today }]
+    );
+    try {
+      if (was) {
+        await sb(
+          `exercise_logs?player_id=eq.${encodeURIComponent(player.id)}&exercise_id=eq.${exId}&done_on=eq.${today}`,
+          { method: "DELETE", prefer: "return=minimal" }
+        );
+      } else {
+        await sbUpsert("exercise_logs", { player_id: player.id, exercise_id: exId, done_on: today }, "player_id,exercise_id,done_on");
+      }
+    } catch (err) {
+      setLogs((prev) =>
+        was ? [...prev, { exercise_id: exId, done_on: today }] : prev.filter((l) => !(l.exercise_id === exId && l.done_on === today))
+      );
+      setError(errText(err));
+    }
+  };
   const stepsOf = (exId) => steps.filter((s) => s.exercise_id === exId);
 
   const saveProgress = async (exId, patch) => {
@@ -8786,11 +9286,27 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
               PHASE {e.intro_phase} 導入
               {e.continues ? "・以降も継続" : ""}
               {e.prescription ? `・${e.prescription}` : ""}
+              {!e.is_gate_exercise ? "・GATE種目外" : ""}
             </p>
           </div>
-          {!e.is_gate_exercise && (
-            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 shrink-0">
-              GATE種目外
+          {readOnly ? (
+            <button
+              onClick={() => toggleDone(e.id)}
+              aria-pressed={doneToday(e.id)}
+              className={`shrink-0 min-h-[36px] px-3 rounded-full text-xs font-bold border flex items-center gap-1 ${
+                doneToday(e.id) ? "bg-emerald-600 border-emerald-600 text-white" : "bg-white border-slate-300 text-slate-500"
+              }`}
+            >
+              {doneToday(e.id) && <CheckCircle2 size={14} />}
+              {doneToday(e.id) ? "今日やった" : "やった"}
+            </button>
+          ) : (
+            <span
+              className={`shrink-0 text-[11px] font-bold px-2 py-1 rounded-full ${
+                doneToday(e.id) ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"
+              }`}
+            >
+              {doneToday(e.id) ? "今日 実施" : "今日 未実施"}・7日で{doneCount(e.id)}回
             </span>
           )}
         </div>
