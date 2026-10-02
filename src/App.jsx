@@ -205,7 +205,7 @@ function MediaUploadButton({ playerId, orgId, context, contextId, onUploaded, la
       const result = await uploadAttachment(file, { playerId, orgId, context, contextId });
       onUploaded?.(result);
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setBusy(false);
       if (inputRef.current) inputRef.current.value = "";
@@ -247,17 +247,30 @@ function AttachmentPreview({ url, kind }) {
 
 // 画面に出すリンクは http / https だけにする（javascript: などを埋め込まれても実行させない）
 function safeHref(url) {
+  const text = String(url || "").trim();
+  if (!text) return undefined; // 空のときは「リンクなし」（以前は、いまのページの URL を返していた）
   try {
-    const u = new URL(String(url || ""), window.location.href);
+    const u = new URL(text); // http(s) で始まる完全な URL だけ
     return u.protocol === "https:" || u.protocol === "http:" ? u.href : undefined;
   } catch {
     return undefined;
   }
 }
 
+// 画面に出すエラー文。日本語の文（DB の関数や自分で書いたもの）はそのまま、それ以外は日本語の定型文にする
+// （英語のエラー文をそのまま見せない）
+function errText(err) {
+  const m = String(err?.message || "");
+  if (/[ぁ-んァ-ン一-龥]/.test(m)) return m;
+  if (err instanceof TypeError && /fetch|load|network/i.test(m)) {
+    return "通信できませんでした。電波のよいところで、もう一度お試しください。";
+  }
+  return "うまくいきませんでした。もう一度お試しください。";
+}
+
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.16";
+const APP_BUILD = "v15.17";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -1144,7 +1157,7 @@ function RehabApp() {
       setPlayerDirectory(dirRows);
       setPhaseMenus(menuRows.map(normalizeMenu));
     } catch (err) {
-      setLoadError(err.message);
+      setLoadError(errText(err));
     } finally {
       setLoading(false);
     }
@@ -1196,7 +1209,7 @@ function RehabApp() {
         setSlots(slotRows.map(normalizeSlot));
       }
     } catch (err) {
-      if (!silent) setLoadError(err.message);
+      if (!silent) setLoadError(errText(err));
     } finally {
       if (!silent) setCoachLoading(false);
     }
@@ -1449,7 +1462,6 @@ function LoginShell({ mode, onChangeMode, children }) {
             組織ログインに戻る
           </button>
         )}
-        <InstallHint />
       </div>
     </div>
   );
@@ -1479,7 +1491,7 @@ function AdminLogin({ onChangeMode, onAuthed }) {
       setPw("");
       onAuthed();
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setBusy(false);
     }
@@ -1487,9 +1499,6 @@ function AdminLogin({ onChangeMode, onAuthed }) {
 
   return (
     <LoginShell mode="admin" onChangeMode={onChangeMode}>
-      <p className="text-sm text-slate-500 text-center mb-4">
-        管理者のメールアドレスとパスワードを入力してください。
-      </p>
       <label className="text-xs text-slate-500">メールアドレス</label>
       <input
         type="email"
@@ -1678,7 +1687,7 @@ function OrgManager({ onBack }) {
       setSecrets((prev) => ({ ...prev, [org.id]: data || {} }));
     } catch (err) {
       setSecrets((prev) => ({ ...prev, [org.id]: undefined }));
-      setError(err.message);
+      setError(errText(err));
     }
   };
   // パスワードを変えたあとは、開いている表示を閉じる（古い値を見せない）
@@ -1690,7 +1699,7 @@ function OrgManager({ onBack }) {
       const rows = await sbRpc("admin_list_orgs");
       setOrgs(rows || []);
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setLoading(false);
     }
@@ -1761,7 +1770,7 @@ function OrgManager({ onBack }) {
       setCoachPwConfirm("");
       await load();
     } catch (err) {
-      setError(`追加できませんでした: ${err.message}`);
+      setError(`追加できませんでした: ${errText(err)}`);
     } finally {
       setSaving(false);
     }
@@ -1787,7 +1796,7 @@ function OrgManager({ onBack }) {
       setInvite({ name: org.name, link: makeInviteLink(org.id, normalizeOrgPassword(next)) });
       await load();
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -1811,7 +1820,7 @@ function OrgManager({ onBack }) {
       clearSecrets(org.id);
       await load();
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -1855,7 +1864,7 @@ function OrgManager({ onBack }) {
       setDone(`組織「${org.name}」を削除しました。`);
       await load();
     } catch (err) {
-      setError(`削除できませんでした: ${err.message}`);
+      setError(`削除できませんでした: ${errText(err)}`);
     }
   };
 
@@ -1981,7 +1990,7 @@ function OrgManager({ onBack }) {
             <ul className="divide-y divide-slate-100">
               {orgs.map((o) => (
                 <li key={o.id} className="py-3">
-                 <div className="flex items-start justify-between gap-3">
+                 <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
                   <div className="min-w-0">
                     <p className="text-sm font-bold text-slate-800 break-words">{o.name}</p>
                     <p className="text-[11px] text-slate-400 font-mono break-all">{o.id}</p>
@@ -2003,28 +2012,28 @@ function OrgManager({ onBack }) {
                       </p>
                     )}
                   </div>
-                  <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 max-w-[55%]">
+                  <div className="flex flex-wrap items-center gap-1.5 sm:justify-end sm:max-w-[60%]">
                     <button
                       onClick={() => toggleSecrets(o)}
-                      className="text-[11px] font-bold text-blue-600 hover:text-blue-800 underline"
+                      className="text-xs font-bold text-blue-700 border border-blue-200 rounded-lg px-2.5 py-2 bg-blue-50"
                     >
                       {secrets[o.id] ? "確認を閉じる" : "ID・パスワードを確認"}
                     </button>
                     <button
                       onClick={() => handleMakeInvite(o)}
-                      className="text-[11px] text-blue-600 hover:text-blue-800 underline"
+                      className="text-xs text-blue-700 border border-blue-200 rounded-lg px-2.5 py-2 bg-white"
                     >
                       招待リンク
                     </button>
                     <button
                       onClick={() => handleResetPassword(o)}
-                      className="text-[11px] text-slate-500 hover:text-blue-600 underline"
+                      className="text-xs text-slate-600 border border-slate-200 rounded-lg px-2.5 py-2 bg-white"
                     >
                       パスワード変更
                     </button>
                     <button
                       onClick={() => handleSetCoachPassword(o)}
-                      className="text-[11px] text-slate-500 hover:text-blue-600 underline"
+                      className="text-xs text-slate-600 border border-slate-200 rounded-lg px-2.5 py-2 bg-white"
                     >
                       {o.has_coach_password ? "指導者パスワードをリセット" : "指導者パスワードを設定"}
                     </button>
@@ -2218,7 +2227,7 @@ function InstallGate({ orgId, player, onSkip }) {
       const r = await sbRpc("transfer_create", { p_org_id: orgId, p_player_id: player?.id ?? null });
       setCode(r?.code || null);
     } catch (err) {
-      setCodeError(err.message);
+      setCodeError(errText(err));
     }
   };
   useEffect(() => {
@@ -2408,7 +2417,7 @@ function OrgLogin({ onAuthed, invite }) {
       setInviteText("");
       onAuthed({ id: org.id, name: org.name });
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setBusy(false);
     }
@@ -2434,7 +2443,7 @@ function OrgLogin({ onAuthed, invite }) {
       setInviteText("");
       onAuthed({ id: r.org.id, name: r.org.name });
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setBusy(false);
     }
@@ -2502,10 +2511,7 @@ function OrgLogin({ onAuthed, invite }) {
         </p>
       )}
       <div className="rounded-xl border border-blue-100 bg-blue-50 p-3 mb-5">
-        <p className="text-xs font-bold text-blue-700 mb-1">招待リンク・引き継ぎコードで入る</p>
-        <p className="text-[11px] text-blue-700/80 leading-relaxed mb-2">
-          管理者から届いたリンク、またはブラウザ側の画面でコピーした引き継ぎコードを、ここで貼り付けるだけで入れます。
-        </p>
+        <p className="text-xs font-bold text-blue-700 mb-2">招待リンク・引き継ぎコードで入る</p>
         <button
           type="button"
           onClick={pasteInvite}
@@ -2520,7 +2526,7 @@ function OrgLogin({ onAuthed, invite }) {
             setInviteText(e.target.value);
             if (parseInvite(e.target.value) || parseTransferCode(e.target.value)) handleInvite(e.target.value);
           }}
-          placeholder="ここに長押しで貼り付けてもOK"
+          placeholder="ここに長押しで貼り付け"
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck={false}
@@ -2528,9 +2534,7 @@ function OrgLogin({ onAuthed, invite }) {
         />
       </div>
 
-      <p className="text-sm text-slate-500 text-center mb-4">
-        または、組織のIDとパスワードを入力してください。
-      </p>
+      <p className="text-xs text-slate-400 text-center mb-3">または</p>
 
       <label className="text-xs text-slate-500">組織ID</label>
       <input
@@ -2541,7 +2545,6 @@ function OrgLogin({ onAuthed, invite }) {
         spellCheck={false}
         autoComplete="username"
         className="w-full border border-slate-300 rounded-lg px-4 py-2.5 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
-        autoFocus
       />
       <label className="text-xs text-slate-500">パスワード</label>
       <input
@@ -2584,7 +2587,7 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
       .then((r) => active && setPhase(r?.set ? "login" : "unset"))
       .catch((err) => {
         if (!active) return;
-        setError(err.message);
+        setError(errText(err));
         setPhase("login");
       });
     return () => {
@@ -2610,7 +2613,7 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
         setError("パスワードが違います。");
       }
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setBusy(false);
     }
@@ -2739,7 +2742,7 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, p
       setTimestampNote("");
       setShowExtra(false);
     } catch (err) {
-      showMessage("送信できませんでした", { body: err.message });
+      showMessage("送信できませんでした", { body: errText(err) });
     } finally {
       setSending(false);
     }
@@ -2864,12 +2867,13 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, p
           />
         </div>
       )}
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         {roleOptions && (
           <select
             value={role}
             onChange={(e) => setRole(e.target.value)}
-            className="border border-slate-300 rounded-lg px-2 py-2 text-xs bg-white shrink-0"
+            aria-label="送信者の立場"
+            className="w-full sm:w-auto border border-slate-300 rounded-lg px-3 py-2.5 text-sm bg-white shrink-0"
           >
             {roleOptions.map((o) => (
               <option key={o.value} value={o.value}>
@@ -3066,7 +3070,7 @@ function CoachSettings({ orgId }) {
       setNext("");
       setConfirm("");
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setSaving(false);
     }
@@ -3123,7 +3127,8 @@ async function fetchMeetingUrl(orgId) {
     "app_settings",
     `?org_id=eq.${encodeURIComponent(orgId)}&key=eq.${MEETING_URL_KEY}&select=value`
   );
-  return safeHref(rows?.[0]?.value) ? rows[0].value : "";
+  const value = rows?.[0]?.value || "";
+  return safeHref(value) ? value : "";
 }
 
 function MeetingUrlSetting({ orgId }) {
@@ -3142,7 +3147,7 @@ function MeetingUrlSetting({ orgId }) {
         setUrl(v);
         setSavedUrl(v);
       })
-      .catch((err) => active && setError(err.message))
+      .catch((err) => active && setError(errText(err)))
       .finally(() => active && setLoading(false));
     return () => {
       active = false;
@@ -3163,7 +3168,7 @@ function MeetingUrlSetting({ orgId }) {
       setSavedUrl(value);
       setDone(true);
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setSaving(false);
     }
@@ -3248,7 +3253,7 @@ function MeetingsBoard({ orgId, slots, setSlots, coachPlayers, setCoachPlayers, 
       await sbUpdate("slots", slotId, { zoom_url: url.trim() || null });
       setSlots((prev) => prev.map((s) => (s.id === slotId ? { ...s, zoomUrl: url.trim() || null } : s)));
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -3284,7 +3289,7 @@ function MeetingsBoard({ orgId, slots, setSlots, coachPlayers, setCoachPlayers, 
       }
       setSlots((prev) => prev.map((s) => (s.id === slot.id ? { ...s, bookedBy: null } : s)));
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setBusyId(null);
     }
@@ -3299,7 +3304,7 @@ function MeetingsBoard({ orgId, slots, setSlots, coachPlayers, setCoachPlayers, 
       await sbDelete("slots", slot.id);
       setSlots((prev) => prev.filter((s) => s.id !== slot.id));
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setBusyId(null);
     }
@@ -3457,7 +3462,7 @@ function CoachScheduling({ orgId, slots, setSlots }) {
       );
       setAvailability(rows);
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setLoading(false);
     }
@@ -3483,7 +3488,7 @@ function CoachScheduling({ orgId, slots, setSlots }) {
       const [inserted] = await sbInsert("staff_availability", { role, datetime, org_id: orgId });
       setAvailability((prev) => [...prev, inserted].sort((a, b) => a.datetime.localeCompare(b.datetime)));
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setSaving(false);
     }
@@ -3494,7 +3499,7 @@ function CoachScheduling({ orgId, slots, setSlots }) {
       await sbDelete("staff_availability", id);
       setAvailability((prev) => prev.filter((a) => a.id !== id));
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -3525,7 +3530,7 @@ function CoachScheduling({ orgId, slots, setSlots }) {
       const rows = await sbSelect("slots", `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=datetime.asc`);
       setSlots(rows.map(normalizeSlot));
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setSyncing(false);
     }
@@ -3534,8 +3539,8 @@ function CoachScheduling({ orgId, slots, setSlots }) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <div className="bg-white rounded-xl border border-slate-200 p-5 h-fit">
-        <h3 className="font-bold text-slate-700 text-sm mb-4">面談可能日時の登録</h3>
-        <label className="text-xs text-slate-500">立場</label>
+        <h3 className="font-bold text-slate-700 text-sm mb-4">空いている日時を登録</h3>
+        <label className="text-xs text-slate-500">だれの予定か</label>
         <select
           value={role}
           onChange={(e) => setRole(e.target.value)}
@@ -3547,42 +3552,22 @@ function CoachScheduling({ orgId, slots, setSlots }) {
             </option>
           ))}
         </select>
-        <div className="grid grid-cols-3 gap-2 mb-2">
-          <select
-            value={year}
-            onChange={(e) => setYear(Number(e.target.value))}
-            className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
-          >
-            {[now.getFullYear(), now.getFullYear() + 1].map((y) => (
-              <option key={y} value={y}>
-                {y}年
-              </option>
-            ))}
-          </select>
-          <select
-            value={month}
-            onChange={(e) => setMonth(Number(e.target.value))}
-            className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
-          >
-            {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-              <option key={m} value={m}>
-                {m}月
-              </option>
-            ))}
-          </select>
-          <select
-            value={day}
-            onChange={(e) => setDay(Number(e.target.value))}
-            className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
-          >
-            {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((d) => (
-              <option key={d} value={d}>
-                {d}日
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="grid grid-cols-2 gap-2 mb-3">
+        <label className="text-xs text-slate-500">日付</label>
+        <input
+          type="date"
+          value={`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`}
+          min={localDateStr(now)}
+          onChange={(e) => {
+            const [y, m, d] = e.target.value.split("-").map(Number);
+            if (!y || !m || !d) return;
+            setYear(y);
+            setMonth(m);
+            setDay(d);
+          }}
+          className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-1 mb-3 bg-white"
+        />
+        <label className="text-xs text-slate-500">時刻</label>
+        <div className="grid grid-cols-2 gap-2 mt-1 mb-3">
           <select
             value={hour}
             onChange={(e) => setHour(Number(e.target.value))}
@@ -3613,25 +3598,23 @@ function CoachScheduling({ orgId, slots, setSlots }) {
           className="w-full py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:bg-slate-300 flex items-center justify-center gap-2"
         >
           {saving && <Loader2 size={14} className="animate-spin" />}
-          {saving ? "登録中..." : "この日時を空き時間として登録"}
+          {saving ? "登録中..." : "登録する"}
         </button>
       </div>
 
       <div className="bg-white rounded-xl border border-slate-200 p-5">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="font-bold text-slate-700 text-sm">登録済みの空き時間と自動照合</h3>
-          <button
-            onClick={handleSync}
-            disabled={syncing}
-            className="text-xs px-3 py-1.5 rounded-full bg-slate-800 text-white font-medium hover:bg-slate-700 disabled:bg-slate-300 flex items-center gap-1 shrink-0"
-          >
-            {syncing && <Loader2 size={12} className="animate-spin" />} 自動照合して公開
-          </button>
-        </div>
+        <h3 className="font-bold text-slate-700 text-sm mb-2">登録済みの日時</h3>
         <p className="text-xs text-slate-400 mb-3">
           コーチ・トレーナー・ドクターのうち <span className="font-bold text-slate-600">2人以上</span>
           が空いている日時が公開されます。
         </p>
+        <button
+          onClick={handleSync}
+          disabled={syncing}
+          className="w-full mb-4 py-3 rounded-lg bg-slate-800 text-white text-sm font-bold disabled:bg-slate-300 flex items-center justify-center gap-2"
+        >
+          {syncing && <Loader2 size={14} className="animate-spin" />} そろった日時を公開する
+        </button>
         {loading ? (
           <p className="text-sm text-slate-400">読み込み中...</p>
         ) : (
@@ -3720,7 +3703,7 @@ function MenuLibraryManagement({ orgId, masterProtocols, phaseMenus, setPhaseMen
       setNgCompensation("");
       setAlternativeMenu("");
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setSaving(false);
     }
@@ -3731,7 +3714,7 @@ function MenuLibraryManagement({ orgId, masterProtocols, phaseMenus, setPhaseMen
       await sbDelete("phase_menus", id);
       setPhaseMenus((prev) => prev.filter((m) => m.id !== id));
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -3796,7 +3779,7 @@ function MenuLibraryManagement({ orgId, masterProtocols, phaseMenus, setPhaseMen
           ))}
           {masterProtocols.length === 0 && <option value="">プロトコル未登録</option>}
         </select>
-        <label className="text-xs text-slate-500">対象Phase</label>
+        <label className="text-xs text-slate-500">対象の PHASE</label>
         <select
           value={phaseNumber}
           onChange={(e) => setPhaseNumber(Number(e.target.value))}
@@ -3832,7 +3815,7 @@ function MenuLibraryManagement({ orgId, masterProtocols, phaseMenus, setPhaseMen
           placeholder="例：骨盤が後傾して腰が丸まる代償動作に注意"
           className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3"
         />
-        <label className="text-xs text-slate-500">患部外の代替コソ練メニュー（体幹等）</label>
+        <label className="text-xs text-slate-500">患部外でできる代わりのメニュー</label>
         <textarea
           value={alternativeMenu}
           onChange={(e) => setAlternativeMenu(e.target.value)}
@@ -3898,6 +3881,7 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
   const [videoUrl, setVideoUrl] = useState("");
   const [scheme, setScheme] = useState("");
   const [phaseForms, setPhaseForms] = useState(blankPhases(5));
+  const [showAdd, setShowAdd] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
@@ -3933,8 +3917,9 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
       setVideoUrl("");
       setScheme("");
       setPhaseForms(blankPhases(5));
+      setShowAdd(false);
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setSaving(false);
     }
@@ -3964,7 +3949,7 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
       await sbDelete("protocols", id);
       setMasterProtocols((prev) => prev.filter((p) => p.id !== id));
     } catch (err) {
-      setError(`削除できませんでした: ${err.message}`);
+      setError(`削除できませんでした: ${errText(err)}`);
     }
   };
 
@@ -3976,7 +3961,7 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
         prev.map((p) => (p.id === id ? { ...p, classificationScheme: value || null } : p))
       );
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -3997,7 +3982,7 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
         prev.map((p) => (p.id === id ? { ...p, videoUrl: url.trim() || null } : p))
       );
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -4005,7 +3990,7 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <div className="space-y-4">
         <h3 className="font-bold text-slate-700 text-sm">
-          登録済みプロトコル ({masterProtocols.length})
+          プロトコル {masterProtocols.length}件
         </h3>
         {masterProtocols.map((p) => (
           <ProtocolCard
@@ -4023,9 +4008,22 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
         {error && <p className="text-xs text-red-500">{error}</p>}
       </div>
 
-      <div className="bg-white rounded-xl border border-slate-200 p-5 h-fit">
-        <h3 className="font-bold text-slate-700 text-sm mb-4 flex items-center gap-1.5">
-          <PlusCircle size={16} className="text-blue-600" /> 新しい怪我の種類を追加
+      {!showAdd && (
+        <button
+          onClick={() => setShowAdd(true)}
+          className="h-fit w-full py-3 rounded-xl border border-dashed border-slate-300 text-sm font-bold text-slate-600 flex items-center justify-center gap-1.5"
+        >
+          <PlusCircle size={16} className="text-blue-600" /> プロトコルを追加
+        </button>
+      )}
+      <div className={`bg-white rounded-xl border border-slate-200 p-5 h-fit ${showAdd ? "" : "hidden"}`}>
+        <h3 className="font-bold text-slate-700 text-sm mb-4 flex items-center justify-between">
+          <span className="flex items-center gap-1.5">
+            <PlusCircle size={16} className="text-blue-600" /> プロトコルを追加
+          </span>
+          <button onClick={() => setShowAdd(false)} className="text-slate-400 p-2 -m-2" aria-label="閉じる">
+            <X size={16} />
+          </button>
         </h3>
         <div className="space-y-3">
           <div>
@@ -4132,6 +4130,7 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme, onSaveCon
   const [savingVideo, setSavingVideo] = useState(false);
   // 中身の編集（フェーズの数は変えない）
   const [editing, setEditing] = useState(false);
+  const [showPhases, setShowPhases] = useState(false);
   const [weeksDraft, setWeeksDraft] = useState(String(protocol.totalWeeks ?? 8));
   const [phaseDrafts, setPhaseDrafts] = useState([]);
   const [savingContent, setSavingContent] = useState(false);
@@ -4166,7 +4165,7 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme, onSaveCon
       await onSaveContent(protocol.id, Math.round(weeks), phases);
       setEditing(false);
     } catch (err) {
-      setContentError(`保存できませんでした: ${err.message}`);
+      setContentError(`保存できませんでした: ${errText(err)}`);
     } finally {
       setSavingContent(false);
     }
@@ -4268,7 +4267,16 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme, onSaveCon
           </div>
         </div>
       )}
-      <div className={`mt-3 space-y-2 ${editing ? "hidden" : ""}`}>
+      {!editing && (
+        <button
+          onClick={() => setShowPhases((v) => !v)}
+          className="mt-3 w-full flex items-center justify-between px-3 py-2.5 rounded-lg bg-slate-50 text-sm text-slate-600"
+        >
+          PHASE と条件
+          {showPhases ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+        </button>
+      )}
+      <div className={`mt-2 space-y-2 ${editing || !showPhases ? "hidden" : ""}`}>
         {protocol.phases.map((ph, i) => (
           <div key={i} className="text-xs bg-slate-50 rounded-lg px-3 py-2">
             <p className="font-semibold text-slate-600">
@@ -4350,7 +4358,7 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
     try {
       await sbUpdate("players", playerId, { checklist: nextChecklist });
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -4370,7 +4378,7 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
       setCoachPlayers((prev) => prev.filter((p) => p.id !== playerId));
       if (selectedId === playerId) setSelectedId(null);
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -4513,17 +4521,6 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
               </span>
             )}
           </p>
-          <ul className="text-[10px] text-slate-500 mt-1.5 space-y-1">
-            <li className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-green-500 inline-block" /> 完全復帰（14日間はここに表示）
-            </li>
-            <li className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-yellow-400 inline-block" /> 受傷2週間・面談未実施
-            </li>
-            <li className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block" /> SOS・要対応
-            </li>
-          </ul>
         </div>
         <ul className="divide-y divide-slate-100 max-h-[70vh] overflow-y-auto">
           {sortedPlayers.map((p) => {
@@ -4968,11 +4965,11 @@ function PlayerDetailPanel({
         {dtab === "chat" && (
           <>
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between gap-2 mb-3">
               <p className="text-sm font-bold text-slate-700 flex items-center gap-1.5">
-                <MessageCircle size={16} className="text-blue-600" /> {player.name} さんとのチャット
+                <MessageCircle size={16} className="text-blue-600" /> チャット
               </p>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 <span
                   className={`text-xs font-bold px-2.5 py-1 rounded-full ${
                     player.supportStatus === "resolved"
@@ -4991,7 +4988,7 @@ function PlayerDetailPanel({
                 {player.supportStatus !== "resolved" && (
                   <button
                     onClick={onResolveChatStatus}
-                    className="text-xs text-slate-400 hover:text-green-600 underline"
+                    className="text-xs text-slate-500 border border-slate-200 rounded-full px-2.5 py-1"
                   >
                     解決済みにする
                   </button>
@@ -5115,7 +5112,7 @@ function ConsultationRequestCard({ orgId, player, setMyPlayer }) {
       setNote("");
       setOpen(false);
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setSending(false);
     }
@@ -5328,7 +5325,7 @@ function GatePanel({
       );
       setChecks(rows || []);
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setLoading(false);
     }
@@ -5406,7 +5403,7 @@ function GatePanel({
         return next;
       });
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setBusyIdx(null);
     }
@@ -5700,7 +5697,7 @@ function TreatmentCard({ player, onAddTreatments, onDeleteTreatment }) {
       setSelected([]);
       setNote("");
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setSaving(false);
     }
@@ -5710,7 +5707,7 @@ function TreatmentCard({ player, onAddTreatments, onDeleteTreatment }) {
     try {
       await onDeleteTreatment(id);
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -6082,7 +6079,7 @@ function PlayerLogin({ orgId, masterProtocols, playerDirectory, setPlayerDirecto
       );
       setMyPlayer(normalizePlayer(fullRows[0]));
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setChecking(false);
     }
@@ -6296,7 +6293,7 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
       setPlayerDirectory((prev) => [...prev, { id: inserted.id, name: inserted.name }]);
       setMyPlayer(normalizePlayer({ ...inserted, reports: [], messages: [], treatments: [], phase_history: [] }));
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setSaving(false);
     }
@@ -6307,7 +6304,7 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
       <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
         <div className="flex items-center gap-2 mb-5">
           <Activity className="text-blue-600" size={22} />
-          <h2 className="font-bold text-lg text-slate-800">新規選手登録</h2>
+          <h2 className="font-bold text-lg text-slate-800">はじめての登録</h2>
         </div>
 
         <label className="text-xs text-slate-500">名前</label>
@@ -6336,7 +6333,7 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
           <div className="border border-blue-200 bg-blue-50 rounded-lg p-3 mb-4">
             <p className="text-xs font-bold text-blue-700 mb-1">損傷の分類</p>
             <p className="text-[10px] text-blue-600 mb-2">
-              リハビリの内容は共通ですが、ここで分けた分類ごとに復帰期間を比較します。
+              わかる範囲で。あとで指導者が入力できます。
             </p>
             <label className="text-[10px] text-slate-600">BAMIC分類</label>
             <select
@@ -6383,7 +6380,7 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
           </div>
         )}
 
-        <label className="text-xs text-slate-500">受傷日（あとから登録・変更も可能です）</label>
+        <label className="text-xs text-slate-500">受傷日</label>
         <input
           type="date"
           value={injuryDate}
@@ -6391,7 +6388,7 @@ function PlayerRegisterForm({ orgId, masterProtocols, setPlayerDirectory, setMyP
           className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-1 mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
 
-        <label className="text-xs text-slate-500">暗証番号（4桁の数字）</label>
+        <label className="text-xs text-slate-500">暗証番号（数字4桁）</label>
         <input
           type="password"
           inputMode="numeric"
@@ -6760,7 +6757,7 @@ function InjuryDateCard({ orgId, player, protocol, setMyPlayer }) {
       await sbUpdate("players", player.id, { injury_date: date || null });
       setMyPlayer((prev) => ({ ...prev, injuryDate: date || null }));
     } catch (err) {
-      showMessage("保存できませんでした", { body: err.message });
+      showMessage("保存できませんでした", { body: errText(err) });
     } finally {
       setSaving(false);
     }
@@ -7084,7 +7081,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
       setSelfSevereSymptom(false);
       setReportMedia(null);
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setSending(false);
     }
@@ -7120,7 +7117,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
       }
       setBookedNotice(slot ? slot.datetime : null);
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -7154,7 +7151,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
       });
       setMyPlayer((prev) => ({ ...prev, currentPhase: nextPhase, checklist: Array(nextCount).fill(false) }));
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -7164,7 +7161,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
       await sbUpdate("players", player.id, { completed_at: now });
       setMyPlayer((prev) => ({ ...prev, completedAt: now }));
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -7736,7 +7733,7 @@ function NotifyToggle({ orgId, role, playerId }) {
       await enablePush(sbRpc, { orgId, role, playerId });
       setState("on");
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
       setState(await pushState(role));
     } finally {
       setBusy(false);
@@ -7837,7 +7834,7 @@ function NotifyPrompt({ orgId, role, playerId }) {
       await enablePush(sbRpc, { orgId, role, playerId });
       setDone(true);
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     } finally {
       setBusy(false);
     }
@@ -8031,7 +8028,7 @@ function AthleteMetricsCard({ player, onSaved }) {
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
-      showMessage("保存できませんでした", { body: err.message });
+      showMessage("保存できませんでした", { body: errText(err) });
     } finally {
       setSaving(false);
     }
@@ -8168,7 +8165,7 @@ function HamstringClassificationCard({ orgId, player, protocol, readOnly, onSave
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
-      showMessage("保存できませんでした", { body: err.message });
+      showMessage("保存できませんでした", { body: errText(err) });
     } finally {
       setSaving(false);
     }
@@ -8366,7 +8363,7 @@ function OffsiteTrainingPanel({ orgId, player, readOnly, onChanged }) {
         setItems(i || []);
         setSelected((s || []).map((r) => r.item_id));
       })
-      .catch((err) => active && setError(err.message))
+      .catch((err) => active && setError(errText(err)))
       .finally(() => active && setLoading(false));
     return () => {
       active = false;
@@ -8389,7 +8386,7 @@ function OffsiteTrainingPanel({ orgId, player, readOnly, onChanged }) {
       }
       onChanged?.();
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -8726,7 +8723,7 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
         setSteps(s || []);
         setProgress(p || []);
       })
-      .catch((err) => active && setError(err.message))
+      .catch((err) => active && setError(errText(err)))
       .finally(() => active && setLoading(false));
     return () => {
       active = false;
@@ -8753,7 +8750,7 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
       });
       onChanged?.();
     } catch (err) {
-      setError(err.message);
+      setError(errText(err));
     }
   };
 
@@ -8850,20 +8847,20 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
                   <button
                     onClick={() => saveProgress(e.id, { current_step: Math.max(1, stepIdx) })}
                     disabled={stepIdx <= 0}
-                    className="p-1 rounded border border-slate-200 text-slate-500 disabled:opacity-30 hover:bg-white"
+                    className="w-9 h-9 flex items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 disabled:opacity-30"
                     title="前のステップへ"
                   >
-                    <ArrowLeft size={12} />
+                    <ArrowLeft size={16} />
                   </button>
                   <button
                     onClick={() =>
                       saveProgress(e.id, { current_step: Math.min(exSteps.length, stepIdx + 2) })
                     }
                     disabled={stepIdx >= exSteps.length - 1}
-                    className="p-1 rounded border border-slate-200 text-blue-600 disabled:opacity-30 hover:bg-white"
+                    className="w-9 h-9 flex items-center justify-center rounded-lg border border-slate-200 bg-white text-blue-600 disabled:opacity-30"
                     title="次のステップへ"
                   >
-                    <ArrowRight size={12} />
+                    <ArrowRight size={16} />
                   </button>
                 </div>
               )}

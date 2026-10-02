@@ -137,7 +137,8 @@ const text = (p) => p.evaluate(() => document.body.innerText);
 async function clickText(p, label, sel = "button") {
   for (const e of await p.$$(sel)) {
     const t = await e.evaluate((n) => (n.offsetParent !== null ? n.innerText.trim() : ""));
-    if (t && t.includes(label)) { await e.click(); return; }
+    // 画面下の固定タブに重なる位置でも押せるよう、要素を画面の中ほどへ送ってから押す
+    if (t && t.includes(label)) { await e.evaluate((n) => n.scrollIntoView({ block: "center" })); await e.click(); return; }
   }
   throw new Error("ボタンが見つからない: " + label);
 }
@@ -348,6 +349,7 @@ try {
     await coachLogin(c);
     await clickText(c, "その他", "nav button"); await sleep(900);
     ok((await text(c)).includes("面談で使うオンライン会議の URL"), "指導者の「その他」に、面談の URL の登録欄がある");
+    ok(!/[A-Za-z]{4,} [a-z]{3,} [a-z]{3,}/.test((await text(c)).replace(/RE:SPRINT|Zoom|https?:\S+/g, "")), "URL が未登録でも、英語のエラー文は出ない");
     await c.type('input[placeholder^="https://zoom.us"]', "javascript:alert(1)");
     await clickText(c, "保存する"); await sleep(400);
     ok((await text(c)).includes("https:// で始まる URL") && !st.meetingUrl, "URL でないものは保存できない");
@@ -446,11 +448,29 @@ try {
     ok(!(await text(p)).includes("未到達"), "その他：記録のない PHASE の空の棒を並べない");
   });
 
+  await step("指導者：プロトコルと日程調整の画面", async () => {
+    const c = await newPage(makeState({ injuryDaysAgo: 3 }));
+    await coachLogin(c);
+    await clickText(c, "プロトコル", "nav button"); await sleep(800);
+    let t = await text(c);
+    ok(!t.includes("条件A-1") && t.includes("PHASE と条件") && !t.includes("怪我の名称"), "プロトコル：PHASE の一覧と追加フォームは、最初は畳んである");
+    const h = await c.evaluate(() => document.documentElement.scrollHeight);
+    ok(h < 1400, "プロトコルの画面が短くなった（" + h + "px。以前は約3,000px）");
+    await clickText(c, "PHASE と条件"); await sleep(300);
+    ok((await text(c)).includes("条件A-1"), "押すと PHASE と条件が開く");
+    await clickText(c, "プロトコルを追加"); await sleep(300);
+    ok((await text(c)).includes("怪我の名称"), "「プロトコルを追加」で追加フォームが開く");
+    await clickText(c, "日程調整", "nav button"); await sleep(800);
+    ok((await c.$$('input[type="date"]')).length === 1 && (await c.$$("select")).length <= 3, "日程調整：日付は1つの入力欄で選べる（年・月・日の3つのプルダウンをやめた）");
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+  });
+
   await step("表記の統一", async () => {
     const bad = /Phase |フェーズ|スタッフ|Supabase|おかえりなさい|🏃|📋|📎|⚠️|v15\./;
     const p = await newPage(makeState({ injuryDaysAgo: 20 }));
     await p.goto(BASE, { waitUntil: "networkidle0" });
     ok(!bad.test(await text(p)), "ログイン画面に、古い表記・絵文字・ビルド番号が出ない");
+    ok(!(await text(p)).includes("ホーム画面に追加できます") && (await p.evaluate(() => document.documentElement.scrollHeight)) <= 844, "ログイン画面が1画面に収まる（長い案内の箱をなくした）");
     await p.type('input[autocomplete="username"]', "default"); await p.type('input[type="password"]', "org-pass-1234");
     await p.keyboard.press("Enter"); await sleep(1200);
     await clickText(p, "山田 太郎"); await sleep(400);
@@ -504,7 +524,7 @@ try {
     t = await text(p);
     ok(t.includes("2人以上") && (t.match(/公開対象/g) || []).length === 1, "コーチ＋ドクターの2人が一致した日時だけが公開対象（1人だけの日時は対象外）");
     ok(t.includes("決まった面談") && t.includes("公開中の枠（まだ予約なし）1件"), "日程調整に、決まった面談と公開中の枠の一覧がある");
-    await clickText(p, "自動照合して公開"); await sleep(900);
+    await clickText(p, "そろった日時を公開する"); await sleep(900);
     const posted = st.posts.find((x) => x.p === "/rest/v1/slots");
     ok(posted?.b?.length === 1 && posted.b[0].matched_roles.sort().join() === "coach,doctor", "公開されるのは2人以上が一致した枠だけ");
     ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
