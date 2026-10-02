@@ -245,7 +245,7 @@ function safeHref(url) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.11 (ホーム画面への追加・面談の一覧)";
+const APP_BUILD = "v15.12 (通知の案内・連絡と面談のタブ)";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -2851,6 +2851,9 @@ function CoachDashboard({
       >
         <BottomTabs tabs={tabs} active={subTab} onChange={setSubTab} />
       </nav>
+
+      {/* 通知の案内（指導者）：まだオンにしていない端末で、最初に大きく出す */}
+      <NotifyPrompt orgId={orgId} role="coach" />
 
       {subTab === "protocols" && (
         <ProtocolManagement orgId={orgId} masterProtocols={masterProtocols} setMasterProtocols={setMasterProtocols} />
@@ -6104,7 +6107,7 @@ const PLAYER_TAB_DEFS = [
   { key: "home", label: "ホーム", icon: Home },
   { key: "menu", label: "メニュー", icon: Dumbbell },
   { key: "report", label: "日報", icon: Send },
-  { key: "chat", label: "チャット", icon: MessageCircle },
+  { key: "chat", label: "連絡・面談", icon: MessageCircle }, // チャットと、面談の申し込み
   { key: "guide", label: "使い方", icon: BookOpen },
   { key: "more", label: "その他", icon: MoreHorizontal },
 ];
@@ -6315,10 +6318,10 @@ function UsageGuideTab({ onGoTab, protocol, onReachEnd }) {
 
       <GuideCard
         n={++no}
-        title="指導者とチャット"
+        title="指導者と連絡をとる"
         tab="chat"
         onGo={() => onGoTab("chat")}
-        goLabel="チャットを開く"
+        goLabel="連絡・面談を開く"
         art={
           <div className="space-y-1.5" aria-hidden="true">
             <div className="flex justify-end">
@@ -6333,15 +6336,15 @@ function UsageGuideTab({ onGoTab, protocol, onReachEnd }) {
           </div>
         }
       >
-        <p>メッセージや、写真・動画を送れます。指導者から返信があると、タブに赤い数字が付きます。</p>
+        <p>「連絡・面談」タブのチャットで、メッセージや写真・動画を送れます。指導者から返信があると、タブに赤い数字が付きます。</p>
       </GuideCard>
 
       <GuideCard
         n={++no}
         title="面談の申し込み・予約"
-        tab="more"
-        onGo={() => onGoTab("more")}
-        goLabel="その他を開く"
+        tab="chat"
+        onGo={() => onGoTab("chat")}
+        goLabel="連絡・面談を開く"
         art={
           <div className="bg-white rounded-lg border border-slate-200 px-3 py-2 flex items-center justify-between" aria-hidden="true">
             <span className="text-[11px] text-slate-600 flex items-center gap-1">
@@ -6351,8 +6354,26 @@ function UsageGuideTab({ onGoTab, protocol, onReachEnd }) {
           </div>
         }
       >
-        <p>話を聞いてほしいときは「その他」の「面談を申し込む」から。指導者に通知が届きます。</p>
+        <p>話を聞いてほしいときは「連絡・面談」タブの「面談を申し込む」から。指導者に通知が届きます。</p>
         <p>公開されている面談の枠があれば、ホームの「面談予約」から選べます。受傷から2週間たっても面談がまだのときは、ホームに案内が出ます。</p>
+      </GuideCard>
+
+      <GuideCard
+        n={++no}
+        title="通知をオンにする"
+        tab="more"
+        art={
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm px-3 py-2 flex items-center gap-2" aria-hidden="true">
+            <img src="/icon-192.png" alt="" className="w-7 h-7 rounded-md" />
+            <div>
+              <p className="text-[11px] font-bold text-slate-700">RE:SPRINT</p>
+              <p className="text-[11px] text-slate-500">指導者から新しいメッセージがあります</p>
+            </div>
+          </div>
+        }
+      >
+        <p>指導者から返信が来たとき・面談が決まったときに、スマホに通知が届きます。最初に出る画面で「通知を受け取る」を押してください。</p>
+        <p>通知には内容は表示されません。あとから「その他」タブで切り替えられます。</p>
       </GuideCard>
 
       <GuideCard
@@ -6866,7 +6887,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
             viewer="self"
             hasOpenSlots={availableSlots.length > 0}
             onGoBooking={() => document.getElementById("meeting-booking")?.scrollIntoView({ behavior: "smooth", block: "center" })}
-            onGoRequest={() => changeTab("more")}
+            onGoRequest={() => changeTab("chat")}
           />
 
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
@@ -7282,6 +7303,8 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
             tall
             onSend={sendPlayerMessage}
           />
+
+          <ConsultationRequestCard orgId={orgId} player={player} setMyPlayer={setMyPlayer} />
         </>
       )}
 
@@ -7294,8 +7317,6 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
           <HamstringClassificationCard orgId={orgId} player={player} protocol={protocol} readOnly />
 
           <TreatmentCard player={player} onAddTreatments={addPlayerTreatments} onDeleteTreatment={deletePlayerTreatment} />
-
-          <ConsultationRequestCard orgId={orgId} player={player} setMyPlayer={setMyPlayer} />
 
           <NotifyToggle orgId={orgId} role="player" playerId={player.id} />
 
@@ -7320,6 +7341,11 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
           （初めての選手は、使い方を最後まで読むまでは出さない） */}
       {needsInstall() && !installSkip && !(firstVisit && tab === "guide" && !guideRead) && (
         <InstallGate orgId={orgId} player={player} onSkip={() => setInstallSkip(true)} />
+      )}
+
+      {/* 通知の案内：ホーム画面への追加が済んでいる（または対象外の）端末で、使い方を読んだあとに出す */}
+      {!(needsInstall() && !installSkip) && !(firstVisit && tab === "guide" && !guideRead) && (
+        <NotifyPrompt orgId={orgId} role="player" playerId={player.id} />
       )}
 
       {/* 画面下のタブ（親指で届く位置） */}
@@ -7417,6 +7443,105 @@ function NotifyToggle({ orgId, role, playerId }) {
         </button>
       )}
       {error && <p className="text-xs text-red-500 mt-2">{error}</p>}
+    </div>
+  );
+}
+
+// 通知の案内（全画面）。通知をまだオンにしていない端末で、最初に大きく出す（v15.12）
+//   ・通知を使える端末だけ（iPhone はホーム画面のアプリ。端末の設定で拒否されているときは出さない）
+//   ・「あとで」で閉じられる（そのタブを閉じるまで出ない）。次に開いたときは、オンにするまでまた出る
+//   ・あとから「その他」タブでも切り替えられる（NotifyToggle）
+const NOTIFY_SKIP_KEY = "resprint.notifySkip";
+function NotifyPrompt({ orgId, role, playerId }) {
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    let skipped = false;
+    try {
+      skipped = window.sessionStorage.getItem(`${NOTIFY_SKIP_KEY}.${role}`) === "1";
+    } catch {
+      skipped = false;
+    }
+    if (!skipped) pushState(role).then((st) => active && setShow(st === "off"));
+    return () => {
+      active = false;
+    };
+  }, [role]);
+
+  const close = () => {
+    try {
+      window.sessionStorage.setItem(`${NOTIFY_SKIP_KEY}.${role}`, "1");
+    } catch {
+      // 覚えられなくても、この画面は閉じる
+    }
+    setShow(false);
+  };
+  const turnOn = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await enablePush(sbRpc, { orgId, role, playerId });
+      setDone(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!show) return null;
+  return (
+    <div className="fixed inset-0 z-40 bg-white overflow-y-auto print:hidden" role="dialog" aria-modal="true">
+      <div className="max-w-md mx-auto px-6 pt-14 pb-10 safe-top safe-bottom text-center">
+        <div className="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center mx-auto mb-5">
+          <Bell size={36} className="text-blue-600" />
+        </div>
+        {done ? (
+          <>
+            <h2 className="text-xl font-bold text-slate-800">通知をオンにしました</h2>
+            <p className="text-sm text-slate-500 mt-2">この端末に通知が届くようになりました。</p>
+            <button onClick={() => setShow(false)} className="mt-8 w-full py-3.5 rounded-xl bg-blue-600 text-white font-bold">
+              はじめる
+            </button>
+          </>
+        ) : (
+          <>
+            <h2 className="text-xl font-bold text-slate-800">通知をオンにしてください</h2>
+            <p className="text-sm text-slate-500 mt-2 leading-relaxed">
+              {NOTIFY_EVENTS[role]}に、この端末へお知らせします。大事な連絡を見逃さないために、オンにしておいてください。
+            </p>
+            <div className="mt-5 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 flex items-center gap-3 text-left" aria-hidden="true">
+              <img src="/icon-192.png" alt="" className="w-9 h-9 rounded-lg" />
+              <div>
+                <p className="text-xs font-bold text-slate-700">RE:SPRINT</p>
+                <p className="text-xs text-slate-500">
+                  {role === "coach" ? "選手から新しいメッセージがあります" : "指導者から新しいメッセージがあります"}
+                </p>
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-2">
+              通知には、名前やメッセージの内容は表示されません。
+            </p>
+            <button
+              onClick={turnOn}
+              disabled={busy}
+              className="mt-7 w-full py-3.5 rounded-xl bg-blue-600 text-white font-bold disabled:bg-slate-300 flex items-center justify-center gap-2"
+            >
+              {busy && <Loader2 size={16} className="animate-spin" />} 通知を受け取る
+            </button>
+            <p className="text-xs text-slate-400 mt-2">次に出る確認で「許可」を押してください。</p>
+            {error && <p className="text-xs text-red-500 mt-3">{error}</p>}
+            <button onClick={close} className="mt-8 text-xs text-slate-400 underline py-2 px-3">
+              あとで
+            </button>
+            <p className="text-[10px] text-slate-300 mt-1">「その他」タブから、いつでも切り替えられます。</p>
+          </>
+        )}
+      </div>
     </div>
   );
 }

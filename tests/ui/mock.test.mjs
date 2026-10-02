@@ -107,7 +107,8 @@ function respond(st, url, method, body) {
   return [];
 }
 // skipInstall：スマホのブラウザで出る「ホーム画面に追加」の全画面を、あらかじめ「今回だけブラウザで使う」にしておく
-async function newPage(st, { seenGuide = true, skipInstall = true } = {}) {
+// skipNotify：通知の案内（全画面）を、あらかじめ「あとで」にしておく
+async function newPage(st, { seenGuide = true, skipInstall = true, skipNotify = true } = {}) {
   const ctx = await browser.createBrowserContext();
   const p = await ctx.newPage();
   await p.emulate({ viewport: { width: 390, height: 844, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -120,7 +121,11 @@ async function newPage(st, { seenGuide = true, skipInstall = true } = {}) {
     if (r.method() === "OPTIONS") return r.respond({ status: 204, headers: cors });
     r.respond({ status: 200, contentType: "application/json", headers: cors, body: JSON.stringify(respond(st, r.url(), r.method(), r.postData())) });
   });
-  await p.evaluateOnNewDocument((seen, skip) => { try { if (seen) localStorage.setItem("resprint.guideSeen.p-1", "1"); if (skip) sessionStorage.setItem("resprint.installSkip", "1"); } catch {} }, seenGuide, skipInstall);
+  await p.evaluateOnNewDocument((seen, skip, skipN) => { try {
+    if (seen) localStorage.setItem("resprint.guideSeen.p-1", "1");
+    if (skip) sessionStorage.setItem("resprint.installSkip", "1");
+    if (skipN) { sessionStorage.setItem("resprint.notifySkip.player", "1"); sessionStorage.setItem("resprint.notifySkip.coach", "1"); }
+  } catch {} }, seenGuide, skipInstall, skipNotify);
   return p;
 }
 const text = (p) => p.evaluate(() => document.body.innerText);
@@ -166,10 +171,10 @@ try {
     const p = await newPage(makeState({ injuryDaysAgo: 3 }), { seenGuide: false });
     await playerLogin(p);
     const tabs = await p.$$eval("nav button", (a) => a.map((n) => n.innerText.replace(/\d+/g, "").trim()));
-    ok(tabs.join("/") === "ホーム/メニュー/日報/チャット/使い方/その他", "選手の下タブが6つ");
+    ok(tabs.join("/") === "ホーム/メニュー/日報/連絡・面談/使い方/その他", "選手の下タブが6つ（チャットは「連絡・面談」に）");
     let t = await text(p);
     ok(t.includes("毎日、日報を送る") && t.includes("Strength / Eccentric は続ける"), "初めてのログインでは「使い方」が開き、続ける種目の説明がある");
-    for (const [label, want] of [["ホーム", false], ["メニュー", false], ["日報", false], ["チャット", false], ["その他", true]]) {
+    for (const [label, want] of [["ホーム", false], ["メニュー", false], ["日報", false], ["連絡・面談", false], ["その他", true]]) {
       await clickText(p, label, "nav button"); await sleep(400);
       ok((await text(p)).includes("このアプリは診断を行いません") === want && (await noOverflow(p)), `「${label}」：免責文は${want ? "出る" : "出ない"}・横にはみ出さない`);
     }
@@ -274,7 +279,7 @@ try {
     let t = await text(p);
     ok(t.includes("毎日、日報を送る") && !t.includes("Strength / Eccentric") && !t.includes("続ける"), "使い方タブ：設定のないプロトコルの選手には、続ける種目の説明が出ない");
     const nums = await p.$$eval("span.rounded-full.bg-blue-600", (a) => a.map((n) => n.innerText.trim()).filter((x) => /^\d+$/.test(x)));
-    ok(nums.join() === "1,2,3,4,5,6,7", "使い方の番号は 1〜7 で続く " + nums.join());
+    ok(nums.join() === "1,2,3,4,5,6,7,8", "使い方の番号は 1〜8 で続く " + nums.join());
     await clickText(p, "ホーム", "nav button"); await sleep(500);
     t = await text(p);
     ok(!t.includes("Strength / Eccentric") && !t.includes("から最後まで続ける") && !t.includes("ことを確認しました"), "ホーム：案内・ロードマップの2本目の線・確認のチェックが出ない");
@@ -283,6 +288,54 @@ try {
     t = await text(p);
     ok(t.includes("Bilateral RDL") === false || !t.includes("そのほかの種目"), "メニュー：緑の固定枠は出ず、今までどおりのカテゴリ表示");
     ok(!t.includes("は続ける") && p.errs.length === 0, "メニューに案内の文が出ない・例外なし " + p.errs.join("|"));
+  });
+
+  await step("通知の案内（最初に全画面）と、連絡・面談タブ", async () => {
+    // 初めての選手：使い方を読んでいる間は出ない → 読み終えて追加の画面を抜けると、通知の案内が出る
+    const st = makeState({ injuryDaysAgo: 3 });
+    const p = await newPage(st, { seenGuide: false, skipInstall: false, skipNotify: false });
+    await playerLogin(p);
+    ok(!(await text(p)).includes("通知をオンにしてください"), "使い方を読んでいる間は、通知の案内は出ない");
+    await p.evaluate(() => window.scrollTo(0, document.body.scrollHeight)); await sleep(1200);
+    let t = await text(p);
+    ok(t.includes("ホーム画面に追加してください") && !t.includes("通知をオンにしてください"), "先に「ホーム画面に追加」の画面が出る（通知の案内はまだ）");
+    await clickText(p, "今回だけブラウザで使う"); await sleep(900);
+    t = await text(p);
+    ok(t.includes("通知をオンにしてください") && t.includes("通知を受け取る") && t.includes("名前やメッセージの内容は表示されません"), "そのあと、全画面で通知の案内が出る");
+    ok(await p.evaluate(() => !document.elementFromPoint(195, 820).closest("nav")) && (await noOverflow(p)), "通知の案内が全体を覆う・横にはみ出さない");
+    await clickText(p, "あとで"); await sleep(400);
+    ok(!(await text(p)).includes("通知をオンにしてください"), "「あとで」で閉じられる");
+    // 連絡・面談タブ：チャットと面談の申し込み
+    await clickText(p, "連絡・面談", "nav button"); await sleep(600);
+    t = await text(p);
+    ok(t.includes("指導者とのチャット") && t.includes("面談を申し込む"), "「連絡・面談」タブに、チャットと面談の申し込みがある");
+    await clickText(p, "面談を申し込む"); await sleep(300);
+    await p.type('textarea[placeholder^="話したいこと"]', "来週話したい");
+    for (const e of await p.$$("button")) if ((await e.evaluate((n) => n.innerText.trim())) === "申し込む") { await e.click(); break; }
+    await sleep(800);
+    ok(st.posts.some((x) => x.p === "/rest/v1/consultation_requests" && x.b.note === "来週話したい") && (await text(p)).includes("申し込み済み"), "このタブから面談を申し込める");
+    await clickText(p, "その他", "nav button"); await sleep(500);
+    ok(!(await text(p)).includes("面談を申し込む"), "「その他」からは面談の申し込みがなくなった（移動）");
+    ok(p.errs.length === 0, "例外なし " + p.errs.join("|"));
+
+    // 登録済みの選手（追加は済み扱い）：開いたらすぐ通知の案内
+    const p2 = await newPage(makeState({ injuryDaysAgo: 3 }), { skipNotify: false });
+    await playerLogin(p2);
+    ok((await text(p2)).includes("通知をオンにしてください"), "通知がまだオフの選手には、開いたときに通知の案内が出る");
+    // 指導者にも出る
+    const p3 = await newPage(makeState({ injuryDaysAgo: 3 }), { skipNotify: false });
+    await coachLogin(p3);
+    t = await text(p3);
+    ok(t.includes("通知をオンにしてください") && t.includes("選手から新しいメッセージがあります"), "指導者モードでも、最初に通知の案内が出る");
+  });
+
+  await step("面談の案内から申し込みへ", async () => {
+    const p = await newPage(makeState({ injuryDaysAgo: 20 }));
+    p.on("dialog", (d) => d.dismiss());
+    await playerLogin(p);
+    for (const e of await p.$$("button")) if ((await e.evaluate((n) => n.innerText.trim())) === "面談を申し込む") { await e.click(); break; }
+    await sleep(600);
+    ok((await text(p)).includes("指導者とのチャット"), "ホームの「面談を申し込む」で、連絡・面談タブへ移動する");
   });
 
   await step("通知のボタン", async () => {
