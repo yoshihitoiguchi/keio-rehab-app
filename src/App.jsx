@@ -257,7 +257,7 @@ function safeHref(url) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.15";
+const APP_BUILD = "v15.16";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -2215,7 +2215,7 @@ function InstallGate({ orgId, player, onSkip }) {
     setCodeError(null);
     setCopied(false);
     try {
-      const r = await sbRpc("transfer_create", { p_org_id: orgId, p_player_id: player.id });
+      const r = await sbRpc("transfer_create", { p_org_id: orgId, p_player_id: player?.id ?? null });
       setCode(r?.code || null);
     } catch (err) {
       setCodeError(err.message);
@@ -2326,7 +2326,7 @@ function InstallGate({ orgId, player, onSkip }) {
             </GuideStep>
             <GuideStep n={3} title="ホーム画面のアイコンから開いて、貼り付ける">
               RE:SPRINT のアイコンを開き、<b>「貼り付けて入る」</b>を押します。
-              {player.name} さんのまま、続きから使えます。
+              {player ? `${player.name} さんのまま、続きから使えます。` : "この組織にログインしたまま、続きから使えます。"}
             </GuideStep>
           </ol>
         ) : canInstall && !installed ? (
@@ -2912,6 +2912,7 @@ function CoachDashboard({
   phaseMenus,
   setPhaseMenus,
 }) {
+  const [installSkip, setInstallSkip] = useState(() => installSkipped());
   // 画面下のタブ（選手画面と同じ形）。読み込み直しても同じタブに戻る
   const COACH_TAB_KEY = "resprint.coachTab";
   const [subTab, setSubTabState] = useState(() => {
@@ -2967,8 +2968,12 @@ function CoachDashboard({
         <BottomTabs tabs={tabs} active={subTab} onChange={setSubTab} />
       </nav>
 
-      {/* 通知の案内（指導者）：まだオンにしていない端末で、最初に大きく出す */}
-      <NotifyPrompt orgId={orgId} role="coach" />
+      {/* スマホのブラウザで開いているとき：指導者も、まずホーム画面への追加（最優先）。通知の案内はそのあと */}
+      {needsInstall() && !installSkip ? (
+        <InstallGate orgId={orgId} player={null} onSkip={() => setInstallSkip(true)} />
+      ) : (
+        <NotifyPrompt orgId={orgId} role="coach" />
+      )}
 
       {subTab === "protocols" && (
         <ProtocolManagement orgId={orgId} masterProtocols={masterProtocols} setMasterProtocols={setMasterProtocols} />

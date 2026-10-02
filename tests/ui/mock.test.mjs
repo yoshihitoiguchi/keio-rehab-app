@@ -327,6 +327,13 @@ try {
     const p2 = await newPage(makeState({ injuryDaysAgo: 3 }), { skipNotify: false });
     await playerLogin(p2);
     ok((await text(p2)).includes("通知をオンにしてください"), "通知がまだオフの選手には、開いたときに通知の案内が出る");
+    // 指導者：スマホのブラウザでは、まずホーム画面への追加（通知の案内は、そのあと）
+    const p4 = await newPage(makeState({ injuryDaysAgo: 3 }), { skipInstall: false, skipNotify: false });
+    await coachLogin(p4);
+    t = await text(p4);
+    ok(t.includes("ホーム画面に追加してください") && !t.includes("通知をオンにしてください") && t.includes("4815 1623"), "指導者モードでも、スマホのブラウザでは先に「ホーム画面に追加」が出る");
+    await clickText(p4, "今回だけブラウザで使う"); await sleep(900);
+    ok((await text(p4)).includes("通知をオンにしてください"), "追加の画面を抜けると、通知の案内が出る");
     // 指導者にも出る
     const p3 = await newPage(makeState({ injuryDaysAgo: 3 }), { skipNotify: false });
     await coachLogin(p3);
