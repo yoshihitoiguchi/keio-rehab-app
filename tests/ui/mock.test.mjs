@@ -88,6 +88,10 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/exercises") return exercises.map((e) => ({ ...e, protocol_id: st.protocolId }));
   if (p === "/rest/v1/exercise_steps") return steps;
   if (p === "/rest/v1/gate_item_checks" && method === "GET") return st.checks;
+  if (p === "/rest/v1/app_settings") {
+    if (method === "POST") { st.meetingUrl = json.value; return [json]; }
+    return st.meetingUrl ? [{ value: st.meetingUrl }] : [];
+  }
   if (p === "/rest/v1/staff_availability" && method === "GET") return st.availability;
   if (p === "/rest/v1/slots") {
     if (method === "PATCH") { const id = /id=eq\.([^&]+)/.exec(u.search)?.[1]; const s = st.slots.find((x) => x.id === id); if (s) Object.assign(s, json); return s ? [s] : []; }
@@ -327,6 +331,53 @@ try {
     await coachLogin(p3);
     t = await text(p3);
     ok(t.includes("通知をオンにしてください") && t.includes("選手から新しいメッセージがあります"), "指導者モードでも、最初に通知の案内が出る");
+  });
+
+  await step("面談の URL を自動で付ける", async () => {
+    // 指導者が「いつもの URL」を登録する
+    const st = makeState({ injuryDaysAgo: 20 });
+    const c = await newPage(st);
+    await coachLogin(c);
+    await clickText(c, "その他", "nav button"); await sleep(900);
+    ok((await text(c)).includes("面談で使うオンライン会議の URL"), "指導者の「その他」に、面談の URL の登録欄がある");
+    await c.type('input[placeholder^="https://zoom.us"]', "javascript:alert(1)");
+    await clickText(c, "保存する"); await sleep(400);
+    ok((await text(c)).includes("https:// で始まる URL") && !st.meetingUrl, "URL でないものは保存できない");
+    await c.click('input[placeholder^="https://zoom.us"]', { clickCount: 3 }); await c.keyboard.press("Backspace");
+    await c.type('input[placeholder^="https://zoom.us"]', "https://zoom.example/j/123?pwd=abc");
+    await clickText(c, "保存する"); await sleep(700);
+    const saved = st.posts.find((x) => x.p === "/rest/v1/app_settings");
+    ok(saved?.b?.key === "meeting_url" && saved.b.value === "https://zoom.example/j/123?pwd=abc" && saved.q.includes("on_conflict=key%2Corg_id") && (await text(c)).includes("登録済み"),
+       "URL を登録できる（組織ごとの設定として保存）");
+    ok(c.errs.length === 0, "例外なし " + c.errs.join("|"));
+
+    // 選手が予約すると、その URL が面談に付く
+    const p = await newPage(st);
+    await playerLogin(p);
+    await clickText(p, "この枠で予約"); await sleep(1500);
+    const patch = st.patches.find((x) => x.p === "/rest/v1/slots" && x.b.booked_by === "p-1");
+    ok(patch?.b?.zoom_url === "https://zoom.example/j/123?pwd=abc", "選手が予約すると、登録してある URL が面談に自動で付く");
+    const href = await p.$$eval("a", (a) => a.find((n) => n.innerText.includes("面談に参加"))?.href);
+    ok(href === "https://zoom.example/j/123?pwd=abc", "選手のホームに「面談に参加」ボタンが出る");
+    ok(p.errs.length === 0, "例外なし " + p.errs.join("|"));
+
+    // 登録がない組織では、今までどおり URL なしで予約される
+    const st2 = makeState({ injuryDaysAgo: 20 });
+    const p2 = await newPage(st2);
+    await playerLogin(p2);
+    await clickText(p2, "この枠で予約"); await sleep(1500);
+    const patch2 = st2.patches.find((x) => x.p === "/rest/v1/slots" && x.b.booked_by === "p-1");
+    ok(patch2 && !("zoom_url" in patch2.b) && (await text(p2)).includes("オンライン会議URLは指導者側で準備中です"), "登録がなければ、今までどおり（URL は指導者があとで入れる）");
+
+    // すでに予約済みで URL のない面談：指導者がボタン1つで入れられる
+    const st3 = makeState({ injuryDaysAgo: 20, booked: true });
+    st3.meetingUrl = "https://zoom.example/j/999";
+    const c3 = await newPage(st3);
+    await coachLogin(c3);
+    await clickText(c3, "日程調整", "nav button"); await sleep(1000);
+    await clickText(c3, "登録してあるいつもの URL を入れる"); await sleep(700);
+    ok(st3.patches.some((x) => x.p === "/rest/v1/slots" && x.b.zoom_url === "https://zoom.example/j/999")
+       && (await c3.$eval('input[placeholder^="オンライン会議URL"]', (i) => i.value)) === "https://zoom.example/j/999", "予約済みの面談にも、ボタン1つでいつもの URL を入れられる");
   });
 
   await step("面談の案内から申し込みへ", async () => {

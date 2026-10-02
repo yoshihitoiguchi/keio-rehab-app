@@ -514,6 +514,14 @@ await db.exec(`insert into auth.users (id, is_anonymous) values ('${U7}', true)`
 for (let i = 0; i < 10; i++) await as(U7, `select public.transfer_redeem('1111${String(1000 + i)}')`);
 ok(/間違いが続いた/.test((await as(U7, "select public.transfer_redeem('12345678')")).error || ""), "[v28] 10回間違えると15分止まる");
 
+// ===== v15.13：面談の URL（app_settings の meeting_url。DB の変更なし・権限の確認だけ） =====
+ok(!(await as(U4, "insert into app_settings (org_id, key, value) values ('comm-b','meeting_url','https://zoom.example/j/1') on conflict (key, org_id) do update set value = excluded.value")).error
+   && (await as(U6, "select value from app_settings where org_id = 'comm-b' and key = 'meeting_url'")).rows?.[0]?.value === "https://zoom.example/j/1",
+   "[v15.13] 組織のメンバーは面談の URL を登録でき、同じ組織の人は読める");
+ok((await as(U1, "select value from app_settings where org_id = 'comm-b' and key = 'meeting_url'")).rows?.length === 0
+   && !!((await as(U1, "insert into app_settings (org_id, key, value) values ('comm-b','meeting_url','https://evil.example')")).error),
+   "[v15.13] ほかの組織の人は、読むことも書き換えることもできない");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

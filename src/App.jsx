@@ -245,7 +245,7 @@ function safeHref(url) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.12 (通知の案内・連絡と面談のタブ)";
+const APP_BUILD = "v15.13 (面談の URL を自動で付ける)";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -2869,6 +2869,7 @@ function CoachDashboard({
       {subTab === "scheduling" && (
         <div className="space-y-6">
           <MeetingsBoard
+            orgId={orgId}
             slots={slots}
             setSlots={setSlots}
             coachPlayers={coachPlayers}
@@ -2881,6 +2882,7 @@ function CoachDashboard({
       {subTab === "settings" && (
         <div className="max-w-md mx-auto space-y-5">
           <NotifyToggle orgId={orgId} role="coach" />
+          <MeetingUrlSetting orgId={orgId} />
           <CoachSettings orgId={orgId} />
           {/* 免責文は「その他」の一番下に、常に同じ文面で出す */}
           <StandingNotice />
@@ -2991,12 +2993,126 @@ function CoachSettings({ orgId }) {
 }
 
 // ---------- 日程調整：3者の空き時間登録 → 自動照合 → 公開 ----------
+// ---------- 面談で使うオンライン会議の URL（組織ごとの設定） ----------
+//   指導者が「いつも使う URL」（Zoom のパーソナルミーティングなど）を1つ登録しておくと、
+//   選手が面談の枠を予約したときに、その URL が面談に自動で付く（v15.13）。
+//   保存先は app_settings の key = 'meeting_url'。同じ組織の人（選手を含む）は読める（参加に必要なため）。
+const MEETING_URL_KEY = "meeting_url";
+async function fetchMeetingUrl(orgId) {
+  const rows = await sbSelect(
+    "app_settings",
+    `?org_id=eq.${encodeURIComponent(orgId)}&key=eq.${MEETING_URL_KEY}&select=value`
+  );
+  return safeHref(rows?.[0]?.value) ? rows[0].value : "";
+}
+
+function MeetingUrlSetting({ orgId }) {
+  const [url, setUrl] = useState("");
+  const [savedUrl, setSavedUrl] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    fetchMeetingUrl(orgId)
+      .then((v) => {
+        if (!active) return;
+        setUrl(v);
+        setSavedUrl(v);
+      })
+      .catch((err) => active && setError(err.message))
+      .finally(() => active && setLoading(false));
+    return () => {
+      active = false;
+    };
+  }, [orgId]);
+
+  const save = async () => {
+    const value = url.trim();
+    setError(null);
+    setDone(false);
+    if (value && !safeHref(value)) {
+      setError("https:// で始まる URL を貼り付けてください。");
+      return;
+    }
+    setSaving(true);
+    try {
+      await sbUpsert("app_settings", { org_id: orgId, key: MEETING_URL_KEY, value }, "key,org_id");
+      setSavedUrl(value);
+      setDone(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+      <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+        <Video size={16} className="text-blue-600" /> 面談で使うオンライン会議の URL
+        {savedUrl && (
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-700">登録済み</span>
+        )}
+      </p>
+      <p className="text-xs text-slate-400 mb-3 leading-relaxed">
+        Zoom のパーソナルミーティングなど、いつも使う URL を1つ登録しておくと、選手が面談を予約したときに自動で付きます
+        （選手のホームに「面談に参加」ボタンが出ます）。面談ごとに変えたいときは、日程調整の「決まった面談」で書き換えられます。
+      </p>
+      <input
+        value={url}
+        onChange={(e) => {
+          setUrl(e.target.value);
+          setDone(false);
+        }}
+        placeholder={loading ? "読み込み中..." : "https://zoom.us/j/..."}
+        disabled={loading}
+        inputMode="url"
+        autoCapitalize="none"
+        autoCorrect="off"
+        spellCheck={false}
+        className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm"
+      />
+      {error && <p className="text-xs text-red-500 mt-2">{error}</p>}
+      {done && (
+        <p className="text-xs text-green-600 mt-2">
+          {savedUrl ? "保存しました。これから予約される面談に自動で付きます。" : "登録を消しました。"}
+        </p>
+      )}
+      <button
+        onClick={save}
+        disabled={saving || loading || url.trim() === savedUrl}
+        className="mt-3 w-full py-3 rounded-lg bg-slate-800 text-white text-sm font-bold disabled:bg-slate-300"
+      >
+        {saving ? "保存中..." : "保存する"}
+      </button>
+      <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">
+        同じ URL を続けて使うので、Zoom の「待機室」をオンにしておくと、前の面談に次の人が入ってしまうのを防げます。
+        すでに予約済みの面談には反映されません。
+      </p>
+    </div>
+  );
+}
+
 // ---------- 日程調整：決まった面談・公開中の枠の一覧 ----------
 //   ・これからの面談：選手名・日時・参加できるスタッフ・オンライン会議URL・予約の取り消し
 //   ・公開中の枠：まだ予約のない枠（公開をやめられる）
 //   ・終わった面談：日時を過ぎたもの
-function MeetingsBoard({ slots, setSlots, coachPlayers, setCoachPlayers, onOpenPlayers }) {
+function MeetingsBoard({ orgId, slots, setSlots, coachPlayers, setCoachPlayers, onOpenPlayers }) {
   const [error, setError] = useState(null);
+  // 組織に登録してある「いつもの URL」（未入力の面談に、ボタン1つで入れられるように）
+  const [defaultUrl, setDefaultUrl] = useState("");
+  useEffect(() => {
+    let active = true;
+    fetchMeetingUrl(orgId)
+      .then((v) => active && setDefaultUrl(v))
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [orgId]);
   const [busyId, setBusyId] = useState(null);
   const [showPast, setShowPast] = useState(false);
   const now = new Date();
@@ -3099,7 +3215,7 @@ function MeetingsBoard({ slots, setSlots, coachPlayers, setCoachPlayers, onOpenP
                     予約を取り消す
                   </button>
                 </div>
-                <MeetingUrlField slot={s} onSave={saveZoomUrl} />
+                <MeetingUrlField key={`${s.id}:${s.zoomUrl || ""}`} slot={s} onSave={saveZoomUrl} defaultUrl={defaultUrl} />
               </li>
             );
           })}
@@ -3160,12 +3276,21 @@ function MeetingsBoard({ slots, setSlots, coachPlayers, setCoachPlayers, onOpenP
 }
 
 // オンライン会議URLの入力（面談1件ごと）
-function MeetingUrlField({ slot, onSave }) {
+function MeetingUrlField({ slot, onSave, defaultUrl }) {
   const [url, setUrl] = useState(slot.zoomUrl || "");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   return (
-    <div className="flex items-center gap-2 mt-2">
+   <div className="mt-2">
+    {!slot.zoomUrl && defaultUrl && (
+      <button
+        onClick={() => onSave(slot.id, defaultUrl)}
+        className="mb-2 w-full py-2 rounded-lg border border-blue-200 bg-white text-xs font-bold text-blue-700"
+      >
+        登録してあるいつもの URL を入れる
+      </button>
+    )}
+    <div className="flex items-center gap-2">
       <Video size={14} className="text-slate-400 shrink-0" />
       <input
         value={url}
@@ -3189,6 +3314,7 @@ function MeetingUrlField({ slot, onSave }) {
         {saved ? "保存済み" : "保存"}
       </button>
     </div>
+   </div>
   );
 }
 
@@ -6755,9 +6881,21 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
   const handleBookSlot = async (slotId) => {
     setError(null);
     try {
-      await sbUpdate("slots", slotId, { booked_by: player.id });
+      // 組織に「いつもの URL」が登録してあり、この枠にまだ URL がなければ、予約と同時に付ける
+      const current = slots.find((s) => s.id === slotId);
+      let autoUrl = null;
+      if (current && !current.zoomUrl) {
+        try {
+          autoUrl = (await fetchMeetingUrl(orgId)) || null;
+        } catch {
+          autoUrl = null; // 読めなくても、予約はそのまま進める
+        }
+      }
+      await sbUpdate("slots", slotId, autoUrl ? { booked_by: player.id, zoom_url: autoUrl } : { booked_by: player.id });
       await sbUpdate("players", player.id, { booked_slot_id: slotId });
-      setSlots((prev) => prev.map((s) => (s.id === slotId ? { ...s, bookedBy: player.id } : s)));
+      setSlots((prev) =>
+        prev.map((s) => (s.id === slotId ? { ...s, bookedBy: player.id, zoomUrl: autoUrl || s.zoomUrl } : s))
+      );
       setMyPlayer((prev) => ({ ...prev, bookedSlotId: slotId }));
       // 面談が決まったことを、チャットにも残す（指導者には未読として届き、双方があとから見返せる）
       const slot = slots.find((s) => s.id === slotId);
