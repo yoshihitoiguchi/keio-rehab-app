@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "check:prod": "node scripts/check-production.mjs",
-    "test:db": "node tests/db/phases.test.mjs"
+    "test:db": "node tests/db/phases.test.mjs",
+    "test:ui": "node tests/ui/mock.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.383.0",
@@ -20,6 +21,7 @@
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.19",
     "postcss": "^8.4.38",
+    "puppeteer-core": "^23.11.1",
     "tailwindcss": "^3.4.4",
     "vite": "^5.3.1"
   }

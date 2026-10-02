@@ -16,3 +16,5 @@ npm-debug.log*
 
 # Claude Code の個人設定（プロジェクト共通の .claude/settings.json は Git に入れる）
 .claude/settings.local.json
+.test-dist/
+.test-profile-*/

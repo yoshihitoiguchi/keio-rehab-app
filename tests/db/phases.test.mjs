@@ -407,6 +407,19 @@ ok(one(await as(U4, "select public.coach_check('comm-b','coach-by-coach')"))?.ok
    && (await db.query("select to_regnamespace('resprint_private') v")).rows[0].v === null, "[v24] 戻すと控えは消え、ログインはそのまま");
 ok(!(await run("supabase_migration_v24_org_secrets.sql")), "[v24] 戻した後にもう一度適用できる");
 
+// ===== v25：「実施後〜翌日に症状増悪なし」を条件から外す =====
+await db.exec("alter table protocols add column if not exists phases jsonb default '[]'; alter table exercises add column if not exists notes text;");
+await db.exec(`update protocols set phases = '[{"title":"P1","conditions":["歩行が正常","実施後〜翌日に症状増悪なし"]},{"title":"P2","conditions":["Uphill 継続","実施後〜翌日に症状増悪なし（※Flatへの移行は必ず別セッションで行う）"]},{"title":"P3","conditions":["痛みなし"]}]'::jsonb where id = 'hs';
+  insert into exercises (org_id, protocol_id, name) values ('default','hs','Flat Running @82%')`);
+ok(!(await run("supabase_migration_v25_remove_nextday_item.sql")), "[v25] 適用 1 回目");
+const ph25 = (await db.query("select phases from protocols where id = 'hs'")).rows[0].phases;
+ok(JSON.stringify(ph25.map((x) => x.conditions)) === JSON.stringify([["歩行が正常"], ["Uphill 継続"], ["痛みなし"]]) && ph25[0].title === "P1",
+   "[v25] 「翌日」の条件だけが外れ、ほかの条件・名称・順番はそのまま");
+ok(/別セッション/.test((await db.query("select notes from exercises where name = 'Flat Running @82%' and protocol_id = 'hs'")).rows[0].notes || ""),
+   "[v25] Flat への移行の注意は、Flat Running のメモに残る");
+ok(!(await run("supabase_migration_v25_remove_nextday_item.sql")), "[v25] 適用 2 回目（冪等）");
+ok(JSON.stringify((await db.query("select phases from protocols where id = 'hs'")).rows[0].phases) === JSON.stringify(ph25), "[v25] 2回目で内容が変わらない");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

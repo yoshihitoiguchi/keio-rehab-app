@@ -46,6 +46,8 @@ import {
   Home,
   MoreHorizontal,
   BookOpen,
+  Bell,
+  Repeat,
   Pencil,
   Save,
 } from "lucide-react";
@@ -242,7 +244,7 @@ function safeHref(url) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.8 (管理者がID・パスワードを確認)";
+const APP_BUILD = "v15.9 (面談の案内・続ける種目の強調)";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -796,13 +798,28 @@ function diffDaysBetween(dateStr, datetimeStr) {
   return Math.floor((parseDatetime(datetimeStr) - new Date(dateStr)) / 86400000);
 }
 // 要件④：面談未定の黄色アラートのみ残す（3週間超の赤アラートはSOSと被るため廃止）
+// 面談の枠を公開する条件：コーチ・トレーナー・ドクターのうち、この人数以上の空きが一致した日時
+const MEETING_MIN_STAFF = 2;
+function matchedStaffCount(roleSet) {
+  return ["coach", "trainer", "doctor"].filter((r) => roleSet.has(r)).length;
+}
+// 受傷からこの日数を過ぎても面談をしていない選手に、面談の案内を出す（チームの決まり。症状の入力とは関係しない）
+const MEETING_REMINDER_DAYS = 14;
 function meetingAlertLevel(player, slots) {
-  if (!player.injuryDate) return null;
+  if (!player.injuryDate || player.completedAt) return null;
   const held = slots.some((s) => s.bookedBy === player.id && parseDatetime(s.datetime) <= new Date());
   if (held) return null;
   const elapsed = daysSince(player.injuryDate);
-  if (elapsed >= 14) return "yellow";
+  if (elapsed >= MEETING_REMINDER_DAYS) return "yellow";
   return null;
+}
+// これからの面談の予約（あれば、その枠）
+function upcomingMeeting(player, slots) {
+  return (
+    slots
+      .filter((s) => s.bookedBy === player.id && parseDatetime(s.datetime) > new Date())
+      .sort((a, b) => a.datetime.localeCompare(b.datetime))[0] || null
+  );
 }
 // 要件④：Phase5完遂から14日以上経過した選手は「復帰者リスト」へ自動的に移動する
 function isGraduatedOut(player) {
@@ -864,7 +881,18 @@ function getYouTubeEmbedUrl(url) {
 //     （書きかけの日報・チャットは端末に下書きとして残るので消えない）
 //   ・確認は /version.json（ビルドごとに変わる）を見るだけ。開発サーバーでは行わない。
 // ==================================================================
+const COACH_REFRESH_INTERVAL = 60 * 1000;
 const UPDATE_CHECK_INTERVAL = 30 * 60 * 1000;
+
+// ホーム画面のアイコンに、未読・要対応の数を付ける（対応している端末だけ。アプリが動いている間に更新される）
+function setIconBadge(count) {
+  try {
+    if (count > 0) navigator.setAppBadge?.(count);
+    else navigator.clearAppBadge?.();
+  } catch {
+    // 対応していない端末では何もしない
+  }
+}
 const AUTO_RELOAD_AFTER_HIDDEN = 30 * 60 * 1000;
 
 async function fetchLatestBuild() {
@@ -1038,21 +1066,40 @@ function RehabApp() {
     return () => window.removeEventListener(AUTH_LOST_EVENT, onLost);
   }, []);
 
-  const loadCoachPlayers = async () => {
+  // silent：画面を切り替えずに、裏で最新の状態に更新する（新着のチャット・面談の申し込み・予約を拾う）
+  const loadCoachPlayers = async ({ silent = false } = {}) => {
     if (!org) return;
-    setCoachLoading(true);
+    if (!silent) setCoachLoading(true);
     try {
       const rows = await sbSelect(
         "players",
         `?org_id=eq.${encodeURIComponent(org.id)}&select=${PLAYER_FIELDS}${PLAYER_EMBED_ORDER}&order=name.asc`
       );
       setCoachPlayers(rows.map(normalizePlayer));
+      if (silent) {
+        const slotRows = await sbSelect("slots", `?org_id=eq.${encodeURIComponent(org.id)}&select=*&order=datetime.asc`);
+        setSlots(slotRows.map(normalizeSlot));
+      }
     } catch (err) {
-      setLoadError(err.message);
+      if (!silent) setLoadError(err.message);
     } finally {
-      setCoachLoading(false);
+      if (!silent) setCoachLoading(false);
     }
   };
+
+  // 指導者モードを開いている間は、1分ごと（と、画面に戻ったとき）に新着を確認する
+  useEffect(() => {
+    if (mode !== "coach" || !coachAuthed || !org) return undefined;
+    const refresh = () => {
+      if (document.visibilityState === "visible") loadCoachPlayers({ silent: true });
+    };
+    const timer = setInterval(refresh, COACH_REFRESH_INTERVAL);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [mode, coachAuthed, org?.id]);
 
   const handleSwitchMode = (target) => {
     if (target === "coach" && !coachAuthed) {
@@ -2675,8 +2722,13 @@ function CoachDashboard({
       !p.completedAt &&
       (p.sos ||
         pendingConsultations(p).length > 0 ||
-        p.messages.some((m) => m.sender === "player" && !m.isRead))
+        p.messages.some((m) => m.sender === "player" && !m.isRead) ||
+        (meetingAlertLevel(p, slots) === "yellow" && !upcomingMeeting(p, slots)))
   ).length;
+  useEffect(() => {
+    setIconBadge(attention);
+    return () => setIconBadge(0);
+  }, [attention]);
 
   const tabs = [
     { key: "players", label: "選手", icon: Users, badge: attention },
@@ -2894,7 +2946,7 @@ function CoachScheduling({ orgId, slots, setSlots }) {
     setError(null);
     try {
       const matched = Object.entries(grouped)
-        .filter(([, roleSet]) => roleSet.has("coach") && roleSet.has("trainer"))
+        .filter(([, roleSet]) => matchedStaffCount(roleSet) >= MEETING_MIN_STAFF)
         .map(([datetime, roleSet]) => ({
           org_id: orgId,
           datetime,
@@ -3014,8 +3066,8 @@ function CoachScheduling({ orgId, slots, setSlots }) {
           </button>
         </div>
         <p className="text-xs text-slate-400 mb-3">
-          コーチとトレーナーの空き時間が一致した日時（ドクターも一致すればさらに確実）だけが、
-          選手側で予約できる面談枠として公開されます。
+          コーチ・トレーナー・ドクターのうち <span className="font-bold text-slate-600">2人以上</span>
+          の空き時間が一致した日時だけが、選手側で予約できる面談枠として公開されます。
         </p>
         {loading ? (
           <p className="text-sm text-slate-400">読み込み中...</p>
@@ -3025,7 +3077,7 @@ function CoachScheduling({ orgId, slots, setSlots }) {
               .sort(([a], [b]) => a.localeCompare(b))
               .map(([datetime, roleSet]) => {
                 const roles = Array.from(roleSet);
-                const qualifies = roleSet.has("coach") && roleSet.has("trainer");
+                const qualifies = matchedStaffCount(roleSet) >= MEETING_MIN_STAFF;
                 return (
                   <li
                     key={datetime}
@@ -3896,7 +3948,7 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
               <span className="w-2.5 h-2.5 rounded-full bg-green-500 inline-block" /> 完全復帰（14日間はここに表示）
             </li>
             <li className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-yellow-400 inline-block" /> 受傷2週間・面談未定
+              <span className="w-2.5 h-2.5 rounded-full bg-yellow-400 inline-block" /> 受傷2週間・面談未実施
             </li>
             <li className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block" /> SOS・要対応
@@ -3968,6 +4020,16 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
                         面談希望
                       </span>
                     )}
+                    {meetingLevel === "yellow" &&
+                      (upcomingMeeting(p, slots) ? (
+                        <span className="bg-blue-100 text-blue-700 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                          面談予定
+                        </span>
+                      ) : (
+                        <span className="bg-yellow-400 text-yellow-900 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                          面談未実施
+                        </span>
+                      ))}
                     {unread > 0 && (
                       <span className="flex items-center gap-0.5 bg-blue-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
                         <MessageCircle size={10} /> {unread}
@@ -4165,6 +4227,8 @@ function PlayerDetailPanel({
             </button>
           </div>
         </div>
+
+        <MeetingReminder player={player} slots={slots} viewer="staff" />
 
         <ConsultationInbox player={player} onClose={onCloseConsultation} />
 
@@ -4486,6 +4550,54 @@ function ConsultationRequestCard({ orgId, player, setMyPlayer }) {
   );
 }
 
+// 受傷から2週間を過ぎて、まだ面談をしていない選手への案内（選手・指導者の両方に出す）
+//   受傷日からの日数だけで出す。日報の内容（痛みなど）とは関係しない。
+function MeetingReminder({ player, slots, viewer, hasOpenSlots, onGoBooking, onGoRequest }) {
+  if (meetingAlertLevel(player, slots) !== "yellow") return null;
+  const upcoming = upcomingMeeting(player, slots);
+  const days = daysSince(player.injuryDate);
+  if (upcoming) {
+    return (
+      <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4 flex items-start gap-2">
+        <CalendarClock size={18} className="text-blue-600 shrink-0 mt-0.5" />
+        <p className="text-sm text-blue-800">
+          <span className="font-bold">面談の予定：{upcoming.datetime}</span>
+          <span className="block text-xs text-blue-700 mt-0.5">受傷から{days}日。初回の面談はこの日時に行います。</span>
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="bg-yellow-50 border-2 border-yellow-300 rounded-2xl p-4" role="alert">
+      <p className="text-sm font-bold text-yellow-900 flex items-center gap-1.5">
+        <Bell size={18} className="shrink-0" />
+        {viewer === "self" ? "面談をしましょう" : "面談がまだ行われていません"}
+      </p>
+      <p className="text-xs text-yellow-900/80 mt-1 leading-relaxed">
+        受傷から{days}日がたちました。チームでは、受傷から{MEETING_REMINDER_DAYS}日を目安に、
+        {viewer === "self" ? "指導者との面談を行うことにしています。" : "選手との面談を行うことにしています。日程調整で枠を公開するか、チャットで日時を相談してください。"}
+      </p>
+      {viewer === "self" && (
+        <div className="flex gap-2 mt-3">
+          {hasOpenSlots && (
+            <button onClick={onGoBooking} className="flex-1 py-2.5 rounded-lg bg-yellow-500 text-white text-sm font-bold">
+              面談の枠を選ぶ
+            </button>
+          )}
+          <button
+            onClick={onGoRequest}
+            className={`flex-1 py-2.5 rounded-lg text-sm font-bold ${
+              hasOpenSlots ? "border border-yellow-400 text-yellow-900 bg-white" : "bg-yellow-500 text-white"
+            }`}
+          >
+            面談を申し込む
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // 指導者側：選手からの面談の申し込み（未対応のものを上に出す）
 function ConsultationInbox({ player, onClose }) {
   const pending = pendingConsultations(player);
@@ -4531,7 +4643,10 @@ function GatePanel({
   viewerRole, // 'self' | 'staff'
   onAdvance,
   onComplete,
+  ackText, // 進む前に本人に確かめてもらう一文（あれば、チェックするまで進めない）
 }) {
+  const [ack, setAck] = useState(false);
+  useEffect(() => setAck(false), [player.currentPhase]);
   const [checks, setChecks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busyIdx, setBusyIdx] = useState(null);
@@ -4750,10 +4865,21 @@ function GatePanel({
       )}
 
       {/* PHASEを進めるのは選手本人だけ。スタッフは項目のチェックと観察の記録を行う。 */}
+      {viewerRole === "self" && !isLastPhase && ackText && (
+        <label className="mt-4 flex items-start gap-3 border-2 border-emerald-300 bg-emerald-50 rounded-lg p-3 text-sm text-emerald-900">
+          <input
+            type="checkbox"
+            checked={ack}
+            onChange={(e) => setAck(e.target.checked)}
+            className="mt-0.5 w-5 h-5 shrink-0 accent-emerald-600"
+          />
+          <span className="leading-snug">{ackText}</span>
+        </label>
+      )}
       {viewerRole === "self" && !isLastPhase && (
         <button
           onClick={() => onAdvance("self", checkerName.trim())}
-          disabled={!allOk}
+          disabled={!allOk || (Boolean(ackText) && !ack)}
           className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-blue-600 text-white font-bold text-sm hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
         >
           確認して次のPHASEへ進む <ArrowRight size={16} />
@@ -5818,6 +5944,31 @@ function UsageGuideTab({ onGoTab }) {
 
       <GuideCard
         n={5}
+        title="Strength / Eccentric は続ける"
+        tab="menu"
+        art={
+          <div aria-hidden="true">
+            <div className="flex h-3 gap-px">
+              {Array.from({ length: 10 }, (_, i) => (
+                <span key={i} className={`flex-1 ${i < 3 ? "bg-slate-200" : "bg-blue-400"} ${i === 0 ? "rounded-l-full" : ""} ${i === 9 ? "rounded-r-full" : ""}`} />
+              ))}
+            </div>
+            <p className="text-[10px] text-slate-500 mt-0.5 mb-1.5">Jump → Jog → Running</p>
+            <div className="flex h-3 gap-px">
+              {Array.from({ length: 10 }, (_, i) => (
+                <span key={i} className={`flex-1 ${i < 3 ? "bg-transparent" : "bg-emerald-500"} ${i === 3 ? "rounded-l-full" : ""} ${i === 9 ? "rounded-r-full" : ""}`} />
+              ))}
+            </div>
+            <p className="text-[10px] font-bold text-emerald-700 mt-0.5">Strength / Eccentric（PHASE 4 から最後まで）</p>
+          </div>
+        }
+      >
+        <p>{CONTINUE_TEXT}</p>
+        <p>メニューの一番上に、緑の枠でいつも表示されます。種目ごとの「ステップ」が、負荷を上げていく段階です。</p>
+      </GuideCard>
+
+      <GuideCard
+        n={6}
         title="指導者とチャット"
         tab="chat"
         onGo={() => onGoTab("chat")}
@@ -5840,7 +5991,7 @@ function UsageGuideTab({ onGoTab }) {
       </GuideCard>
 
       <GuideCard
-        n={6}
+        n={7}
         title="面談の申し込み・予約"
         tab="more"
         onGo={() => onGoTab("more")}
@@ -5855,11 +6006,11 @@ function UsageGuideTab({ onGoTab }) {
         }
       >
         <p>話を聞いてほしいときは「その他」の「面談を申し込む」から。指導者に通知が届きます。</p>
-        <p>公開されている面談の枠があれば、ホームの「面談予約」から選べます。</p>
+        <p>公開されている面談の枠があれば、ホームの「面談予約」から選べます。受傷から2週間たっても面談がまだのときは、ホームに案内が出ます。</p>
       </GuideCard>
 
       <GuideCard
-        n={7}
+        n={8}
         title="受傷日を登録する"
         tab="more"
         art={
@@ -6088,6 +6239,10 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
   });
   const unreadStaff = tab === "chat" ? 0 : player.messages.filter((m) => m.sender === "staff" && Number(m.id) > seenId).length;
   useEffect(() => {
+    setIconBadge(unreadStaff);
+    return () => setIconBadge(0);
+  }, [unreadStaff]);
+  useEffect(() => {
     if (tab === "chat" && lastStaffId > seenId) {
       setSeenId(lastStaffId);
       writeDraft(seenKey, lastStaffId);
@@ -6141,6 +6296,8 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
   const [error, setError] = useState(null);
+  // 面談を予約した直後のお知らせ（日時）
+  const [bookedNotice, setBookedNotice] = useState(null);
 
   const phaseInfo = protocol?.phases[player.currentPhase - 1];
   const remainingWeeks = weeksRemaining(protocol, player.currentPhase);
@@ -6225,6 +6382,16 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
       await sbUpdate("players", player.id, { booked_slot_id: slotId });
       setSlots((prev) => prev.map((s) => (s.id === slotId ? { ...s, bookedBy: player.id } : s)));
       setMyPlayer((prev) => ({ ...prev, bookedSlotId: slotId }));
+      // 面談が決まったことを、チャットにも残す（指導者には未読として届き、双方があとから見返せる）
+      const slot = slots.find((s) => s.id === slotId);
+      if (slot) {
+        try {
+          await sendPlayerMessage(`【面談の予約】${slot.datetime} の面談を予約しました。`);
+        } catch {
+          // チャットに残せなくても、予約そのものは完了している
+        }
+      }
+      setBookedNotice(slot ? slot.datetime : null);
     } catch (err) {
       setError(err.message);
     }
@@ -6324,6 +6491,28 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
       {tab === "home" && (
         <>
+          {bookedNotice && (
+            <div className="bg-green-50 border border-green-200 rounded-2xl p-4 flex items-start gap-2">
+              <CheckCircle2 size={18} className="text-green-600 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="text-sm font-bold text-green-800">面談が決まりました：{bookedNotice}</p>
+                <p className="text-xs text-green-700 mt-0.5">指導者にも通知しました（チャットにも記録が残ります）。</p>
+              </div>
+              <button onClick={() => setBookedNotice(null)} className="text-green-600 p-2 -m-2" aria-label="閉じる">
+                <X size={16} />
+              </button>
+            </div>
+          )}
+
+          <MeetingReminder
+            player={player}
+            slots={slots}
+            viewer="self"
+            hasOpenSlots={availableSlots.length > 0}
+            onGoBooking={() => document.getElementById("meeting-booking")?.scrollIntoView({ behavior: "smooth", block: "center" })}
+            onGoRequest={() => changeTab("more")}
+          />
+
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
             <div className="flex items-center justify-between mb-2">
               <p className="text-sm font-bold text-slate-700">復帰ロードマップ</p>
@@ -6353,6 +6542,8 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
               ))}
             </div>
 
+            <ContinuingLane protocol={protocol} currentPhase={player.currentPhase} />
+
             <div className="mt-4 bg-slate-50 rounded-lg p-3">
               <p className="text-xs font-bold text-slate-600 mb-1">現在：{phaseInfo?.title}</p>
               <ul className="text-xs text-slate-500 list-disc list-inside space-y-0.5">
@@ -6363,6 +6554,21 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
             </div>
           </div>
 
+          {showsContinuing(protocol, player.currentPhase) && (
+            <button
+              onClick={() => changeTab("menu")}
+              className="w-full text-left border-2 border-emerald-300 bg-emerald-50 rounded-2xl p-4"
+            >
+              <p className="text-sm font-bold text-emerald-800 flex items-center gap-1.5">
+                <Repeat size={16} /> {CONTINUE_TITLE}
+              </p>
+              <p className="text-xs text-emerald-800/90 leading-relaxed mt-1">{CONTINUE_TEXT}</p>
+              <p className="text-xs font-bold text-emerald-700 mt-2 flex items-center gap-1">
+                メニューで種目と負荷のステップを見る <ArrowRight size={13} />
+              </p>
+            </button>
+          )}
+
           <GatePanel
             orgId={orgId}
             player={player}
@@ -6371,15 +6577,21 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
             viewerRole="self"
             onAdvance={(role, nm) => advanceOwnPhase(role, nm)}
             onComplete={completeOwn}
+            ackText={
+              // 次の PHASE が 4 以降になるとき：続ける種目を確かめてから進む
+              protocol?.classificationScheme === "hamstring" && player.currentPhase + 1 >= CONTINUE_FROM_PHASE
+                ? "次のPHASEに進んでも、Strength / Eccentric は続け、負荷を少しずつ上げていくことを確認しました"
+                : null
+            }
           />
 
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+          <div id="meeting-booking" className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm scroll-mt-24">
             <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
               <CalendarClock size={16} className="text-blue-600" />
               面談予約
             </p>
             <p className="text-xs text-slate-400 mb-3">
-              コーチ・トレーナーなどの日程調整により公開された枠から選べます。
+              コーチ・トレーナー・ドクターのうち2人以上の都合が合った枠が公開されます。選ぶと面談が決まります。
             </p>
 
             {bookedSlot ? (
@@ -7417,6 +7629,51 @@ async function sb_deleteSelection(playerId, itemId) {
 //   「PHASEが進んでも前PHASEのTrainingを終了するわけではない」
 //   今日のメニュー = intro_phase <= 現在PHASE かつ 未終了 の和集合
 // ============================================================
+// ------------------------------------------------------------------
+// 「続ける種目」（Strength / Eccentric）
+//   PHASE 4 以降の Strength / Eccentric は、Jump・Jog・Running を始めたあとも続け、負荷を少しずつ上げていく。
+//   走る種目が増えると見落とされやすいので、メニューの一番上に固定し、ロードマップと PHASE を進める場面でも示す。
+//   （プロトコルの方針をそのまま表示しているだけで、入力内容によって文面は変えない）
+// ------------------------------------------------------------------
+const CONTINUING_CATEGORIES = ["strength", "eccentric"];
+const CONTINUE_FROM_PHASE = 4;
+const CONTINUE_TITLE = "Strength / Eccentric は続ける";
+const CONTINUE_TEXT =
+  "PHASE 4 以降の Strength / Eccentric は、Jump・Jog・Running を始めたあとも続けます。負荷は少しずつ上げていきます。";
+// この選手・プロトコルで「続ける種目」の案内を出すか（ハムストリングのプロトコルで、PHASE 4 以降）
+function showsContinuing(protocol, currentPhase) {
+  return protocol?.classificationScheme === "hamstring" && currentPhase >= CONTINUE_FROM_PHASE;
+}
+
+// ロードマップの下に出す2本目の線：PHASE 4 から最後まで続くことを絵で見せる
+function ContinuingLane({ protocol, currentPhase }) {
+  if (protocol?.classificationScheme !== "hamstring") return null;
+  const n = phaseCountOf(protocol);
+  if (n <= CONTINUE_FROM_PHASE) return null;
+  const active = currentPhase >= CONTINUE_FROM_PHASE;
+  return (
+    <div className="mt-3">
+      <div className="flex w-full h-5 gap-px">
+        {phaseRange(protocol).map((ph) => (
+          <div
+            key={ph}
+            className={`flex-1 first:rounded-l-full last:rounded-r-full ${
+              ph < CONTINUE_FROM_PHASE
+                ? "bg-transparent"
+                : ph <= currentPhase
+                ? "bg-emerald-500"
+                : "bg-emerald-200"
+            } ${ph === CONTINUE_FROM_PHASE ? "rounded-l-full" : ""}`}
+          />
+        ))}
+      </div>
+      <p className={`text-xs font-bold mt-1 flex items-center gap-1 ${active ? "text-emerald-700" : "text-slate-400"}`}>
+        <Repeat size={13} /> Strength / Eccentric：PHASE {CONTINUE_FROM_PHASE} から最後まで続ける（負荷は少しずつ上げる）
+      </p>
+    </div>
+  );
+}
+
 const CATEGORY_LABELS = {
   isometric: "等尺性収縮",
   strength: "Strength",
@@ -7428,7 +7685,7 @@ const CATEGORY_LABELS = {
 
 // PHASE 10 では37種目になるため、カテゴリでまとめる。
 // その段階で追加された種目は開き、継続中のものは畳む。
-function MenuByCategory({ exercises, currentPhase, renderExercise }) {
+function MenuByCategory({ exercises, currentPhase, renderExercise, pinContinuing }) {
   const [openKeys, setOpenKeys] = useState(null);
 
   const groups = {};
@@ -7436,7 +7693,9 @@ function MenuByCategory({ exercises, currentPhase, renderExercise }) {
     const key = e.category || "other";
     (groups[key] = groups[key] || []).push(e);
   });
-  const keys = Object.keys(groups);
+  // 「続ける種目」は上に固定して、いつも開いたままにする（畳めない）
+  const pinnedKeys = pinContinuing ? CONTINUING_CATEGORIES.filter((k) => groups[k]) : [];
+  const keys = Object.keys(groups).filter((k) => !pinnedKeys.includes(k));
 
   // 初期状態：今のPHASEで追加された種目を含むカテゴリだけ開く
   const defaultOpen = keys.filter((k) => groups[k].some((e) => e.intro_phase === currentPhase));
@@ -7446,6 +7705,27 @@ function MenuByCategory({ exercises, currentPhase, renderExercise }) {
 
   return (
     <div className="space-y-2">
+      {pinnedKeys.length > 0 && (
+        <div className="border-2 border-emerald-300 bg-emerald-50/60 rounded-xl p-3">
+          <p className="text-sm font-bold text-emerald-800 flex items-center gap-1.5">
+            <Repeat size={15} /> {CONTINUE_TITLE}
+          </p>
+          <p className="text-xs text-emerald-800/90 leading-relaxed mt-1 mb-2">{CONTINUE_TEXT}</p>
+          {pinnedKeys.map((k) => (
+            <div key={k} className="mt-2">
+              <p className="text-xs font-bold text-emerald-900 mb-1.5">
+                {CATEGORY_LABELS[k]}
+                <span className="font-normal text-emerald-700 ml-1.5">{groups[k].length}種目</span>
+                <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-600 text-white">継続</span>
+              </p>
+              <div className="space-y-2">{groups[k].map(renderExercise)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {pinnedKeys.length > 0 && keys.length > 0 && (
+        <p className="text-xs font-bold text-slate-500 pt-2">そのほかの種目</p>
+      )}
       {keys.map((k) => {
         const list = groups[k];
         const newCount = list.filter((e) => e.intro_phase === currentPhase).length;
@@ -7561,7 +7841,7 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
     const timeSec = toActualTimeSec(step?.speed_percent, player.baselineTimeSec);
 
     return (
-      <div key={e.id} className="border border-slate-200 rounded-lg p-3">
+      <div key={e.id} className="border border-slate-200 bg-white rounded-lg p-3">
         <div className="flex items-start justify-between gap-2">
           <div className="flex-1">
             <p className="text-xs font-bold text-slate-700">{e.name}</p>
@@ -7587,6 +7867,15 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
                 <p className="text-[10px] text-slate-400">
                   ステップ {stepIdx + 1}/{exSteps.length}
                 </p>
+                {/* 負荷の段階：いまどこまで上げたかを目で見えるようにする */}
+                <div className="flex gap-0.5 my-1" aria-hidden="true">
+                  {exSteps.map((st, i) => (
+                    <span
+                      key={st.id ?? i}
+                      className={`h-1.5 flex-1 rounded-full ${i <= stepIdx ? "bg-emerald-500" : "bg-slate-200"}`}
+                    />
+                  ))}
+                </div>
                 <p className="text-xs text-slate-700">{step?.label ?? "—"}</p>
                 {step?.target && <p className="text-[10px] text-slate-500">{step.target}</p>}
                 {step?.load_percent_bw != null && (
@@ -7601,6 +7890,12 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
                     {timeSec !== null
                       ? `${step.speed_percent}%（${player.baselineDistanceM ?? 100}m ${timeSec}秒）`
                       : `${step.speed_percent}%`}
+                  </p>
+                )}
+                {exSteps[stepIdx + 1] && (
+                  <p className="text-[10px] text-emerald-700 mt-0.5">
+                    次のステップ：{exSteps[stepIdx + 1].label}
+                    {exSteps[stepIdx + 1].target ? `（${exSteps[stepIdx + 1].target}）` : ""}
                   </p>
                 )}
                 {((step?.load_percent_bw != null && !player.bodyWeightKg) ||
@@ -7661,6 +7956,7 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
           exercises={current}
           currentPhase={player.currentPhase}
           renderExercise={renderExercise}
+          pinContinuing={showsContinuing(protocol, player.currentPhase)}
         />
       </div>
 
