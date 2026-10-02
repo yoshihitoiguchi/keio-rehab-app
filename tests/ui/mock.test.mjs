@@ -35,7 +35,7 @@ for (let i = 0; i < 40; i++) { try { if ((await fetch(BASE)).ok) break; } catch 
 const now = new Date();
 const iso = (d) => d.toISOString();
 const dayStr = (offset) => new Date(now.getTime() + offset * 86400000).toISOString().slice(0, 10);
-const phases = Array.from({ length: 10 }, (_, i) => ({ title: `フェーズ${i + 1}の名前`, conditions: [`条件A-${i + 1}`, `条件B-${i + 1}`] }));
+const phases = Array.from({ length: 10 }, (_, i) => ({ title: `段階${i + 1}の名前`, conditions: [`条件A-${i + 1}`, `条件B-${i + 1}`] }));
 const CONTINUE_RULE = { from_phase: 4, categories: ["strength", "eccentric"], label: "Strength / Eccentric", title: "Strength / Eccentric は続ける",
   text: "PHASE 4 以降の Strength / Eccentric は、Jump・Jog・Running を始めたあとも続けます。負荷は少しずつ上げていきます。",
   ack: "次のPHASEに進んでも、Strength / Eccentric は続け、負荷を少しずつ上げていくことを確認しました" };
@@ -68,7 +68,7 @@ function makeState({ phase = 5, injuryDaysAgo = 20, booked = false, checks = [],
   };
   st.player = () => ({ id: "p-1", org_id: "default", name: "山田 太郎", pin: "1111", protocol_id: st.protocolId, current_phase: st.phase, checklist: [], sos: false,
     injury_date: st.injury, booked_slot_id: st.slots.find((s) => s.booked_by === "p-1")?.id ?? null,
-    reports: [], messages: st.messages, treatments: [], phase_history: [], player_exercise_progress: [], consultation_requests: st.consult });
+    reports: st.reports || [], messages: st.messages, treatments: [], phase_history: [], player_exercise_progress: [], consultation_requests: st.consult });
   return st;
 }
 function respond(st, url, method, body) {
@@ -98,6 +98,7 @@ function respond(st, url, method, body) {
     if (method === "POST") { for (const r of json) st.slots.push({ id: `slot-${st.slots.length + 1}`, booked_by: null, zoom_url: null, ...r }); return st.slots; }
     return st.slots;
   }
+  if (p === "/rest/v1/reports" && method === "POST") { st.reports = [...(st.reports || []), { id: 900, created_at: iso(new Date()), ...json }]; return [json]; }
   if (p === "/rest/v1/messages") {
     if (method === "POST") { const row = { id: 100 + st.messages.length, is_read: false, created_at: iso(new Date()), ...json }; st.messages.push(row); return [row]; }
     return st.messages;
@@ -222,7 +223,7 @@ try {
     await p3.click(box, { clickCount: 3 }); await p3.keyboard.press("Backspace");
     await p3.type(box, "RE:SPRINT 引き継ぎコード：4815 1623"); await sleep(2500);
     t = await text(p3);
-    ok(t.includes("山田 太郎 さん") && !t.includes("あなたの名前を選んでください"), "正しいコードを貼ると、暗証番号なしでその選手の画面が開く");
+    ok(t.includes("山田 太郎") && t.includes("今日の日報を送る") && !t.includes("あなたの名前を選んでください"), "正しいコードを貼ると、暗証番号なしでその選手の画面が開く");
     ok(p3.errs.length === 0, "例外なし " + p3.errs.join("|"));
   });
 
@@ -380,6 +381,56 @@ try {
        && (await c3.$eval('input[placeholder^="オンライン会議URL"]', (i) => i.value)) === "https://zoom.example/j/999", "予約済みの面談にも、ボタン1つでいつもの URL を入れられる");
   });
 
+  await step("今日やること・連続記録・記録のグラフ", async () => {
+    const st = makeState({ injuryDaysAgo: 3 });
+    const day = (off) => { const d = new Date(Date.now() + off * 86400000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+    st.reports = [-3, -2, -1].map((o, i) => ({ id: i + 1, player_id: "p-1", date: day(o), vas: 4 - i, mental: 3, fatigue: 3, sleep_quality: 7, created_at: new Date(Date.now() + o * 86400000).toISOString() }));
+    const p = await newPage(st);
+    await playerLogin(p);
+    let t = await text(p);
+    ok(t.includes("今日の日報を送る") && t.includes("日報 3日連続") && !t.includes("おかえりなさい"), "ホームの一番上に「今日の日報を送る」と連続記録が出る");
+    const firstCard = await p.evaluate(() => document.querySelector("main .bg-slate-900")?.innerText.includes("今日の日報を送る"));
+    ok(firstCard === true, "「今日やること」は濃い色のカードで目立たせている");
+    await clickText(p, "今日の日報を送る"); await sleep(500);
+    t = await text(p);
+    ok(t.includes("今日のコンディション報告") && t.includes("これまでの記録") && (await p.$$("svg polyline, svg path")).length > 0, "日報タブに移動し、これまでの記録のグラフがある");
+    await clickText(p, "指導者に送信する"); await sleep(1200);
+    await clickText(p, "ホーム", "nav button"); await sleep(500);
+    t = await text(p);
+    ok(t.includes("今日の日報は送信済み") && t.includes("日報 4日連続") && !t.includes("今日の日報を送る"), "送ると「送信済み」に変わり、連続記録が伸びる");
+    ok(p.errs.length === 0, "例外なし " + p.errs.join("|"));
+
+    // 指導者：今日まだ日報がない選手が分かる
+    const st2 = makeState({ injuryDaysAgo: 3 });
+    const c = await newPage(st2);
+    await coachLogin(c);
+    t = await text(c);
+    ok(t.includes("今日の日報 0/1") && t.includes("日報なし"), "指導者の一覧に「今日の日報 0/1」と「日報なし」が出る");
+  });
+
+  await step("表記の統一", async () => {
+    const bad = /Phase |フェーズ|スタッフ|Supabase|おかえりなさい|🏃|📋|📎|⚠️|v15\./;
+    const p = await newPage(makeState({ injuryDaysAgo: 20 }));
+    await p.goto(BASE, { waitUntil: "networkidle0" });
+    ok(!bad.test(await text(p)), "ログイン画面に、古い表記・絵文字・ビルド番号が出ない");
+    await p.type('input[autocomplete="username"]', "default"); await p.type('input[type="password"]', "org-pass-1234");
+    await p.keyboard.press("Enter"); await sleep(1200);
+    await clickText(p, "山田 太郎"); await sleep(400);
+    await p.type('input[maxlength="4"]', "1111"); await p.keyboard.press("Enter"); await sleep(1500);
+    for (const label of ["ホーム", "メニュー", "日報", "連絡・面談", "使い方"]) {
+      await clickText(p, label, "nav button"); await sleep(500);
+      const m = (await text(p)).match(bad);
+      ok(!m, `選手「${label}」：表記がそろっている ${m ? "→ " + m[0] : ""}`);
+    }
+    const c = await newPage(makeState({ injuryDaysAgo: 20 }));
+    await coachLogin(c);
+    for (const label of ["選手", "プロトコル", "メニュー", "日程調整"]) {
+      await clickText(c, label, "nav button"); await sleep(700);
+      const m = (await text(c)).match(bad);
+      ok(!m, `指導者「${label}」：表記がそろっている ${m ? "→ " + m[0] : ""}`);
+    }
+  });
+
   await step("面談の案内から申し込みへ", async () => {
     const p = await newPage(makeState({ injuryDaysAgo: 20 }));
     p.on("dialog", (d) => d.dismiss());
@@ -395,7 +446,7 @@ try {
     await clickText(p, "その他", "nav button"); await sleep(1200);
     let t = await text(p);
     ok(t.includes("通知") && (t.includes("通知を受け取る") || t.includes("通知を使えません") || t.includes("通知が許可されていません")), "選手の「その他」に通知の設定が出る");
-    ok(t.includes("通知には内容は表示されません"), "通知に内容が出ないことを説明している");
+    ok(t.includes("内容は表示されません"), "通知に内容が出ないことを説明している");
     ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
   });
 
@@ -424,7 +475,7 @@ try {
   await step("指導者：決まった面談の管理", async () => {
     const st = makeState({ injuryDaysAgo: 20, booked: true });
     const p = await newPage(st);
-    const confirms = []; p.on("dialog", async (d) => { confirms.push(d.message()); await d.accept(); });
+    const native = []; p.on("dialog", async (d) => { native.push(d.message()); await d.accept(); });
     await coachLogin(p);
     await clickText(p, "日程調整", "nav button"); await sleep(900);
     let t = await text(p);
@@ -432,13 +483,17 @@ try {
     await p.type('input[placeholder^="オンライン会議URL"]', "https://zoom.example/j/1");
     await clickText(p, "保存"); await sleep(600);
     ok(st.patches.some((x) => x.p === "/rest/v1/slots" && x.b.zoom_url === "https://zoom.example/j/1"), "オンライン会議URLを保存できる");
-    await clickText(p, "予約を取り消す"); await sleep(1200);
+    await clickText(p, "予約を取り消す"); await sleep(400);
     t = await text(p);
-    ok(confirms.length === 1 && st.patches.some((x) => x.p === "/rest/v1/slots" && x.b.booked_by === null)
+    ok(native.length === 0 && t.includes("面談の予約を取り消しますか？") && !!(await p.$('[role="dialog"]')), "確認は、ブラウザ標準ではなくアプリの中の画面で出る");
+    await clickText(p, "取り消す", '[role="dialog"] button'); await sleep(1200);
+    t = await text(p);
+    ok(st.patches.some((x) => x.p === "/rest/v1/slots" && x.b.booked_by === null)
        && st.patches.some((x) => x.p === "/rest/v1/players" && x.b.booked_slot_id === null), "予約を取り消すと、枠が空きに戻る（確認つき）");
     ok(st.posts.some((x) => x.p === "/rest/v1/messages" && x.b.sender === "staff" && x.b.content.includes("【面談の取り消し】")), "取り消しは選手にチャットで知らされる");
     ok(t.includes("これから 0件") && t.includes("公開中の枠（まだ予約なし）1件"), "一覧がすぐ更新される（枠は公開中に戻る）");
-    await clickText(p, "公開をやめる"); await sleep(800);
+    await clickText(p, "公開をやめる"); await sleep(400);
+    await clickText(p, "公開をやめる", '[role="dialog"] button'); await sleep(800);
     ok((await text(p)).includes("公開中の枠（まだ予約なし）0件"), "予約のない枠は、公開をやめられる");
     ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
   });

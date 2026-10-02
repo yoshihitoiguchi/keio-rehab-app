@@ -488,6 +488,10 @@ ok(!(await run("supabase_rollback_v27.sql")) && (await db.query("select to_regpr
 ok(!(await run2("insert into messages (player_id, sender, content) values ('p-b1','player','戻した後')")), "[v27] 戻した後もチャットは動く");
 ok(!(await run("supabase_migration_v27_push.sql")), "[v27] 戻した後にもう一度適用できる");
 
+// ===== v29：通知の文面 =====
+ok(!(await run("supabase_migration_v29_push_wording.sql")) && !(await run("supabase_migration_v29_push_wording.sql")), "[v29] 適用（2回実行しても同じ）");
+ok(!!(await as(U4, "select resprint_private.push_on_sos()")).error, "[v29] 置き換えた関数も、アプリからは呼べない");
+
 // ===== v28：引き継ぎコード =====
 ok(!(await run("supabase_migration_v28_transfer_code.sql")), "[v28] 適用 1 回目");
 ok(!(await run("supabase_migration_v28_transfer_code.sql")), "[v28] 適用 2 回目（冪等）");
