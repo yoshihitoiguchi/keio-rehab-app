@@ -36,7 +36,12 @@ const now = new Date();
 const iso = (d) => d.toISOString();
 const dayStr = (offset) => new Date(now.getTime() + offset * 86400000).toISOString().slice(0, 10);
 const phases = Array.from({ length: 10 }, (_, i) => ({ title: `フェーズ${i + 1}の名前`, conditions: [`条件A-${i + 1}`, `条件B-${i + 1}`] }));
-const protocol = { id: "hs", org_id: "default", name: "ハムストリング肉離れ", total_weeks: 8, phases, video_url: null, classification_scheme: "hamstring" };
+const CONTINUE_RULE = { from_phase: 4, categories: ["strength", "eccentric"], label: "Strength / Eccentric", title: "Strength / Eccentric は続ける",
+  text: "PHASE 4 以降の Strength / Eccentric は、Jump・Jog・Running を始めたあとも続けます。負荷は少しずつ上げていきます。",
+  ack: "次のPHASEに進んでも、Strength / Eccentric は続け、負荷を少しずつ上げていくことを確認しました" };
+const protocol = { id: "hs", org_id: "default", name: "ハムストリング肉離れ", total_weeks: 8, phases, video_url: null, classification_scheme: "hamstring", continue_rule: CONTINUE_RULE };
+// 「続ける種目」の設定がないプロトコル（ほかの怪我）。分類はハムストリングと同じでも、案内は出ないこと
+const otherProtocol = { ...protocol, id: "other", name: "前十字靭帯損傷", continue_rule: null };
 const exercises = [
   { id: 1, protocol_id: "hs", name: "Heel Dig ISO", intro_phase: 1, category: "isometric", continues: true, is_gate_exercise: true, sort_order: 10 },
   { id: 5, protocol_id: "hs", name: "Bilateral RDL", intro_phase: 3, category: "strength", continues: true, is_gate_exercise: true, sort_order: 50, prescription: "6〜10回×3set" },
@@ -48,9 +53,9 @@ const steps = [
   { id: 15, exercise_id: 5, step_order: 2, label: "高い努力度で実施", target: "6〜10回×3set" },
   { id: 16, exercise_id: 5, step_order: 3, label: "通常Strength水準の高負荷", target: "通常設定" },
 ];
-function makeState({ phase = 5, injuryDaysAgo = 20, booked = false, checks = [] } = {}) {
+function makeState({ phase = 5, injuryDaysAgo = 20, booked = false, checks = [], protocolId = "hs" } = {}) {
   const st = {
-    phase, checks, messages: [{ id: 5, player_id: "p-1", sender: "player", content: "よろしくお願いします", is_read: true, created_at: iso(now) }],
+    phase, checks, protocolId, messages: [{ id: 5, player_id: "p-1", sender: "player", content: "よろしくお願いします", is_read: true, created_at: iso(now) }],
     consult: [], slots: [
       { id: "slot-1", org_id: "default", datetime: `${dayStr(3)} 18:00`, booked_by: booked ? "p-1" : null, matched_roles: ["coach", "doctor"], zoom_url: null },
     ],
@@ -61,7 +66,7 @@ function makeState({ phase = 5, injuryDaysAgo = 20, booked = false, checks = [] 
     ],
     injury: dayStr(-injuryDaysAgo), posts: [], patches: [],
   };
-  st.player = () => ({ id: "p-1", org_id: "default", name: "山田 太郎", pin: "1111", protocol_id: "hs", current_phase: st.phase, checklist: [], sos: false,
+  st.player = () => ({ id: "p-1", org_id: "default", name: "山田 太郎", pin: "1111", protocol_id: st.protocolId, current_phase: st.phase, checklist: [], sos: false,
     injury_date: st.injury, booked_slot_id: st.slots.find((s) => s.booked_by === "p-1")?.id ?? null,
     reports: [], messages: st.messages, treatments: [], phase_history: [], player_exercise_progress: [], consultation_requests: st.consult });
   return st;
@@ -76,9 +81,9 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/rpc/org_renew") return true;
   if (p === "/rest/v1/rpc/coach_check") return { set: true, ok: json?.p_password === "coach" };
   if (p === "/rest/v1/organizations") return [{ id: "default", name: "テスト組織" }];
-  if (p === "/rest/v1/protocols") return [protocol];
+  if (p === "/rest/v1/protocols") return [protocol, otherProtocol];
   if (p === "/rest/v1/player_directory") return [{ id: "p-1", name: "山田 太郎" }];
-  if (p === "/rest/v1/exercises") return exercises;
+  if (p === "/rest/v1/exercises") return exercises.map((e) => ({ ...e, protocol_id: st.protocolId }));
   if (p === "/rest/v1/exercise_steps") return steps;
   if (p === "/rest/v1/gate_item_checks" && method === "GET") return st.checks;
   if (p === "/rest/v1/staff_availability" && method === "GET") return st.availability;
@@ -217,6 +222,37 @@ try {
     ok(!t.includes("ことを確認しました"), "PHASE 2→3 では確認のチェックは求めない");
   });
 
+  await step("選手：ほかのプロトコルには「続ける種目」の案内を出さない", async () => {
+    const st = makeState({ phase: 5, injuryDaysAgo: 3, protocolId: "other", checks: [
+      { id: 1, player_id: "p-1", phase_number: 5, item_index: 0, checker_role: "self", result: true, created_at: iso(now) },
+      { id: 2, player_id: "p-1", phase_number: 5, item_index: 1, checker_role: "self", result: true, created_at: iso(now) },
+    ] });
+    const p = await newPage(st, { seenGuide: false });
+    await playerLogin(p);
+    let t = await text(p);
+    ok(t.includes("毎日、日報を送る") && !t.includes("Strength / Eccentric") && !t.includes("続ける"), "使い方タブ：設定のないプロトコルの選手には、続ける種目の説明が出ない");
+    const nums = await p.$$eval("span.rounded-full.bg-blue-600", (a) => a.map((n) => n.innerText.trim()).filter((x) => /^\d+$/.test(x)));
+    ok(nums.join() === "1,2,3,4,5,6,7", "使い方の番号は 1〜7 で続く " + nums.join());
+    await clickText(p, "ホーム", "nav button"); await sleep(500);
+    t = await text(p);
+    ok(!t.includes("Strength / Eccentric") && !t.includes("から最後まで続ける") && !t.includes("ことを確認しました"), "ホーム：案内・ロードマップの2本目の線・確認のチェックが出ない");
+    ok((await p.$$eval("button", (a) => a.find((n) => n.innerText.includes("次のPHASEへ進む"))?.disabled)) === false, "条件がそろえば、チェックなしでそのまま進める");
+    await clickText(p, "メニュー", "nav button"); await sleep(900);
+    t = await text(p);
+    ok(t.includes("Bilateral RDL") === false || !t.includes("そのほかの種目"), "メニュー：緑の固定枠は出ず、今までどおりのカテゴリ表示");
+    ok(!t.includes("は続ける") && p.errs.length === 0, "メニューに案内の文が出ない・例外なし " + p.errs.join("|"));
+  });
+
+  await step("通知のボタン", async () => {
+    const p = await newPage(makeState({ injuryDaysAgo: 3 }));
+    await playerLogin(p);
+    await clickText(p, "その他", "nav button"); await sleep(1200);
+    let t = await text(p);
+    ok(t.includes("通知") && (t.includes("通知を受け取る") || t.includes("通知を使えません") || t.includes("通知が許可されていません")), "選手の「その他」に通知の設定が出る");
+    ok(t.includes("通知には内容は表示されません"), "通知に内容が出ないことを説明している");
+    ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
+  });
+
   await step("指導者", async () => {
     const st = makeState({ injuryDaysAgo: 20 });
     st.messages.push({ id: 6, player_id: "p-1", sender: "player", content: "【面談の予約】テスト", is_read: false, created_at: iso(now) });
@@ -227,6 +263,8 @@ try {
     let t = await text(p);
     ok(t.includes("面談未実施") && t.includes("面談がまだ行われていません"), "受傷2週間・面談未実施の選手が、一覧と詳細で分かる");
     ok((await p.$$eval("nav button", (a) => a[0].innerText.replace(/\D/g, ""))) === "1", "対応が必要な人数がタブに出る");
+    await clickText(p, "その他", "nav button"); await sleep(1000);
+    ok((await text(p)).includes("選手からメッセージ・面談の申し込み・面談の予約・SOS"), "指導者の「その他」に通知の設定が出る");
     await clickText(p, "日程調整", "nav button"); await sleep(900);
     t = await text(p);
     ok(t.includes("2人以上") && (t.match(/公開対象/g) || []).length === 1, "コーチ＋ドクターの2人が一致した日時だけが公開対象（1人だけの日時は対象外）");

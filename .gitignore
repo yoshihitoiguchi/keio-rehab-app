@@ -18,3 +18,4 @@ npm-debug.log*
 .claude/settings.local.json
 .test-dist/
 .test-profile-*/
+.env*

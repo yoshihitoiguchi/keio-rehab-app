@@ -112,9 +112,12 @@ const SUPABASE_ANON_KEY = "sb_publishable_c2dND4Q3D36SDX8JsxaWSA_ayFHmuSJ";   //
 ├ src/
 │  ├ App.jsx              ★ ほぼ全コード（約6,400行、42コンポーネント）
 │  ├ lib/auth.js          Supabase の接続設定・ログイン状態（Supabase Auth）の管理
+│  ├ lib/push.js          プッシュ通知の端末側（許可・登録・解除）。VAPID の公開鍵はここ
 │  ├ main.jsx             SW登録つき（本番ビルドのときだけ登録）
 │  └ index.css            Tailwind + セーフエリア対応
+├ api/push.js             プッシュ通知の送信役（Vercel の関数。DB のトリガーから呼ばれる）
 ├ scripts/check-production.mjs     本番の状態を読み取りだけで確認（npm run check:prod）
+├ tests/api/push.test.mjs           送信役のテスト（npm run test:api。実際には送らない）
 ├ tests/db/phases.test.mjs          段階ごとの SQL テスト（npm run test:db。PGlite で本番には触れない）
 ├ tests/ui/mock.test.mjs            画面テスト（npm run test:ui。スマホ幅 390px。DB の代わりに決まった応答を返すので本番には触れない）
 ├ supabase_migration_v*.sql         マイグレーション（v15〜v17 は段階的に適用する。下記）
@@ -215,6 +218,8 @@ PGRST204 エラーになった経緯がある。v12 で復旧済み）。
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
+| v27_push | **適用済み（2026-10-02）** | プッシュ通知。宛先 `resprint_private.push_subscriptions`・設定 `push_config`（url・secret）・`push_subscribe` などの関数・`messages`／`consultation_requests`／`players.sos` のトリガー。`pg_net` を有効化。戻し方 `supabase_rollback_v27.sql` |
+| v26_continue_rule | **適用済み（2026-10-02）** | `protocols.continue_rule`（「続ける種目」の案内。プロトコルごとの設定）。ハムストリング肉離れのプロトコルにだけ設定 |
 | v25_remove_nextday_item | **適用済み（2026-10-02）** | 全プロトコルの各フェーズの条件から「実施後〜翌日に症状増悪なし」を削除（データの変更）。PHASE 7 の注意「Flatへの移行は別セッション」は Flat Running の種目メモへ移動。戻すときは控え「v15.9 公開前（v25 の前）」から |
 | v24_org_secrets | **適用済み（2026-10-01）** | 組織・指導者パスワードの控えを `resprint_private.org_secrets` に保存（API 非公開）。管理者だけが `admin_get_org_secrets` で読める。組織の削除をデータごと行うよう修正（`default` は削除不可）。戻し方 `supabase_rollback_v24.sql` |
 | v23_coach_password_log | **適用済み（2026-09-30）** | 指導者パスワードの最終変更日時と「管理者／指導者本人」を管理者の一覧に出す。記録の行もアプリから読めない。戻し方 `supabase_rollback_v23.sql` |
@@ -297,10 +302,10 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 **変更をリリースするたびに必ず上げること。** ヘッダー右とログイン画面下に出る。
 
 ```js
-const APP_BUILD = "v15.9 (面談の案内・続ける種目の強調)";
+const APP_BUILD = "v15.10 (プッシュ通知)";
 ```
 
-本番に出ているのは `v15.9 (面談の案内・続ける種目の強調)`（2026-10-02 公開）。
+本番に出ているのは `v15.10 (プッシュ通知)`（2026-10-02 公開）。
 
 過去に「全く改善されてない」が3回続き、原因が
 **App.jsx をリポジトリ直下に置いていて `src/` に入っていなかった**ことだった。
@@ -380,6 +385,37 @@ const APP_BUILD = "v15.9 (面談の案内・続ける種目の強調)";
 
 ---
 
+## プッシュ通知（v15.10〜）
+
+アプリを閉じていても端末に届く通知。**通知の文面に、選手名・メッセージの本文・痛みの数値などを入れない**（ロック画面に出るため。作者の了承済み）。
+
+```
+端末：「その他」タブの「通知を受け取る」→ 許可 → push_subscribe()（宛先を DB に保存）
+出来事：messages／consultation_requests に行が入る・players.sos がオンになる
+  → DB のトリガー（resprint_private.push_on_*）→ push_send() が宛先を集める
+  → pg_net で https://keio-rehab-app.vercel.app/api/push を呼ぶ（合言葉つき）
+  → api/push.js が web-push で各端末へ送る → public/sw.js の push イベントが通知を出す
+```
+
+| 誰に | いつ | 文面 |
+|---|---|---|
+| 指導者（その組織で通知をオンにした端末すべて） | 選手のメッセージ／面談の予約／面談の申し込み／SOS | 「選手から新しいメッセージがあります」など |
+| 選手（その選手としてオンにした端末） | 指導者のメッセージ／面談が決まった | 「指導者から新しいメッセージがあります」「面談が決まりました」 |
+
+- 鍵と合言葉：VAPID の公開鍵は `src/lib/push.js`、秘密鍵と合言葉は **Vercel の環境変数**（`VAPID_PRIVATE_KEY`・`VAPID_PUBLIC_KEY`・`PUSH_SECRET`。Production）。
+  合言葉は DB の `resprint_private.push_config`（key='secret'）と同じ値。送信役の URL は key='url'。**どちらもリポジトリに書かない。**
+  鍵を作り直すと、登録済みの端末は全部登録し直しになる（公開鍵が変わるため）。
+- `push_config` に url・secret がない間、トリガーは何も送らない。通知の送信に失敗しても、チャットなど元の書き込みは必ず成功する。
+- 送るのは、いまも組織のメンバーである端末だけ（期限切れ・パスワード変更後の端末には送らない）。使えなくなった宛先は送信役が `push_report_gone` で消す。
+- 宛先として認めるのは Apple・Google・Mozilla・Microsoft の通知サービスだけ（DB と送信役の両方で確認）。
+- **iPhone はホーム画面に追加したアプリからだけ使える**（iOS 16.4 以上）。端末ごとに本人が許可する。
+- 選手ログアウトでその選手あての登録を、組織から抜けるとその端末の登録をすべて消す。アプリを開くたびに登録を更新する（`refreshPush`）。
+- 指導者は個人ごとに分かれていないので、「指導者モードで通知をオンにした端末すべて」に届く。
+- 止めたいとき：`delete from resprint_private.push_config;`（送信が止まる）。完全に戻すなら `supabase_rollback_v27.sql`。
+- 実機（iPhone のホーム画面アプリ）で届くかどうかは、テスト環境では確かめられない。公開後に実機で確認する。
+
+---
+
 ## 登録済みの選手を困らせないための更新ルール（v15.6〜、必ず守る）
 
 選手は実際にアプリを使っている。更新のたびに以下を守る。
@@ -394,7 +430,7 @@ const APP_BUILD = "v15.9 (面談の案内・続ける種目の強調)";
    変えると選手がログアウトされたり、書きかけが消えたりする。変えるなら古い形も読めるようにする。
 4. **ログインの保存を消すのは、本当に無効なときだけ。** 通信エラーでは消さない（「もう一度試す」を出す）。
 5. **勝手に読み込み直さない。** 更新は `UpdateNotice` のボタン（または長く使っていなかったとき）に任せる。
-6. 公開前に：`npm run build`・`npm run test:db`・`npm run test:ui`（スマホ幅 390px の画面テスト）。公開後に本番のビルド番号を確認。
+6. 公開前に：`npm run build`・`npm run test:db`・`npm run test:ui`（スマホ幅 390px の画面テスト）・`npm run test:api`。公開後に本番のビルド番号を確認。
    画面を変えたら `tests/ui/mock.test.mjs` に確認を足す。
 
 ---
@@ -530,6 +566,14 @@ v16 後も残る穴（優先順。2026-09-27 のレビューで確認したも�
 ---
 
 ## 変更履歴
+
+### 2026-10-02（v15.10：Claude Code）
+- プッシュ通知（上の「プッシュ通知」を参照）。`api/push.js`・`src/lib/push.js`・`public/sw.js` の push／notificationclick・`NotifyToggle`（選手・指導者の「その他」）・v27。
+  依存に `web-push` を追加（送信役で使う）。Vercel のプロジェクトに環境変数を3つ登録。このフォルダを `vercel link` で紐づけ（`.vercel/` は Git に入れない）。
+- 「続ける種目（Strength / Eccentric）」の案内を**プロトコルごとの設定**に変更（v26 `protocols.continue_rule`）。
+  v15.9 では使い方タブの説明がどのプロトコルの選手にも出ていた（作者の指摘）。設定のないプロトコルでは、使い方・ホーム・メニュー・PHASE を進めるときの確認のどれにも何も出ない。
+  文面も設定の中（title・text・ack）。`normalizeContinueRule` / `activeContinueRule`。指導者画面からの編集は未実装（DB の値を直接直す）。
+- 検証：SQL 178＋26、送信役 8、画面 42（ほかのプロトコルの選手に案内が出ないことを含む）。実機への通知の到達は未確認。
 
 ### 2026-10-02（v15.9：Claude Code）
 - 各フェーズの条件から「実施後〜翌日に症状増悪なし」を削除（v25。全組織のプロトコル）。どのフェーズでも最後の項目だったので GATE の記録はずれない。

@@ -61,6 +61,7 @@ import {
   signInWithPassword,
   signOut,
 } from "./lib/auth.js";
+import { pushState, enablePush, disablePush, refreshPush } from "./lib/push.js";
 
 // ============================================================
 // Supabase 接続設定とログイン状態は src/lib/auth.js にまとめてある。
@@ -244,7 +245,7 @@ function safeHref(url) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.9 (面談の案内・続ける種目の強調)";
+const APP_BUILD = "v15.10 (プッシュ通知)";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -444,6 +445,8 @@ function normalizeProtocol(row) {
     // PHASE数はプロトコルごとに可変（ハムストリングは10 PHASE）
     phaseCount: (row.phases || []).length || 5,
     classificationScheme: row.classification_scheme || null,
+    // 「続ける種目」の案内（設定のあるプロトコルだけ。なければ null）
+    continueRule: normalizeContinueRule(row.continue_rule),
   };
 }
 function normalizeMessage(row) {
@@ -1122,7 +1125,13 @@ function RehabApp() {
   //     （共用端末で、次に使う人に前の組織の権限が残らないように）
   const handleSwitchOrg = ({ skipServer = false } = {}) => {
     if (!skipServer && org) {
-      sbRpc("org_leave", { p_org_id: org.id }).catch(() => signOut());
+      // この端末の通知の登録を消してから、組織を抜ける（別の組織に入り直した端末へ通知が行かないように）
+      disablePush(sbRpc)
+        .catch(() => {})
+        .then(() => sbRpc("org_leave", { p_org_id: org.id }))
+        .catch(() => signOut());
+    } else {
+      disablePush(sbRpc).catch(() => {});
     }
     setOrg(null);
     writeSession(PLAYER_SESSION_KEY, null); // 端末に保存した選手ログインも消す
@@ -2729,6 +2738,10 @@ function CoachDashboard({
     setIconBadge(attention);
     return () => setIconBadge(0);
   }, [attention]);
+  // 通知をオンにしてある端末は、開くたびに登録を最新にする
+  useEffect(() => {
+    refreshPush(sbRpc, { orgId, role: "coach" });
+  }, [orgId]);
 
   const tabs = [
     { key: "players", label: "選手", icon: Users, badge: attention },
@@ -2761,6 +2774,7 @@ function CoachDashboard({
       {subTab === "scheduling" && <CoachScheduling orgId={orgId} slots={slots} setSlots={setSlots} />}
       {subTab === "settings" && (
         <div className="max-w-md mx-auto space-y-5">
+          <NotifyToggle orgId={orgId} role="coach" />
           <CoachSettings orgId={orgId} />
           {/* 免責文は「その他」の一番下に、常に同じ文面で出す */}
           <StandingNotice />
@@ -5324,6 +5338,7 @@ function PlayerMode({
       setSlots={setSlots}
       phaseMenus={phaseMenus}
       onLogout={() => {
+        disablePush(sbRpc, "player").catch(() => {}); // この選手あての通知を、この端末では止める
         writeSession(PLAYER_SESSION_KEY, null); // 端末の記憶も消す
         setMyPlayer(null);
       }}
@@ -5835,7 +5850,11 @@ function GuideCard({ n, title, tab, onGo, goLabel, children, art }) {
   );
 }
 
-function UsageGuideTab({ onGoTab }) {
+function UsageGuideTab({ onGoTab, protocol }) {
+  // 「続ける種目」の説明は、その設定を持つプロトコルの選手にだけ出す
+  const rule = protocol?.continueRule ?? null;
+  const total = protocol ? phaseCountOf(protocol) : 0;
+  let no = 0;
   return (
     <>
       <div className="bg-blue-600 text-white rounded-2xl p-5 shadow-sm">
@@ -5849,7 +5868,7 @@ function UsageGuideTab({ onGoTab }) {
       </div>
 
       <GuideCard
-        n={1}
+        n={++no}
         title="毎日、日報を送る"
         tab="report"
         onGo={() => onGoTab("report")}
@@ -5882,7 +5901,7 @@ function UsageGuideTab({ onGoTab }) {
       </GuideCard>
 
       <GuideCard
-        n={2}
+        n={++no}
         title="困ったときは SOS"
         tab="report"
         art={
@@ -5895,7 +5914,7 @@ function UsageGuideTab({ onGoTab }) {
       </GuideCard>
 
       <GuideCard
-        n={3}
+        n={++no}
         title="GATE で段階を進める"
         tab="home"
         onGo={() => onGoTab("home")}
@@ -5922,7 +5941,7 @@ function UsageGuideTab({ onGoTab }) {
       </GuideCard>
 
       <GuideCard
-        n={4}
+        n={++no}
         title="今日のメニューを見る"
         tab="menu"
         onGo={() => onGoTab("menu")}
@@ -5942,33 +5961,42 @@ function UsageGuideTab({ onGoTab }) {
         <p>体重や基準タイムを入れると、「+10%BW」「@82%」などが実際の重さ・タイムに換算されます。</p>
       </GuideCard>
 
-      <GuideCard
-        n={5}
-        title="Strength / Eccentric は続ける"
-        tab="menu"
-        art={
-          <div aria-hidden="true">
-            <div className="flex h-3 gap-px">
-              {Array.from({ length: 10 }, (_, i) => (
-                <span key={i} className={`flex-1 ${i < 3 ? "bg-slate-200" : "bg-blue-400"} ${i === 0 ? "rounded-l-full" : ""} ${i === 9 ? "rounded-r-full" : ""}`} />
-              ))}
+      {rule && (
+        <GuideCard
+          n={++no}
+          title={rule.title}
+          tab="menu"
+          art={
+            <div aria-hidden="true">
+              <div className="flex h-3 gap-px">
+                {Array.from({ length: total }, (_, i) => (
+                  <span key={i} className={`flex-1 bg-slate-300 ${i === 0 ? "rounded-l-full" : ""} ${i === total - 1 ? "rounded-r-full" : ""}`} />
+                ))}
+              </div>
+              <p className="text-[10px] text-slate-500 mt-0.5 mb-1.5">PHASE 1 → {total}</p>
+              <div className="flex h-3 gap-px">
+                {Array.from({ length: total }, (_, i) => (
+                  <span
+                    key={i}
+                    className={`flex-1 ${i + 1 < rule.fromPhase ? "bg-transparent" : "bg-emerald-500"} ${
+                      i + 1 === rule.fromPhase ? "rounded-l-full" : ""
+                    } ${i === total - 1 ? "rounded-r-full" : ""}`}
+                  />
+                ))}
+              </div>
+              <p className="text-[10px] font-bold text-emerald-700 mt-0.5">
+                {rule.label}（PHASE {rule.fromPhase} から最後まで）
+              </p>
             </div>
-            <p className="text-[10px] text-slate-500 mt-0.5 mb-1.5">Jump → Jog → Running</p>
-            <div className="flex h-3 gap-px">
-              {Array.from({ length: 10 }, (_, i) => (
-                <span key={i} className={`flex-1 ${i < 3 ? "bg-transparent" : "bg-emerald-500"} ${i === 3 ? "rounded-l-full" : ""} ${i === 9 ? "rounded-r-full" : ""}`} />
-              ))}
-            </div>
-            <p className="text-[10px] font-bold text-emerald-700 mt-0.5">Strength / Eccentric（PHASE 4 から最後まで）</p>
-          </div>
-        }
-      >
-        <p>{CONTINUE_TEXT}</p>
-        <p>メニューの一番上に、緑の枠でいつも表示されます。種目ごとの「ステップ」が、負荷を上げていく段階です。</p>
-      </GuideCard>
+          }
+        >
+          <p>{rule.text}</p>
+          <p>PHASE {rule.fromPhase} 以降、メニューの一番上に緑の枠でいつも表示されます。種目ごとの「ステップ」が、負荷を上げていく段階です。</p>
+        </GuideCard>
+      )}
 
       <GuideCard
-        n={6}
+        n={++no}
         title="指導者とチャット"
         tab="chat"
         onGo={() => onGoTab("chat")}
@@ -5991,7 +6019,7 @@ function UsageGuideTab({ onGoTab }) {
       </GuideCard>
 
       <GuideCard
-        n={7}
+        n={++no}
         title="面談の申し込み・予約"
         tab="more"
         onGo={() => onGoTab("more")}
@@ -6010,7 +6038,7 @@ function UsageGuideTab({ onGoTab }) {
       </GuideCard>
 
       <GuideCard
-        n={8}
+        n={++no}
         title="受傷日を登録する"
         tab="more"
         art={
@@ -6242,6 +6270,10 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
     setIconBadge(unreadStaff);
     return () => setIconBadge(0);
   }, [unreadStaff]);
+  // 通知をオンにしてある端末は、開くたびに登録を最新にする
+  useEffect(() => {
+    refreshPush(sbRpc, { orgId, role: "player", playerId: player.id });
+  }, [orgId, player.id]);
   useEffect(() => {
     if (tab === "chat" && lastStaffId > seenId) {
       setSeenId(lastStaffId);
@@ -6300,6 +6332,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
   const [bookedNotice, setBookedNotice] = useState(null);
 
   const phaseInfo = protocol?.phases[player.currentPhase - 1];
+  const continueRule = activeContinueRule(protocol, player.currentPhase);
   const remainingWeeks = weeksRemaining(protocol, player.currentPhase);
   const progressPct = ((player.currentPhase - 1) / phaseCountOf(protocol)) * 100;
   const bookedSlot = slots.find((s) => s.id === player.bookedSlotId);
@@ -6554,15 +6587,15 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
             </div>
           </div>
 
-          {showsContinuing(protocol, player.currentPhase) && (
+          {continueRule && (
             <button
               onClick={() => changeTab("menu")}
               className="w-full text-left border-2 border-emerald-300 bg-emerald-50 rounded-2xl p-4"
             >
               <p className="text-sm font-bold text-emerald-800 flex items-center gap-1.5">
-                <Repeat size={16} /> {CONTINUE_TITLE}
+                <Repeat size={16} /> {continueRule.title}
               </p>
-              <p className="text-xs text-emerald-800/90 leading-relaxed mt-1">{CONTINUE_TEXT}</p>
+              <p className="text-xs text-emerald-800/90 leading-relaxed mt-1">{continueRule.text}</p>
               <p className="text-xs font-bold text-emerald-700 mt-2 flex items-center gap-1">
                 メニューで種目と負荷のステップを見る <ArrowRight size={13} />
               </p>
@@ -6578,9 +6611,9 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
             onAdvance={(role, nm) => advanceOwnPhase(role, nm)}
             onComplete={completeOwn}
             ackText={
-              // 次の PHASE が 4 以降になるとき：続ける種目を確かめてから進む
-              protocol?.classificationScheme === "hamstring" && player.currentPhase + 1 >= CONTINUE_FROM_PHASE
-                ? "次のPHASEに進んでも、Strength / Eccentric は続け、負荷を少しずつ上げていくことを確認しました"
+              // このプロトコルに「続ける種目」の設定があり、次の PHASE がその対象になるとき：確かめてから進む
+              protocol?.continueRule && player.currentPhase + 1 >= protocol.continueRule.fromPhase
+                ? protocol.continueRule.ack
                 : null
             }
           />
@@ -6941,6 +6974,8 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
           <ConsultationRequestCard orgId={orgId} player={player} setMyPlayer={setMyPlayer} />
 
+          <NotifyToggle orgId={orgId} role="player" playerId={player.id} />
+
           <button
             onClick={onLogout}
             className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-600 hover:bg-slate-50"
@@ -6954,7 +6989,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
         </>
       )}
 
-      {tab === "guide" && <UsageGuideTab onGoTab={changeTab} />}
+      {tab === "guide" && <UsageGuideTab onGoTab={changeTab} protocol={protocol} />}
 
       {/* 画面下のタブ（親指で届く位置） */}
       <nav
@@ -6963,6 +6998,94 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
       >
         <BottomTabs tabs={TABS} active={tab} onChange={changeTab} />
       </nav>
+    </div>
+  );
+}
+
+// 「通知を受け取る」の切り替え（選手・指導者の「その他」タブ）
+//   アプリを閉じていても、端末に通知が届くようにする。端末ごとに本人が許可する必要がある。
+//   通知の文面は短い定型文だけ（選手名・メッセージの本文は出さない）。
+const NOTIFY_EVENTS = {
+  player: "指導者からメッセージが届いたとき、面談が決まったとき",
+  coach: "選手からメッセージ・面談の申し込み・面談の予約・SOS があったとき",
+};
+function NotifyToggle({ orgId, role, playerId }) {
+  const [state, setState] = useState("loading"); // loading | unsupported | denied | on | off
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    pushState(role).then((st) => active && setState(st));
+    return () => {
+      active = false;
+    };
+  }, [role]);
+
+  const turnOn = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await enablePush(sbRpc, { orgId, role, playerId });
+      setState("on");
+    } catch (err) {
+      setError(err.message);
+      setState(await pushState(role));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const turnOff = async () => {
+    setBusy(true);
+    setError(null);
+    await disablePush(sbRpc, role);
+    setState(await pushState(role));
+    setBusy(false);
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+      <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+        <Bell size={16} className="text-blue-600" /> 通知
+        {state === "on" && (
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-700">オン</span>
+        )}
+      </p>
+      <p className="text-xs text-slate-400 mb-3 leading-relaxed">
+        {NOTIFY_EVENTS[role]}に、この端末へ通知します。通知には内容は表示されません（「新しいメッセージがあります」などの短い文だけ）。
+      </p>
+      {state === "loading" && <p className="text-xs text-slate-400">確認中...</p>}
+      {state === "unsupported" && (
+        <p className="text-xs text-slate-500 leading-relaxed bg-slate-50 rounded-lg px-3 py-2">
+          {isIOSDevice() && !isStandaloneApp()
+            ? "iPhone・iPad では、ホーム画面に追加したアプリから開くと通知を受け取れます（「使い方」タブに追加の手順があります）。"
+            : "この端末・ブラウザでは通知を使えません。"}
+        </p>
+      )}
+      {state === "denied" && (
+        <p className="text-xs text-orange-600 leading-relaxed bg-orange-50 rounded-lg px-3 py-2">
+          この端末の設定で、通知が許可されていません。端末の「設定」→「通知」から RE:SPRINT の通知を許可してから、もう一度お試しください。
+        </p>
+      )}
+      {state === "off" && (
+        <button
+          onClick={turnOn}
+          disabled={busy}
+          className="w-full py-3 rounded-lg bg-blue-600 text-white text-sm font-bold disabled:bg-slate-300 flex items-center justify-center gap-2"
+        >
+          {busy && <Loader2 size={14} className="animate-spin" />} 通知を受け取る
+        </button>
+      )}
+      {state === "on" && (
+        <button
+          onClick={turnOff}
+          disabled={busy}
+          className="w-full py-3 rounded-lg border border-slate-300 text-slate-600 text-sm disabled:opacity-50"
+        >
+          通知をやめる
+        </button>
+      )}
+      {error && <p className="text-xs text-red-500 mt-2">{error}</p>}
     </div>
   );
 }
@@ -7630,45 +7753,56 @@ async function sb_deleteSelection(playerId, itemId) {
 //   今日のメニュー = intro_phase <= 現在PHASE かつ 未終了 の和集合
 // ============================================================
 // ------------------------------------------------------------------
-// 「続ける種目」（Strength / Eccentric）
-//   PHASE 4 以降の Strength / Eccentric は、Jump・Jog・Running を始めたあとも続け、負荷を少しずつ上げていく。
-//   走る種目が増えると見落とされやすいので、メニューの一番上に固定し、ロードマップと PHASE を進める場面でも示す。
-//   （プロトコルの方針をそのまま表示しているだけで、入力内容によって文面は変えない）
+// 「続ける種目」の案内（プロトコルごとの設定）
+//   例：ハムストリング肉離れのプロトコルでは、PHASE 4 以降の Strength / Eccentric を、
+//       Jump・Jog・Running を始めたあとも続け、負荷を少しずつ上げていく。
+//   この案内は **プロトコル自身の設定（protocols.continue_rule）** に書いてあるときだけ出す。
+//   設定のないプロトコル（ほかの怪我のプロトコル）では、どの画面にも何も出ない。
+//   文面も設定に入っているものをそのまま表示する（入力内容によって変えない）。
+//     continue_rule = { from_phase, categories: [種目のカテゴリ], label, title, text, ack }
 // ------------------------------------------------------------------
-const CONTINUING_CATEGORIES = ["strength", "eccentric"];
-const CONTINUE_FROM_PHASE = 4;
-const CONTINUE_TITLE = "Strength / Eccentric は続ける";
-const CONTINUE_TEXT =
-  "PHASE 4 以降の Strength / Eccentric は、Jump・Jog・Running を始めたあとも続けます。負荷は少しずつ上げていきます。";
-// この選手・プロトコルで「続ける種目」の案内を出すか（ハムストリングのプロトコルで、PHASE 4 以降）
-function showsContinuing(protocol, currentPhase) {
-  return protocol?.classificationScheme === "hamstring" && currentPhase >= CONTINUE_FROM_PHASE;
+function normalizeContinueRule(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const fromPhase = Number(raw.from_phase);
+  const categories = Array.isArray(raw.categories) ? raw.categories.filter((c) => typeof c === "string") : [];
+  if (!Number.isFinite(fromPhase) || fromPhase < 1 || categories.length === 0 || !raw.text) return null;
+  const label = String(raw.label || categories.map((c) => CATEGORY_LABELS[c] ?? c).join(" / "));
+  return {
+    fromPhase,
+    categories,
+    label,
+    title: String(raw.title || `${label} は続ける`),
+    text: String(raw.text),
+    ack: String(raw.ack || `次のPHASEに進んでも、${label} は続けることを確認しました`),
+  };
+}
+// この選手のいまの PHASE で、案内を出すか
+function activeContinueRule(protocol, currentPhase) {
+  const rule = protocol?.continueRule;
+  return rule && currentPhase >= rule.fromPhase ? rule : null;
 }
 
 // ロードマップの下に出す2本目の線：PHASE 4 から最後まで続くことを絵で見せる
 function ContinuingLane({ protocol, currentPhase }) {
-  if (protocol?.classificationScheme !== "hamstring") return null;
+  const rule = protocol?.continueRule;
+  if (!rule) return null;
   const n = phaseCountOf(protocol);
-  if (n <= CONTINUE_FROM_PHASE) return null;
-  const active = currentPhase >= CONTINUE_FROM_PHASE;
+  if (n <= rule.fromPhase) return null;
+  const active = currentPhase >= rule.fromPhase;
   return (
     <div className="mt-3">
       <div className="flex w-full h-5 gap-px">
         {phaseRange(protocol).map((ph) => (
           <div
             key={ph}
-            className={`flex-1 first:rounded-l-full last:rounded-r-full ${
-              ph < CONTINUE_FROM_PHASE
-                ? "bg-transparent"
-                : ph <= currentPhase
-                ? "bg-emerald-500"
-                : "bg-emerald-200"
-            } ${ph === CONTINUE_FROM_PHASE ? "rounded-l-full" : ""}`}
+            className={`flex-1 ${ph === n ? "rounded-r-full" : ""} ${ph === rule.fromPhase ? "rounded-l-full" : ""} ${
+              ph < rule.fromPhase ? "bg-transparent" : ph <= currentPhase ? "bg-emerald-500" : "bg-emerald-200"
+            }`}
           />
         ))}
       </div>
       <p className={`text-xs font-bold mt-1 flex items-center gap-1 ${active ? "text-emerald-700" : "text-slate-400"}`}>
-        <Repeat size={13} /> Strength / Eccentric：PHASE {CONTINUE_FROM_PHASE} から最後まで続ける（負荷は少しずつ上げる）
+        <Repeat size={13} className="shrink-0" /> {rule.label}：PHASE {rule.fromPhase} から最後まで続ける
       </p>
     </div>
   );
@@ -7685,7 +7819,7 @@ const CATEGORY_LABELS = {
 
 // PHASE 10 では37種目になるため、カテゴリでまとめる。
 // その段階で追加された種目は開き、継続中のものは畳む。
-function MenuByCategory({ exercises, currentPhase, renderExercise, pinContinuing }) {
+function MenuByCategory({ exercises, currentPhase, renderExercise, continueRule }) {
   const [openKeys, setOpenKeys] = useState(null);
 
   const groups = {};
@@ -7694,7 +7828,7 @@ function MenuByCategory({ exercises, currentPhase, renderExercise, pinContinuing
     (groups[key] = groups[key] || []).push(e);
   });
   // 「続ける種目」は上に固定して、いつも開いたままにする（畳めない）
-  const pinnedKeys = pinContinuing ? CONTINUING_CATEGORIES.filter((k) => groups[k]) : [];
+  const pinnedKeys = continueRule ? continueRule.categories.filter((k) => groups[k]) : [];
   const keys = Object.keys(groups).filter((k) => !pinnedKeys.includes(k));
 
   // 初期状態：今のPHASEで追加された種目を含むカテゴリだけ開く
@@ -7708,13 +7842,13 @@ function MenuByCategory({ exercises, currentPhase, renderExercise, pinContinuing
       {pinnedKeys.length > 0 && (
         <div className="border-2 border-emerald-300 bg-emerald-50/60 rounded-xl p-3">
           <p className="text-sm font-bold text-emerald-800 flex items-center gap-1.5">
-            <Repeat size={15} /> {CONTINUE_TITLE}
+            <Repeat size={15} /> {continueRule.title}
           </p>
-          <p className="text-xs text-emerald-800/90 leading-relaxed mt-1 mb-2">{CONTINUE_TEXT}</p>
+          <p className="text-xs text-emerald-800/90 leading-relaxed mt-1 mb-2">{continueRule.text}</p>
           {pinnedKeys.map((k) => (
             <div key={k} className="mt-2">
               <p className="text-xs font-bold text-emerald-900 mb-1.5">
-                {CATEGORY_LABELS[k]}
+                {CATEGORY_LABELS[k] ?? k}
                 <span className="font-normal text-emerald-700 ml-1.5">{groups[k].length}種目</span>
                 <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-600 text-white">継続</span>
               </p>
@@ -7956,7 +8090,7 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
           exercises={current}
           currentPhase={player.currentPhase}
           renderExercise={renderExercise}
-          pinContinuing={showsContinuing(protocol, player.currentPhase)}
+          continueRule={activeContinueRule(protocol, player.currentPhase)}
         />
       </div>
 

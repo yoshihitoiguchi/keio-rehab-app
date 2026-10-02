@@ -420,6 +420,74 @@ ok(/別セッション/.test((await db.query("select notes from exercises where 
 ok(!(await run("supabase_migration_v25_remove_nextday_item.sql")), "[v25] 適用 2 回目（冪等）");
 ok(JSON.stringify((await db.query("select phases from protocols where id = 'hs'")).rows[0].phases) === JSON.stringify(ph25), "[v25] 2回目で内容が変わらない");
 
+// ===== v26：「続ける種目」の案内はプロトコルごとの設定 =====
+await db.exec("insert into protocols (id, org_id, name) values ('proto-hamstring-10','default','ハムストリング肉離れ'), ('comm-b-proto-hamstring-10','comm-b','ハムストリング肉離れ'), ('proto-acl','default','前十字靭帯') on conflict do nothing");
+ok(!(await run("supabase_migration_v26_continue_rule.sql")), "[v26] 適用 1 回目");
+ok(!(await run("supabase_migration_v26_continue_rule.sql")), "[v26] 適用 2 回目（冪等）");
+const cr = (await db.query("select id, continue_rule from protocols where id in ('proto-hamstring-10','comm-b-proto-hamstring-10','proto-acl','hs') order by id")).rows;
+ok(cr.find((r) => r.id === "proto-hamstring-10")?.continue_rule?.from_phase === 4 && cr.find((r) => r.id === "comm-b-proto-hamstring-10")?.continue_rule?.categories?.join() === "strength,eccentric",
+   "[v26] ハムストリング肉離れのプロトコル（各組織のコピーも）に案内の設定が入る");
+ok(cr.find((r) => r.id === "proto-acl")?.continue_rule === null && cr.find((r) => r.id === "hs")?.continue_rule === null, "[v26] ほかのプロトコルには設定されない");
+const c26 = one(await as(ADMIN, "select public.admin_create_org('comm-f','F','comm-f-pass','coach-f-pass')"));
+ok(c26?.id === "comm-f" && (await db.query("select continue_rule from protocols where id = 'comm-f-proto-hamstring-10'")).rows[0]?.continue_rule?.from_phase === 4
+   && (await db.query("select continue_rule from protocols where id = 'comm-f-proto-acl'")).rows[0]?.continue_rule === null,
+   "[v26] 新しい組織にも、プロトコルごとの設定がそのまま引き継がれる");
+
+// ===== v27：プッシュ通知 =====
+await db.exec(`alter table messages add column if not exists sender text; alter table players add column if not exists sos boolean default false;
+  create table if not exists consultation_requests (id bigint generated always as identity primary key, player_id text references players(id) on delete cascade, org_id text, note text);
+  grant all on consultation_requests to anon, authenticated;
+  create schema if not exists net; create table if not exists net.calls (id serial primary key, url text, body jsonb, headers jsonb);
+  create or replace function net.http_post(url text, body jsonb default '{}', params jsonb default '{}', headers jsonb default '{}', timeout_milliseconds int default 5000)
+    returns bigint language sql as $f$ insert into net.calls (url, body, headers) values (url, body, headers) returning id::bigint $f$;`);
+ok(!(await run("supabase_migration_v27_push.sql")), "[v27] 適用 1 回目");
+ok(!(await run("supabase_migration_v27_push.sql")), "[v27] 適用 2 回目（冪等）");
+await db.exec("insert into players (id, org_id, name, pin) values ('p-b1','comm-b','B の選手','0000'), ('p-b2','comm-b','B の選手2','0000') on conflict do nothing");
+const EP = (n) => `https://web.push.apple.com/test-${n}`;
+ok(one(await as(U4, `select public.push_subscribe('comm-b','coach',null,'${EP("coach")}','k','a')`)) === true, "[v27] 組織のメンバーは、指導者の端末として通知を登録できる");
+ok(one(await as(U4, `select public.push_subscribe('comm-b','player','p-b1','${EP("player")}','k','a')`)) === true, "[v27] 選手の端末として通知を登録できる");
+ok(!!(await as(U1, `select public.push_subscribe('comm-b','coach',null,'${EP("x")}','k','a')`)).error, "[v27] ほかの組織の人は登録できない");
+ok(!!(await as(U4, "select public.push_subscribe('comm-b','coach',null,'https://evil.example.com/hook','k','a')")).error, "[v27] 通知サービス以外の URL は宛先にできない");
+ok(!!(await as(U4, `select public.push_subscribe('comm-b','player','p1','${EP("y")}','k','a')`)).error, "[v27] ほかの組織の選手の通知は登録できない");
+ok(!!(await as(U4, "select * from resprint_private.push_subscriptions")).error && !!(await as(null, "select * from resprint_private.push_config")).error, "[v27] 宛先・設定の表はアプリから読めない");
+await db.exec("insert into messages (player_id, sender, content) values ('p-b1','player','設定前のメッセージ')");
+ok((await db.query("select count(*)::int n from net.calls")).rows[0].n === 0, "[v27] 送信役の設定がない間は、何も送らない（チャットは保存される）");
+await db.exec("insert into resprint_private.push_config (key, value) values ('url','https://example.test/api/push'), ('secret','s3cret') on conflict (key) do update set value = excluded.value");
+const calls = async () => (await db.query("select url, body, headers from net.calls order by id")).rows;
+await db.exec("delete from net.calls; insert into messages (player_id, sender, content) values ('p-b1','player','ひざの裏が痛いです')");
+let cl = await calls();
+ok(cl.length === 1 && cl[0].url === "https://example.test/api/push" && cl[0].headers["x-resprint-secret"] === "s3cret"
+   && cl[0].body.subscriptions.length === 1 && cl[0].body.subscriptions[0].endpoint === EP("coach") && cl[0].body.body === "選手から新しいメッセージがあります",
+   "[v27] 選手のメッセージ → 指導者の端末へ通知");
+ok(!JSON.stringify(cl[0].body).includes("ひざ") && !JSON.stringify(cl[0].body).includes("B の選手"), "[v27] 通知に、メッセージの本文や選手名は入らない");
+await db.exec("delete from net.calls; insert into messages (player_id, sender, content) values ('p-b1','staff','了解です')");
+cl = await calls();
+ok(cl.length === 1 && cl[0].body.subscriptions[0].endpoint === EP("player") && cl[0].body.body === "指導者から新しいメッセージがあります", "[v27] 指導者のメッセージ → その選手の端末へ通知");
+await db.exec("delete from net.calls; insert into messages (player_id, sender, content) values ('p-b2','staff','別の選手へ')");
+ok((await calls()).length === 0, "[v27] ほかの選手あてのメッセージは、この選手の端末には届かない");
+await db.exec("delete from net.calls; insert into messages (player_id, sender, content) values ('p-b1','player','【面談の予約】2026-10-05 18:00 の面談を予約しました。')");
+cl = await calls();
+ok(cl.length === 2 && cl.map((c) => c.body.body).sort().join() === "面談が予約されました,面談が決まりました", "[v27] 面談の予約 → 指導者と選手の双方へ通知");
+await db.exec("delete from net.calls; insert into consultation_requests (player_id, org_id, note) values ('p-b1','comm-b','話したい')");
+ok((await calls())[0]?.body.body === "面談の申し込みがあります", "[v27] 面談の申し込み → 指導者へ通知");
+await db.exec("delete from net.calls; update players set sos = true where id = 'p-b1'; update players set sos = true where id = 'p-b1'");
+ok((await calls()).length === 1 && (await calls())[0].body.tag === "sos", "[v27] SOS がオンになったときだけ、指導者へ通知（オンのままの更新では送らない）");
+await db.exec("delete from net.calls; insert into messages (player_id, sender, content) values ('p1','player','default 組織の選手')");
+ok((await calls()).length === 0, "[v27] ほかの組織の出来事は、この組織の端末に届かない");
+ok(one(await as(null, `select public.push_report_gone('wrong', array['${EP("coach")}'])`)) === 0 && (await db.query("select count(*)::int n from resprint_private.push_subscriptions")).rows[0].n === 2,
+   "[v27] 合言葉が違えば、宛先は消せない");
+ok(one(await as(null, `select public.push_report_gone('s3cret', array['${EP("player")}'])`)) === 1, "[v27] 送信役は、使えなくなった宛先を消せる");
+await db.exec("delete from org_memberships where org_id = 'comm-b'; delete from net.calls; insert into messages (player_id, sender, content) values ('p-b1','player','メンバーでなくなった後')");
+ok((await calls()).length === 0, "[v27] 組織のメンバーでなくなった端末（パスワード変更後など）には送らない");
+await as(U4, "select public.org_login('comm-b','comm-b-newpass')");
+await db.exec("create or replace function net.http_post(url text, body jsonb default '{}', params jsonb default '{}', headers jsonb default '{}', timeout_milliseconds int default 5000) returns bigint language plpgsql as $f$ begin raise exception 'network down'; end $f$");
+ok(!(await run2("insert into messages (player_id, sender, content) values ('p-b1','player','通知が失敗しても')")) && (await db.query("select count(*)::int n from messages where content = '通知が失敗しても'")).rows[0].n === 1,
+   "[v27] 通知の送信に失敗しても、チャットは保存される");
+ok(one(await as(U4, `select public.push_unsubscribe('${EP("coach")}','coach')`)) === true && (await db.query("select count(*)::int n from resprint_private.push_subscriptions")).rows[0].n === 0, "[v27] 通知をオフにすると宛先が消える");
+ok(!(await run("supabase_rollback_v27.sql")) && (await db.query("select to_regprocedure('public.push_subscribe(text,text,text,text,text,text)') v")).rows[0].v === null, "[v27] 戻し用 SQL が通る");
+ok(!(await run2("insert into messages (player_id, sender, content) values ('p-b1','player','戻した後')")), "[v27] 戻した後もチャットは動く");
+ok(!(await run("supabase_migration_v27_push.sql")), "[v27] 戻した後にもう一度適用できる");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

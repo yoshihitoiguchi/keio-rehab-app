@@ -9,12 +9,14 @@
     "preview": "vite preview",
     "check:prod": "node scripts/check-production.mjs",
     "test:db": "node tests/db/phases.test.mjs",
-    "test:ui": "node tests/ui/mock.test.mjs"
+    "test:ui": "node tests/ui/mock.test.mjs",
+    "test:api": "node tests/api/push.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.383.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",

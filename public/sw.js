@@ -80,3 +80,39 @@ self.addEventListener("fetch", (event) => {
     })()
   );
 });
+
+/* ------------------------------------------------------------
+   プッシュ通知（v15.10）
+     送信役（/api/push）から届いた短い定型文を、通知として出す。
+     通知を押すと、開いているアプリを前に出す（なければ開く）。
+   ------------------------------------------------------------ */
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch (err) {
+    data = {};
+  }
+  event.waitUntil(
+    self.registration.showNotification(data.title || "RE:SPRINT", {
+      body: data.body || "新しいお知らせがあります",
+      tag: data.tag || "resprint",
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
+      data: { url: "/" },
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    (async () => {
+      const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const client of all) {
+        if ("focus" in client) return client.focus();
+      }
+      return self.clients.openWindow("/");
+    })()
+  );
+});
