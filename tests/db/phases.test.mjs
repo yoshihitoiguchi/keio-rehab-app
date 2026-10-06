@@ -671,6 +671,17 @@ ok(one(await as(ADMIN, "select public.exercise_video_set(null, null, 'Nordic Ham
    && (await db.query("select count(*)::int n from exercise_videos where name = 'Nordic Hamstring'")).rows[0].n === 0, "[v33] 管理者はパスワードなしで登録・削除できる（URL を空にすると削除）");
 ok(!!(await as(null, "select * from exercise_videos")).error, "[v33] 匿名キーでは読めない");
 
+// ===== v34：PHASE 8 の Tantrums は 50回×3set だけ・ウエイト解禁は RDL の条件に併記 =====
+await db.exec(`update protocols set phases = jsonb_set(phases, '{2,conditions}', '["条件3","Bilateral RDL 6〜10回×3setを高い努力度で実施可能"]'::jsonb) where id = 'comm-b-proto-hamstring-10'`);
+ok(!(await run("supabase_migration_v34_phase8_gate_rdl_note.sql")), "[v34] 適用 1 回目");
+const pr34 = (await db.query("select phases from protocols where id = 'comm-b-proto-hamstring-10'")).rows[0].phases;
+ok(JSON.stringify(pr34[7].conditions) === JSON.stringify(["Mini Hurdleを身長幅の設定から問題なく実施可能", "Prone Hamstring Tantrums 50回×3setを違和感なく実施可能"]),
+   "[v34] PHASE 8：元の条件はそのまま、Tantrums は「50回×3set」の1項目だけ");
+ok(pr34[2].title === "P3" && JSON.stringify(pr34[2].conditions) === JSON.stringify(["条件3", "Bilateral RDL 6〜10回×3setを高い努力度で実施可能（できたらウエイト解禁）"]),
+   "[v34] ウエイト解禁は PHASE 3 の名称から外し、Bilateral RDL の条件に併記");
+ok(!(await run("supabase_migration_v34_phase8_gate_rdl_note.sql"))
+   && JSON.stringify((await db.query("select phases from protocols where id = 'comm-b-proto-hamstring-10'")).rows[0].phases) === JSON.stringify(pr34), "[v34] 2回実行しても内容が変わらない");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

@@ -237,6 +237,7 @@ PGRST204 エラーになった経緯がある。v12 で復旧済み）。
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
+| v34_phase8_gate_rdl_note | **適用済み（2026-10-06）** | データだけ。PHASE 8 の Tantrums の条件を「50回×3set を違和感なく」の1項目に（15秒…の項目は外す）。ウエイト解禁は PHASE 3 の名称から外し、条件の Bilateral RDL の項目に併記。戻すときは控え「v34 の前」から |
 | v33_shared_videos_protocol_fix | **適用済み（2026-10-06）** | `exercise_videos`（種目名ごとの動画。全組織で共通）と `exercise_video_set()`（指導者パスワードをサーバーで確かめて登録）。PHASE 8 の Tantrums の条件を2つに（15秒…／50回×3set）、Mini Hurdle「狭め」→「身長幅」、PHASE 3 の名称に「両脚RDLができたらウエイト解禁」、よくある質問の2件を外す。戻すときは控え「v33 の前」から |
 | v32_videos_notes_faq | **適用済み（2026-10-06）** | `exercises.video_url`（種目の動画）・`meeting_notes`（面談メモ）・`protocols.faq`（よくある質問）。Tantrums の GATE を「50回×3set を違和感なく」に変更、質問2件を登録。表と列は apply_migration、データは execute_sql で適用（apply_migration が「Invalid or expired requestState」で失敗したため分けた） |
 | v31_prone_hamstring_tantrums | **適用済み（2026-10-06）** | ハムストリング肉離れのプロトコルに Prone Hamstring Tantrums を追加（データの追加）。PHASE 8 の GATE の条件の最後に1項目、種目（PHASE 8 導入・Strength・ステップ：導入→基本）。戻すときは控え「v31 の前」から |
@@ -610,6 +611,12 @@ v16 後も残る穴（優先順。2026-09-27 のレビューで確認したも�
 ---
 
 ## 変更履歴
+
+### 2026-10-06（v34：Claude Code。アプリの変更なし・ビルド番号は v15.20 のまま）
+- 作者の指示で文面を修正。PHASE 8 → 9 の条件は「元々の5項目＋Prone Hamstring Tantrums 50回×3setを違和感なく実施可能」（15秒×2–3set は条件ではなく、種目のステップ＝トレーニングとして残す）。
+  ウエイト解禁は、PHASE 3 の条件「Bilateral RDL 6〜10回×3setを高い努力度で実施可能（できたらウエイト解禁）」に併記（PHASE の名称は「両脚Strength」に戻した）。
+  作者とのやり取りで2回読み違えた点：「足してほしい」は、元々の条件を残して1項目を足す、の意味。
+- GitHub への push は次のリリースと一緒に行う。検証：SQL 259。
 
 ### 2026-10-06（v15.20：Claude Code）
 - 種目の動画を**全組織で共通**に（作者の指示）。`exercise_videos`（種目名 → URL）。指導者がどの組織で登録しても、同じ名前の種目を持つ全組織に出る。
