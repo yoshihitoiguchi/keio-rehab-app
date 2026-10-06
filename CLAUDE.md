@@ -175,6 +175,7 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `media_attachments` | 写真・動画。`expires_at` は90日 |
 | `staff_notes` | 指導者どうしの申し送りメモ（選手ごと。選手の画面には出さない。ただし組織の中の仕切りは画面だけなので、API を直接使えば同じ組織の人は読める）（v30） |
 | `exercise_logs` | 「今日やった種目」の記録（選手・種目・日付で1件）（v30） |
+| `exercise_videos` | 種目の動画の URL（種目名で1件。**全組織で共通**。読むのはログイン中の誰でも、書くのは `exercise_video_set()` だけ）（v33） |
 | `meeting_notes` | 面談メモ（面談の内容。指導者が書き、選手本人と指導者が読む。`held_on` が面談の日）（v32） |
 | `player_metric_history` / `player_exercise_progress` | 記録の推移 |
 
@@ -236,6 +237,7 @@ PGRST204 エラーになった経緯がある。v12 で復旧済み）。
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
+| v33_shared_videos_protocol_fix | **適用済み（2026-10-06）** | `exercise_videos`（種目名ごとの動画。全組織で共通）と `exercise_video_set()`（指導者パスワードをサーバーで確かめて登録）。PHASE 8 の Tantrums の条件を2つに（15秒…／50回×3set）、Mini Hurdle「狭め」→「身長幅」、PHASE 3 の名称に「両脚RDLができたらウエイト解禁」、よくある質問の2件を外す。戻すときは控え「v33 の前」から |
 | v32_videos_notes_faq | **適用済み（2026-10-06）** | `exercises.video_url`（種目の動画）・`meeting_notes`（面談メモ）・`protocols.faq`（よくある質問）。Tantrums の GATE を「50回×3set を違和感なく」に変更、質問2件を登録。表と列は apply_migration、データは execute_sql で適用（apply_migration が「Invalid or expired requestState」で失敗したため分けた） |
 | v31_prone_hamstring_tantrums | **適用済み（2026-10-06）** | ハムストリング肉離れのプロトコルに Prone Hamstring Tantrums を追加（データの追加）。PHASE 8 の GATE の条件の最後に1項目、種目（PHASE 8 導入・Strength・ステップ：導入→基本）。戻すときは控え「v31 の前」から |
 | v30_operations | **適用済み（2026-10-03）** | `staff_notes`（申し送りメモ）・`exercise_logs`（今日やった種目）・規約の同意（`terms_status` ほか）・リマインド（日報・面談）・毎日の自動バックアップ。`pg_cron` を有効化。戻し方 `supabase_rollback_v30.sql` |
@@ -327,10 +329,10 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 公開の確認は、本番の JS に番号が入っているかで行う（`curl` で `/assets/index-*.js` を取り、`v15.14` を探す）。
 
 ```js
-const APP_BUILD = "v15.19";
+const APP_BUILD = "v15.20";
 ```
 
-本番に出ているのは `v15.19`（2026-10-06 公開）。
+本番に出ているのは `v15.20`（2026-10-06 公開）。
 
 過去に「全く改善されてない」が3回続き、原因が
 **App.jsx をリポジトリ直下に置いていて `src/` に入っていなかった**ことだった。
@@ -608,6 +610,19 @@ v16 後も残る穴（優先順。2026-09-27 のレビューで確認したも�
 ---
 
 ## 変更履歴
+
+### 2026-10-06（v15.20：Claude Code）
+- 種目の動画を**全組織で共通**に（作者の指示）。`exercise_videos`（種目名 → URL）。指導者がどの組織で登録しても、同じ名前の種目を持つ全組織に出る。
+  登録は `exercise_video_set(組織ID, 指導者パスワード, 種目名, URL)`。指導者パスワードはサーバーが確かめる（選手は登録できない）。
+  そのため、指導者モードに入ったときのパスワードを **メモリにだけ** 持つ（`coachSecret`。端末には保存しない）。v32 の `exercises.video_url` は使わない（列は残してある）。
+  種目名を変えると、動画とのひもづけは外れる（名前で対応させているため）。
+- プロトコルの改定（v33。作者の指示）：PHASE 8 → 9 の条件は Tantrums が2項目（15秒×2–3set の条件／50回×3set を違和感なく）。
+  Mini Hurdle の「狭め」は「身長幅」に（条件・種目名・ステップ）。PHASE 3 の名称に「両脚RDLができたらウエイト解禁」。
+  よくある質問（`protocols.faq`）の仕組みは残すが、登録は0件（選手には何も出ない）。
+- **不具合の修正**：日報の「恐怖心」「抜ける接地」を読む列の名前が違っていて（`fear` / `give_way_footstrike` → 正しくは `fear_level` / `slipping_contact`）、
+  保存はされているのに指導者側に出ていなかった（CSV の恐怖心も空だった）。指導者の最新の日報に RPE・恐怖心・抜ける接地を表示、CSV に「抜ける接地」の列を追加。
+- 点検：定期実行（バックアップ・リマインド）は3日間すべて成功。Security Advisor に新しい指摘なし。
+- 検証：SQL 255＋26、送信役 8、画面 151。
 
 ### 2026-10-06（v15.19：Claude Code）
 - 種目の動きを確認する：メニューの各種目に「動きを見る」（`ExerciseVideo`）。指導者が種目ごとに動画の URL を登録できる（`exercises.video_url`。

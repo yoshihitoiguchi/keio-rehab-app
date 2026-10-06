@@ -639,6 +639,38 @@ ok(c32?.id === "comm-h" && (await db.query("select faq from protocols where id =
    && (await db.query("select video_url from exercises where protocol_id = 'comm-h-comm-b-proto-hamstring-10' or protocol_id = 'comm-h-proto-hamstring-10' limit 1")).rows.length === 1,
    "[v32] 新しい組織にも、よくある質問などが引き継がれる");
 
+// ===== v33：動画を全組織で共通に・プロトコルの改定 =====
+await db.exec(`update protocols set phases = jsonb_set(phases, '{7,conditions}', '["Mini Hurdleを狭め設定から問題なく実施可能","Prone Hamstring Tantrums 50回×3setを違和感なく実施可能"]'::jsonb) where id = 'comm-b-proto-hamstring-10';
+  insert into exercise_steps (exercise_id, step_order, label) select id, 3, '狭めのMini Hurdle（平均ストライド程度）' from exercises where protocol_id = 'comm-b-proto-hamstring-10' and name like '%Mini Hurdle%';`);
+ok(!(await run("supabase_migration_v33_shared_videos_protocol_fix.sql")), "[v33] 適用 1 回目");
+const pr33 = (await db.query("select phases, faq from protocols where id = 'comm-b-proto-hamstring-10'")).rows[0];
+ok(JSON.stringify(pr33.phases[7].conditions) === JSON.stringify(["Mini Hurdleを身長幅の設定から問題なく実施可能",
+     "Prone Hamstring Tantrums 15秒×2–3setを、痛みなし・左右差が大きくならない・速度が落ちすぎない・翌日増悪なしで実施可能",
+     "Prone Hamstring Tantrums 50回×3setを違和感なく実施可能"]),
+   "[v33] PHASE 8：Tantrums の条件が2つ（15秒…／50回…）になり、Mini Hurdle は「身長幅」になる");
+ok(pr33.phases[2].title === "P3（両脚RDLができたらウエイト解禁）" && pr33.phases[1].title === "P2" && pr33.faq.length === 0, "[v33] PHASE 3 の名称にウエイト解禁を付ける／よくある質問の2件は外す");
+const ex33 = (await db.query("select e.name, e.notes, (select string_agg(s.label, ' / ' order by s.step_order) from exercise_steps s where s.exercise_id = e.id) steps from exercises e where e.protocol_id = 'comm-b-proto-hamstring-10' and e.name like '%Mini Hurdle%'")).rows[0];
+ok(ex33.name.endsWith("Mini Hurdle（身長幅）") && ex33.steps === "Mini Hurdle（身長幅）" && ex33.notes === "元のメモ。 開始時の幅は身長と同じくらい。", "[v33] 種目名・ステップ・メモも「身長幅」に（元のメモは残る）");
+ok(/条件：痛みなし.*GATE：50回×3set/.test((await db.query("select notes from exercises where protocol_id = 'comm-b-proto-hamstring-10' and name = 'Prone Hamstring Tantrums'")).rows[0].notes), "[v33] Tantrums のメモに条件と GATE の両方が入る");
+ok((await db.query("select video_url from exercise_videos where name = 'Bilateral RDL'")).rows[0]?.video_url === "https://www.youtube.com/watch?v=abc", "[v33] 組織ごとに登録済みだった動画は、共通の表へ移る");
+ok(!(await run("supabase_migration_v33_shared_videos_protocol_fix.sql"))
+   && JSON.stringify((await db.query("select phases from protocols where id = 'comm-b-proto-hamstring-10'")).rows[0].phases) === JSON.stringify(pr33.phases)
+   && (await db.query("select notes from exercises where protocol_id = 'comm-b-proto-hamstring-10' and name like '%Mini Hurdle%'")).rows[0].notes === ex33.notes,
+   "[v33] 2回実行しても内容が変わらない");
+// 動画の登録：指導者パスワードが合っている人だけ。全組織に出る
+await as(ADMIN, "select public.admin_set_coach_password('comm-b','coach-b-v33')");
+ok(!!(await as(U4, "select public.exercise_video_set('comm-b','wrong-pass','Nordic Hamstring','https://youtu.be/x1')")).error, "[v33] 指導者パスワードが違えば、動画を登録できない（選手は登録できない）");
+ok(one(await as(U4, "select public.exercise_video_set('comm-b','coach-b-v33','Nordic Hamstring','https://youtu.be/x1')")) === true, "[v33] 指導者は動画を登録できる");
+ok((await as(U1, "select video_url from exercise_videos where name = 'Nordic Hamstring'")).rows?.[0]?.video_url === "https://youtu.be/x1", "[v33] 登録した動画は、ほかの組織からも読める（全組織で共通）");
+ok(!!(await as(U4, "insert into exercise_videos (name, video_url) values ('X','https://evil.example')")).error
+   && (await as(U4, "update exercise_videos set video_url = 'https://evil.example' returning name")).rows?.length === undefined || !!(await as(U4, "update exercise_videos set video_url = 'https://evil.example'")).error,
+   "[v33] 表を直接書き換えることはできない");
+ok(!!(await as(U4, "select public.exercise_video_set('comm-b','coach-b-v33','Nordic Hamstring','javascript:alert(1)')")).error, "[v33] http(s) 以外の URL は登録できない");
+ok(!!(await as(U1, "select public.exercise_video_set('comm-b','coach-b-v33','Nordic Hamstring','https://youtu.be/x2')")).error, "[v33] その組織に入っていない人は、パスワードを知っていても登録できない");
+ok(one(await as(ADMIN, "select public.exercise_video_set(null, null, 'Nordic Hamstring', '')")) === true
+   && (await db.query("select count(*)::int n from exercise_videos where name = 'Nordic Hamstring'")).rows[0].n === 0, "[v33] 管理者はパスワードなしで登録・削除できる（URL を空にすると削除）");
+ok(!!(await as(null, "select * from exercise_videos")).error, "[v33] 匿名キーでは読めない");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

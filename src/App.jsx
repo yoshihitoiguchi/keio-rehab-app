@@ -273,7 +273,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.19";
+const APP_BUILD = "v15.20";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -667,8 +667,8 @@ function normalizePlayer(row) {
         tenderness: r.tenderness ?? null,
         compensation: r.compensation ?? null,
         severeSymptom: r.severe_symptom ?? null,
-        fear: r.fear ?? null,
-        giveWayFootstrike: r.give_way_footstrike ?? null,
+        fear: r.fear_level ?? null,
+        slippingContact: r.slipping_contact ?? null,
         rpe: r.rpe ?? null,
         selfCompensation: r.self_compensation ?? null,
         selfSevereSymptom: r.self_severe_symptom ?? null,
@@ -1279,6 +1279,7 @@ function RehabApp() {
     writeSession(PLAYER_SESSION_KEY, null); // 端末に保存した選手ログインも消す
     setMode("player");
     setCoachAuthed(false);
+    coachSecret = "";
     setCoachPlayers([]);
     setMyPlayer(null);
     setMasterProtocols([]);
@@ -2590,6 +2591,9 @@ function OrgLogin({ onAuthed, invite }) {
 // ==================================================================
 // パスワードゲート（指導者モード・組織スコープ）
 // ==================================================================
+// 指導者モードに入ったときのパスワード。メモリにだけ持つ（端末には保存しない。再読み込みで消える）
+let coachSecret = "";
+
 function PasswordGate({ orgId, onAuthed, onCancel }) {
   // 照合はサーバーの中（coach_check）で行う。ハッシュはアプリからは読めない（v21）
   const [phase, setPhase] = useState("checking"); // 'checking' | 'unset' | 'login'
@@ -2623,6 +2627,7 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
     try {
       const r = await sbRpc("coach_check", { p_org_id: orgId, p_password: pwInput });
       if (r?.ok) {
+        coachSecret = pwInput;
         setPwInput("");
         onAuthed();
       } else if (r && !r.set) {
@@ -3084,6 +3089,7 @@ function CoachSettings({ orgId }) {
         setError("現在のパスワードが違います。");
         return;
       }
+      coachSecret = next;
       setSuccess(true);
       setCurrent("");
       setNext("");
@@ -4927,6 +4933,24 @@ function PlayerDetailPanel({
                   <p className="text-xs text-slate-400 mb-1">睡眠の質</p>
                   <p className="text-2xl font-bold text-blue-500">{report.sleepQuality ?? "-"}</p>
                 </div>
+                {report.rpe != null && (
+                  <div className="bg-slate-50 rounded-lg p-3 text-center">
+                    <p className="text-xs text-slate-400 mb-1">RPE</p>
+                    <p className="text-2xl font-bold text-slate-800">{report.rpe}</p>
+                  </div>
+                )}
+                {report.fear != null && (
+                  <div className="bg-slate-50 rounded-lg p-3 text-center">
+                    <p className="text-xs text-slate-400 mb-1">恐怖心</p>
+                    <p className="text-2xl font-bold text-slate-800">{report.fear}</p>
+                  </div>
+                )}
+                {report.slippingContact != null && (
+                  <div className="bg-slate-50 rounded-lg p-3 text-center flex flex-col justify-center">
+                    <p className="text-xs text-slate-400 mb-1">抜ける接地</p>
+                    <p className="text-sm font-bold text-slate-700">{report.slippingContact ? "あり" : "なし"}</p>
+                  </div>
+                )}
                 <div className="col-span-3 bg-slate-50 rounded-lg p-3">
                   <p className="text-xs text-slate-400 mb-1">本音</p>
                   <p className="text-sm text-slate-700">{report.honne || "（未記入）"}</p>
@@ -8282,9 +8306,9 @@ function buildExports(players, protocols, anonymous) {
     },
     reports: {
       file: "日報.csv",
-      header: ["選手", "日付", "痛み", "疲労度", "睡眠の質", "気分", "恐怖心", "RPE", "本音"],
+      header: ["選手", "日付", "痛み", "疲労度", "睡眠の質", "気分", "恐怖心", "抜ける接地", "RPE", "本音"],
       rows: players.flatMap((p, i) =>
-        p.reports.map((r) => [nameOf(p, i), r.date || "", r.vas ?? "", r.fatigue ?? "", r.sleepQuality ?? "", r.mental ?? "", r.fear ?? "", r.rpe ?? "", anonymous ? "" : r.honne || ""])
+        p.reports.map((r) => [nameOf(p, i), r.date || "", r.vas ?? "", r.fatigue ?? "", r.sleepQuality ?? "", r.mental ?? "", r.fear ?? "", r.slippingContact == null ? "" : r.slippingContact ? "あり" : "なし", r.rpe ?? "", anonymous ? "" : r.honne || ""])
       ),
     },
     phases: {
@@ -8386,16 +8410,16 @@ function exerciseSearchUrl(name) {
   return `https://www.youtube.com/results?search_query=${encodeURIComponent(q + " exercise")}`;
 }
 
-function ExerciseVideo({ exercise, canEdit, onSaved }) {
+function ExerciseVideo({ exercise, videoUrl, canEdit, onSaved }) {
   const [open, setOpen] = useState(false);
-  const url = safeHref(exercise.video_url);
+  const url = safeHref(videoUrl);
   const embed = getYouTubeEmbedUrl(url);
   const linkClass = "inline-flex items-center gap-1 min-h-[36px] px-3 rounded-full border border-red-200 bg-white text-xs font-bold text-red-600";
 
   const edit = async () => {
     const next = await askText(`${exercise.name} の動画`, {
-      body: "YouTube などの URL を貼り付けてください。空にすると、種目名での検索に戻ります。",
-      initial: exercise.video_url || "",
+      body: "YouTube などの URL を貼り付けてください。すべての組織の同じ種目に出ます。空にすると、種目名での検索に戻ります。",
+      initial: videoUrl || "",
       placeholder: "https://www.youtube.com/watch?v=...",
       okLabel: "保存する",
     });
@@ -8406,8 +8430,8 @@ function ExerciseVideo({ exercise, canEdit, onSaved }) {
       return;
     }
     try {
-      await sbUpdate("exercises", exercise.id, { video_url: value || null });
-      onSaved?.(exercise.id, value || null);
+      await sbRpc("exercise_video_set", { p_org_id: exercise.org_id, p_coach_password: coachSecret, p_name: exercise.name, p_url: value });
+      onSaved?.(exercise.name, value || null);
     } catch (err) {
       showMessage("保存できませんでした", { body: errText(err) });
     }
@@ -9481,6 +9505,7 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
   const [steps, setSteps] = useState([]);
   const [progress, setProgress] = useState([]);
   const [logs, setLogs] = useState([]);
+  const [videos, setVideos] = useState({}); // 種目名 → 動画の URL（全組織で共通）
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -9506,9 +9531,12 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
         "exercise_logs",
         `?player_id=eq.${encodeURIComponent(player.id)}&done_on=gte.${localDateStr(new Date(Date.now() - 6 * 86400000))}&select=exercise_id,done_on`
       ).catch(() => []),
+      // 種目の動画（読めなくてもメニューは出す）
+      sbSelect("exercise_videos", "?select=name,video_url").catch(() => []),
     ])
-      .then(([e, s, p, l]) => {
+      .then(([e, s, p, l, v]) => {
         if (!active) return;
+        setVideos(Object.fromEntries((v || []).map((x) => [x.name, x.video_url])));
         setExercises(e || []);
         setSteps(s || []);
         setProgress(p || []);
@@ -9632,8 +9660,9 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
 
         <ExerciseVideo
           exercise={e}
+          videoUrl={videos[e.name] || null}
           canEdit={!readOnly}
-          onSaved={(id, url) => setExercises((prev) => prev.map((x) => (x.id === id ? { ...x, video_url: url } : x)))}
+          onSaved={(name, url) => setVideos((prev) => ({ ...prev, [name]: url }))}
         />
 
         {exSteps.length > 0 && (

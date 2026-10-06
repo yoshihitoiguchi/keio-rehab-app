@@ -98,7 +98,9 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/organizations") return [{ id: "default", name: "テスト組織" }];
   if (p === "/rest/v1/protocols") return [protocol, otherProtocol];
   if (p === "/rest/v1/player_directory") return [{ id: "p-1", name: "山田 太郎" }];
-  if (p === "/rest/v1/exercises") return exercises.map((e) => ({ ...e, protocol_id: st.protocolId, video_url: (st.videos || {})[e.id] || null }));
+  if (p === "/rest/v1/exercises") return exercises.map((e) => ({ ...e, org_id: "default", protocol_id: st.protocolId }));
+  if (p === "/rest/v1/exercise_videos") return Object.entries(st.videos || {}).map(([name, video_url]) => ({ name, video_url }));
+  if (p === "/rest/v1/rpc/exercise_video_set") { st.videoSets = [...(st.videoSets || []), json]; return true; }
   if (p === "/rest/v1/meeting_notes") {
     if (method === "POST") { const row = { id: 70 + (st.meetingNotes || []).length, created_at: iso(new Date()), ...json }; st.meetingNotes = [row, ...(st.meetingNotes || [])]; return [row]; }
     return st.meetingNotes || [];
@@ -560,7 +562,7 @@ try {
   await step("種目の動画・面談メモ・よくある質問（v15.19）", async () => {
     // 選手：動きを見る・よくある質問・面談メモ
     const st = makeState({ injuryDaysAgo: 3, phase: 5 });
-    st.videos = { 9: "https://www.youtube.com/watch?v=abc123XYZ" };
+    st.videos = { "Nordic Hamstring": "https://www.youtube.com/watch?v=abc123XYZ" };
     st.meetingNotes = [{ id: 1, player_id: "p-1", held_on: "2026-10-05", author_role: "doctor", body: "次回は2週間後。RDL の負荷は据え置き。", created_at: iso(now) }];
     const p = await newPage(st);
     await playerLogin(p);
@@ -589,7 +591,17 @@ try {
     await clickText(c, "動画を登録"); await sleep(400);
     await c.type('[role="dialog"] input', "https://youtu.be/QQQ111");
     await clickText(c, "保存する", '[role="dialog"] button'); await sleep(700);
-    ok(st2.patches.some((x) => x.p === "/rest/v1/exercises" && x.b.video_url === "https://youtu.be/QQQ111") && (await text(c)).includes("動画を変更"), "指導者は、種目ごとに動画の URL を登録できる");
+    const vs = st2.videoSets?.[0];
+    ok(vs?.p_url === "https://youtu.be/QQQ111" && vs.p_org_id === "default" && vs.p_coach_password === "coach" && typeof vs.p_name === "string" && vs.p_name.length > 0
+       && !st2.patches.some((x) => x.p === "/rest/v1/exercises") && (await text(c)).includes("動画を変更"),
+       "指導者は動画の URL を登録できる（種目名ごと・全組織で共通。指導者パスワードをサーバーが確かめる）");
+    // 日報の恐怖心・抜ける接地が、指導者の画面に出る（v15.20 で修正）
+    st2.reports = [{ id: 1, player_id: "p-1", date: ((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`)(new Date()), vas: 2, mental: 3, fatigue: 3, sleep_quality: 7, fear_level: 4, slipping_contact: true, rpe: 60, created_at: iso(new Date()) }];
+    const c2 = await newPage(st2);
+    await coachLogin(c2);
+    const t2 = await text(c2);
+    ok(/恐怖心\s*4/.test(t2) && /抜ける接地\s*あり/.test(t2) && /RPE\s*60/.test(t2), "指導者の日報に、恐怖心・抜ける接地・RPE が出る");
+    await c2.close();
     await inDetail("記録"); await sleep(800);
     await clickText(c, "面談メモを追加"); await sleep(300);
     await c.type('textarea[placeholder="面談の内容を貼り付け"]', "痛みは落ち着いている。来週から Jog。");
