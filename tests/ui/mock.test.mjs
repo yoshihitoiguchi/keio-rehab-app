@@ -39,7 +39,8 @@ const phases = Array.from({ length: 10 }, (_, i) => ({ title: `段階${i + 1}の
 const CONTINUE_RULE = { from_phase: 4, categories: ["strength", "eccentric"], label: "Strength / Eccentric", title: "Strength / Eccentric は続ける",
   text: "PHASE 4 以降の Strength / Eccentric は、Jump・Jog・Running を始めたあとも続けます。負荷は少しずつ上げていきます。",
   ack: "次のPHASEに進んでも、Strength / Eccentric は続け、負荷を少しずつ上げていくことを確認しました" };
-const protocol = { id: "hs", org_id: "default", name: "ハムストリング肉離れ", total_weeks: 8, phases, video_url: null, classification_scheme: "hamstring", continue_rule: CONTINUE_RULE };
+const protocol = { id: "hs", org_id: "default", name: "ハムストリング肉離れ", total_weeks: 8, phases, video_url: null, classification_scheme: "hamstring", continue_rule: CONTINUE_RULE,
+  faq: [{ q: "Mini Hurdle の「狭め」はどのくらい？", a: "身長と同じくらいの幅です。" }] };
 // 「続ける種目」の設定がないプロトコル（ほかの怪我）。分類はハムストリングと同じでも、案内は出ないこと
 const otherProtocol = { ...protocol, id: "other", name: "前十字靭帯損傷", continue_rule: null };
 const exercises = [
@@ -97,7 +98,11 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/organizations") return [{ id: "default", name: "テスト組織" }];
   if (p === "/rest/v1/protocols") return [protocol, otherProtocol];
   if (p === "/rest/v1/player_directory") return [{ id: "p-1", name: "山田 太郎" }];
-  if (p === "/rest/v1/exercises") return exercises.map((e) => ({ ...e, protocol_id: st.protocolId }));
+  if (p === "/rest/v1/exercises") return exercises.map((e) => ({ ...e, protocol_id: st.protocolId, video_url: (st.videos || {})[e.id] || null }));
+  if (p === "/rest/v1/meeting_notes") {
+    if (method === "POST") { const row = { id: 70 + (st.meetingNotes || []).length, created_at: iso(new Date()), ...json }; st.meetingNotes = [row, ...(st.meetingNotes || [])]; return [row]; }
+    return st.meetingNotes || [];
+  }
   if (p === "/rest/v1/exercise_steps") return steps;
   if (p === "/rest/v1/gate_item_checks" && method === "GET") return st.checks;
   if (p === "/rest/v1/app_settings") {
@@ -549,6 +554,57 @@ try {
       return captured ? await captured.text() : null;
     });
     ok(csv && csv.includes("選手,プロトコル,PHASE") && csv.includes("選手001") && !csv.includes("山田"), "書き出した CSV は、名前が番号に置き換わっている");
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+  });
+
+  await step("種目の動画・面談メモ・よくある質問（v15.19）", async () => {
+    // 選手：動きを見る・よくある質問・面談メモ
+    const st = makeState({ injuryDaysAgo: 3, phase: 5 });
+    st.videos = { 9: "https://www.youtube.com/watch?v=abc123XYZ" };
+    st.meetingNotes = [{ id: 1, player_id: "p-1", held_on: "2026-10-05", author_role: "doctor", body: "次回は2週間後。RDL の負荷は据え置き。", created_at: iso(now) }];
+    const p = await newPage(st);
+    await playerLogin(p);
+    await clickText(p, "メニュー", "nav button"); await sleep(1000);
+    const links = await p.$$eval("a", (a) => a.filter((n) => n.innerText.includes("動きを見る")).map((n) => n.href));
+    ok(links.length >= 1 && links.some((h) => h.startsWith("https://www.youtube.com/results?search_query=Bilateral%20RDL")), "動画が未登録の種目は、「動きを見る」で種目名の YouTube 検索が開く");
+    ok(links.every((h) => !h.includes("Jump%20Lv1%EF%BD%9C")) , "検索には、種目名の部分だけを使う");
+    await clickText(p, "動きを見る"); await sleep(600);
+    ok((await p.$$eval("iframe", (f) => f.map((x) => x.src))).some((x) => x === "https://www.youtube.com/embed/abc123XYZ"), "動画が登録された種目は、その場で動画が開く");
+    ok(!(await text(p)).includes("動画を登録"), "選手には「動画を登録」は出ない");
+    let t = await text(p);
+    ok(t.includes("よくある質問") && t.includes("Mini Hurdle の「狭め」はどのくらい？") && !t.includes("身長と同じくらいの幅です。"), "メニューに「よくある質問」が出る（答えは畳んである）");
+    await clickText(p, "Mini Hurdle の「狭め」はどのくらい？"); await sleep(300);
+    ok((await text(p)).includes("身長と同じくらいの幅です。"), "質問を押すと答えが開く");
+    await clickText(p, "連絡・面談", "nav button"); await sleep(800);
+    t = await text(p);
+    ok(t.includes("面談メモ") && t.includes("次回は2週間後。RDL の負荷は据え置き。") && t.includes("2026-10-05") && !t.includes("面談メモを追加"), "選手は「連絡・面談」で面談メモを読める（書き込みはできない）");
+    ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
+
+    // 指導者：動画の登録・面談メモの追加・よくある質問の編集
+    const st2 = makeState({ injuryDaysAgo: 3, phase: 5 });
+    const c = await newPage(st2);
+    await coachLogin(c);
+    const inDetail = async (label) => { for (const e of await c.$$("button")) { const tt = await e.evaluate((x) => x.innerText.trim()); const inNav = await e.evaluate((x) => !!x.closest("nav")); if (tt === label && !inNav) { await e.evaluate((n) => n.scrollIntoView({ block: "center" })); await e.click(); return; } } throw new Error("no " + label); };
+    await inDetail("メニュー"); await sleep(1000);
+    await clickText(c, "動画を登録"); await sleep(400);
+    await c.type('[role="dialog"] input', "https://youtu.be/QQQ111");
+    await clickText(c, "保存する", '[role="dialog"] button'); await sleep(700);
+    ok(st2.patches.some((x) => x.p === "/rest/v1/exercises" && x.b.video_url === "https://youtu.be/QQQ111") && (await text(c)).includes("動画を変更"), "指導者は、種目ごとに動画の URL を登録できる");
+    await inDetail("記録"); await sleep(800);
+    await clickText(c, "面談メモを追加"); await sleep(300);
+    await c.type('textarea[placeholder="面談の内容を貼り付け"]', "痛みは落ち着いている。来週から Jog。");
+    await clickText(c, "保存して選手に知らせる"); await sleep(1000);
+    ok(st2.meetingNotes?.[0]?.body === "痛みは落ち着いている。来週から Jog。" && st2.meetingNotes[0].player_id === "p-1" && /^\d{4}-\d{2}-\d{2}$/.test(st2.meetingNotes[0].held_on), "指導者が面談メモを貼り付けて保存できる");
+    ok(st2.posts.some((x) => x.p === "/rest/v1/messages" && !Array.isArray(x.b) && x.b.sender === "staff" && x.b.content.startsWith("【面談の記録】")) && (await text(c)).includes("選手本人も読めます"), "保存すると、選手にチャット（と通知）で知らされる");
+    await clickText(c, "プロトコル", "nav button"); await sleep(800);
+    await clickText(c, "よくある質問 1件"); await sleep(300);
+    t = await text(c);
+    ok(t.includes("よくある質問（選手のメニューに出ます）") && t.includes("Mini Hurdle の「狭め」はどのくらい？"), "プロトコルの画面で、よくある質問を開いて見られる");
+    await c.type('input[placeholder="質問"]', "ウエイトはいつから解禁？");
+    await c.type('textarea[placeholder="答え"]', "両脚の RDL ができるようになったら解禁です。");
+    await clickText(c, "質問を追加"); await sleep(700);
+    const fq = st2.patches.find((x) => x.p === "/rest/v1/protocols" && x.b.faq);
+    ok(fq?.b?.faq?.length === 2 && fq.b.faq[1].q === "ウエイトはいつから解禁？", "よくある質問を追加できる");
     ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
   });
 

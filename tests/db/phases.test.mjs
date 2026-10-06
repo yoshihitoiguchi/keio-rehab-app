@@ -583,6 +583,62 @@ ok(!!(await as(U4, "select resprint_backup.daily()")).error, "[v30] バックア
 ok(!(await run("supabase_rollback_v30.sql")) && (await db.query("select count(*)::int n from staff_notes")).rows[0].n === 1, "[v30] 戻し用 SQL が通る（メモのデータは残す）");
 ok(!(await run("supabase_migration_v30_operations.sql")), "[v30] 戻した後にもう一度適用できる");
 
+// ===== v31：Prone Hamstring Tantrums（PHASE 8 の条件と種目） =====
+await db.exec(`alter table exercises add column if not exists intro_phase int, add column if not exists continues boolean default true,
+  add column if not exists is_gate_exercise boolean default true, add column if not exists category text, add column if not exists prescription text,
+  add column if not exists sort_order int default 0;
+  alter table exercise_steps add column if not exists target text;
+  update protocols set phases = (select jsonb_agg(jsonb_build_object('title', 'P' || g, 'conditions', jsonb_build_array('条件' || g))) from generate_series(1, 10) g)
+   where id in ('proto-hamstring-10', 'comm-b-proto-hamstring-10');
+  update protocols set phases = '[{"title":"P1","conditions":["a"]}]'::jsonb where id = 'proto-acl';`);
+ok(!(await run("supabase_migration_v31_prone_hamstring_tantrums.sql")), "[v31] 適用 1 回目");
+const p8 = async (id) => (await db.query("select phases->7->'conditions' as c, phases->6->'conditions' as c7, phases->8->'conditions' as c9 from protocols where id = $1", [id])).rows[0];
+let h31 = await p8("proto-hamstring-10");
+ok(h31.c.length === 2 && h31.c[0] === "条件8" && /Prone Hamstring Tantrums 15秒×2–3set/.test(h31.c[1]) && h31.c7.length === 1 && h31.c9.length === 1,
+   "[v31] PHASE 8 の条件の最後にだけ足される（ほかの PHASE・既存の条件はそのまま）");
+ok((await p8("comm-b-proto-hamstring-10")).c.length === 2, "[v31] 各組織へのコピーにも入る");
+ok((await db.query("select phases from protocols where id = 'proto-acl'")).rows[0].phases.length === 1
+   && (await db.query("select count(*)::int n from exercises where name = 'Prone Hamstring Tantrums' and protocol_id = 'proto-acl'")).rows[0].n === 0, "[v31] ほかのプロトコルには入らない");
+const ex31 = (await db.query("select e.org_id, e.intro_phase, e.category, e.is_gate_exercise, e.sort_order, (select string_agg(s.label || ':' || s.target, ' / ' order by s.step_order) from exercise_steps s where s.exercise_id = e.id) as steps from exercises e where e.name = 'Prone Hamstring Tantrums' and e.protocol_id = 'comm-b-proto-hamstring-10'")).rows[0];
+ok(ex31?.org_id === "comm-b" && ex31.intro_phase === 8 && ex31.category === "strength" && ex31.is_gate_exercise === true && ex31.steps === "導入:10秒×2set / 基本:15秒×2–3set",
+   "[v31] 種目が PHASE 8 導入・Strength・ステップ2つ（導入→基本）で登録される");
+const n31 = (await db.query("select count(*)::int n from exercises where name = 'Prone Hamstring Tantrums'")).rows[0].n;
+ok(!(await run("supabase_migration_v31_prone_hamstring_tantrums.sql")) && (await p8("proto-hamstring-10")).c.length === 2 && n31 >= 2
+   && (await db.query("select count(*)::int n from exercises where name = 'Prone Hamstring Tantrums'")).rows[0].n === n31,
+   "[v31] 2回実行しても、条件も種目も重複しない");
+const c31 = one(await as(ADMIN, "select public.admin_create_org('comm-g','G','comm-g-pass','coach-g-pass')"));
+ok(c31?.id === "comm-g" && (await p8("comm-g-proto-hamstring-10")).c.length === 2
+   && (await db.query("select count(*)::int n from exercise_steps s join exercises e on e.id = s.exercise_id where e.protocol_id = 'comm-g-proto-hamstring-10' and e.name = 'Prone Hamstring Tantrums'")).rows[0].n === 2,
+   "[v31] 新しい組織にも、条件・種目・ステップが引き継がれる");
+
+// ===== v32：種目の動画・面談メモ・よくある質問・Tantrums の GATE =====
+await db.exec("insert into exercises (org_id, protocol_id, name, notes) values ('comm-b','comm-b-proto-hamstring-10','Sprint Drill｜B Skip / Cycling / Mini Hurdle（狭め）','元のメモ。'), ('comm-b','comm-b-proto-hamstring-10','Bilateral RDL', null)");
+ok(!(await run("supabase_migration_v32_videos_notes_faq.sql")), "[v32] 適用 1 回目");
+let g32 = (await p8("comm-b-proto-hamstring-10")).c;
+ok(g32.length === 2 && g32[0] === "条件8" && g32[1] === "Prone Hamstring Tantrums 50回×3setを違和感なく実施可能", "[v32] PHASE 8 の Tantrums の条件が「50回×3set を違和感なく」に置き換わる（位置・数はそのまま）");
+const st32 = (await db.query("select string_agg(s.label || ':' || s.target, ' / ' order by s.step_order) v from exercise_steps s join exercises e on e.id = s.exercise_id where e.protocol_id = 'comm-b-proto-hamstring-10' and e.name = 'Prone Hamstring Tantrums'")).rows[0].v;
+ok(st32 === "導入:10秒×2set / 基本:15秒×2–3set / GATE:50回×3set", "[v32] 種目のステップに 50回×3set が加わる");
+const faq32 = (await db.query("select faq from protocols where id = 'comm-b-proto-hamstring-10'")).rows[0].faq;
+ok(faq32.length === 2 && /身長と同じくらい/.test(faq32[0].a) && /RDL/.test(faq32[1].a) && (await db.query("select faq from protocols where id = 'proto-acl'")).rows[0].faq.length === 0, "[v32] よくある質問が2件入る（ほかのプロトコルには入らない）");
+const nt32 = (await db.query("select name, notes from exercises where protocol_id = 'comm-b-proto-hamstring-10' and (name like '%Mini Hurdle%' or name = 'Bilateral RDL') order by name")).rows;
+ok(/ウエイトを解禁/.test(nt32[0].notes) && nt32[1].notes.startsWith("元のメモ。") && /身長と同じくらいの幅/.test(nt32[1].notes), "[v32] 関係する種目のメモに追記される（元のメモは残る）");
+ok(!(await run("supabase_migration_v32_videos_notes_faq.sql")) && (await p8("comm-b-proto-hamstring-10")).c.length === 2
+   && (await db.query("select faq from protocols where id = 'comm-b-proto-hamstring-10'")).rows[0].faq.length === 2
+   && (await db.query("select count(*)::int n from exercise_steps s join exercises e on e.id = s.exercise_id where e.protocol_id = 'comm-b-proto-hamstring-10' and e.name = 'Prone Hamstring Tantrums'")).rows[0].n === 3
+   && (await db.query("select notes from exercises where protocol_id = 'comm-b-proto-hamstring-10' and name = 'Bilateral RDL'")).rows[0].notes.match(/ウエイトを解禁/g).length === 1,
+   "[v32] 2回実行しても、条件・ステップ・質問・メモが重複しない");
+ok(!(await as(U4, "insert into meeting_notes (player_id, held_on, author_role, body) values ('p-b1', current_date, 'doctor', '次回は2週間後')")).error
+   && (await as(U6, "select body from meeting_notes where player_id = 'p-b1'")).rows?.length === 1, "[v32] 同じ組織の人は、面談メモを書ける・読める");
+ok((await as(U1, "select body from meeting_notes")).rows?.length === 0 && !!(await as(U1, "insert into meeting_notes (player_id, body) values ('p-b1','x')")).error
+   && !!(await as(null, "select * from meeting_notes")).error, "[v32] ほかの組織・匿名キーからは、面談メモを読めない・書けない");
+ok(!(await as(U4, "update exercises set video_url = 'https://www.youtube.com/watch?v=abc' where protocol_id = 'comm-b-proto-hamstring-10' and name = 'Bilateral RDL'")).error
+   && (await db.query("select video_url from exercises where protocol_id = 'comm-b-proto-hamstring-10' and name = 'Bilateral RDL'")).rows[0].video_url === "https://www.youtube.com/watch?v=abc",
+   "[v32] 自分の組織の種目に、動画の URL を登録できる");
+const c32 = one(await as(ADMIN, "select public.admin_create_org('comm-h','H','comm-h-pass','coach-h-pass')"));
+ok(c32?.id === "comm-h" && (await db.query("select faq from protocols where id = 'comm-h-proto-hamstring-10'")).rows[0].faq.length === 2
+   && (await db.query("select video_url from exercises where protocol_id = 'comm-h-comm-b-proto-hamstring-10' or protocol_id = 'comm-h-proto-hamstring-10' limit 1")).rows.length === 1,
+   "[v32] 新しい組織にも、よくある質問などが引き継がれる");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

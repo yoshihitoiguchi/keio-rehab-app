@@ -175,6 +175,7 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `media_attachments` | 写真・動画。`expires_at` は90日 |
 | `staff_notes` | 指導者どうしの申し送りメモ（選手ごと。選手の画面には出さない。ただし組織の中の仕切りは画面だけなので、API を直接使えば同じ組織の人は読める）（v30） |
 | `exercise_logs` | 「今日やった種目」の記録（選手・種目・日付で1件）（v30） |
+| `meeting_notes` | 面談メモ（面談の内容。指導者が書き、選手本人と指導者が読む。`held_on` が面談の日）（v32） |
 | `player_metric_history` / `player_exercise_progress` | 記録の推移 |
 
 ### ビュー
@@ -235,6 +236,8 @@ PGRST204 エラーになった経緯がある。v12 で復旧済み）。
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
+| v32_videos_notes_faq | **適用済み（2026-10-06）** | `exercises.video_url`（種目の動画）・`meeting_notes`（面談メモ）・`protocols.faq`（よくある質問）。Tantrums の GATE を「50回×3set を違和感なく」に変更、質問2件を登録。表と列は apply_migration、データは execute_sql で適用（apply_migration が「Invalid or expired requestState」で失敗したため分けた） |
+| v31_prone_hamstring_tantrums | **適用済み（2026-10-06）** | ハムストリング肉離れのプロトコルに Prone Hamstring Tantrums を追加（データの追加）。PHASE 8 の GATE の条件の最後に1項目、種目（PHASE 8 導入・Strength・ステップ：導入→基本）。戻すときは控え「v31 の前」から |
 | v30_operations | **適用済み（2026-10-03）** | `staff_notes`（申し送りメモ）・`exercise_logs`（今日やった種目）・規約の同意（`terms_status` ほか）・リマインド（日報・面談）・毎日の自動バックアップ。`pg_cron` を有効化。戻し方 `supabase_rollback_v30.sql` |
 | v29_push_wording | **適用済み（2026-10-03）** | SOS の通知の文面を「選手から SOS の連絡があります」に（表記の統一） |
 | v28_transfer_code | **適用済み（2026-10-03）** | 引き継ぎコード（`transfer_create` / `transfer_redeem`、`resprint_private.transfer_codes`）。ブラウザ → ホーム画面のアプリへログインを引き継ぐ。30分有効 |
@@ -324,10 +327,10 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 公開の確認は、本番の JS に番号が入っているかで行う（`curl` で `/assets/index-*.js` を取り、`v15.14` を探す）。
 
 ```js
-const APP_BUILD = "v15.18";
+const APP_BUILD = "v15.19";
 ```
 
-本番に出ているのは `v15.18`（2026-10-03 公開）。
+本番に出ているのは `v15.19`（2026-10-06 公開）。
 
 過去に「全く改善されてない」が3回続き、原因が
 **App.jsx をリポジトリ直下に置いていて `src/` に入っていなかった**ことだった。
@@ -605,6 +608,26 @@ v16 後も残る穴（優先順。2026-09-27 のレビューで確認したも�
 ---
 
 ## 変更履歴
+
+### 2026-10-06（v15.19：Claude Code）
+- 種目の動きを確認する：メニューの各種目に「動きを見る」（`ExerciseVideo`）。指導者が種目ごとに動画の URL を登録できる（`exercises.video_url`。
+  選手詳細の「メニュー」タブの「動画を登録」）。YouTube の URL ならその場で再生、それ以外はリンク。**未登録の種目は、種目名で YouTube を検索した結果を開く**
+  （`exerciseSearchUrl`。「Jump Lv3｜…」は「｜」の後ろだけで検索）。動画の URL をこちらで決め打ちしない（内容を確かめられないため）。イラストは未対応。
+- 面談メモ（`MeetingNotes`・`meeting_notes`）：指導者が選手詳細の「記録」タブで、面談の日と内容を貼り付けて保存。選手は「連絡・面談」タブで読む。
+  保存すると、選手のチャットに「【面談の記録】…」が入り、通知も届く。申し送りメモ（`staff_notes`・選手には見せない）とは別。
+- よくある質問（`protocols.faq`）：選手のメニューの一番下（`FaqList`）。指導者はプロトコルの画面で追加・削除（`FaqEditor`）。プロトコルごとなので、新しい組織にも引き継がれる。
+  作者の回答2件を登録：Mini Hurdle の「狭め」＝身長と同じくらいの幅／ウエイトの解禁＝両脚の RDL ができるようになったら。同じ内容を、該当する種目のメモにも追記。
+- Prone Hamstring Tantrums：PHASE 8 → 9 の GATE を「50回×3set を違和感なく実施可能」に変更（作者の指示）。種目のステップは 導入 → 基本 → 50回×3set。
+- 検証：SQL 240＋26、送信役 8、画面 150。
+
+### 2026-10-06（v31：Claude Code。アプリの変更なし・ビルド番号は v15.18 のまま）
+- 作者の指示で、Prone Hamstring Tantrums を PHASE 8 → 9 の条件に追加（v31。default と各組織のハムストリング肉離れのプロトコル）。
+  GATE の文面：「Prone Hamstring Tantrums 15秒×2–3setを、痛みなし・左右差が大きくならない・速度が落ちすぎない・翌日増悪なしで実施可能」。
+  種目は分類 Strength（作者の選択。「Strength / Eccentric は続ける」の緑の枠に入る）。導入 10秒×2set → 基本 15秒×2–3set、Rest 45–60秒。
+  文面に「翌日」を含むが「実施後」を含まないので、翌日の日報を待つ自動項目（`isNextDayItem`）にはならず、選手・指導者が「できた」を付ける普通の項目。
+- 適用時点で PHASE 8 にいた選手（keiotf に2名）は、この項目も満たしてから PHASE 9 に進む。
+- アプリのコードは変えていないので、GitHub への push（＝本番の再デプロイ）は次のリリースと一緒に行う（不要な「更新する」の表示を出さないため）。
+- 検証：SQL 230＋26。
 
 ### 2026-10-03（v15.18：Claude Code）
 - 暗証番号の再設定：指導者の選手詳細に「暗証番号を再設定」（`players.pin` を書き換える。数字4桁）。

@@ -49,6 +49,7 @@ import {
   Bell,
   Repeat,
   Megaphone,
+  HelpCircle,
   Download,
   Pencil,
   Save,
@@ -272,7 +273,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.18";
+const APP_BUILD = "v15.19";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -564,6 +565,8 @@ function normalizeProtocol(row) {
     // PHASE数はプロトコルごとに可変（ハムストリングは10 PHASE）
     phaseCount: (row.phases || []).length || 5,
     classificationScheme: row.classification_scheme || null,
+    // よくある質問（プロトコルごと。指導者が編集する）
+    faq: (Array.isArray(row.faq) ? row.faq : []).filter((f) => f && typeof f.q === "string" && typeof f.a === "string"),
     // 「続ける種目」の案内（設定のあるプロトコルだけ。なければ null）
     continueRule: normalizeContinueRule(row.continue_rule),
   };
@@ -1007,7 +1010,7 @@ function getYouTubeEmbedUrl(url) {
       videoId = u.pathname.slice(1);
     } else if (u.hostname.includes("youtube.com")) {
       videoId = u.searchParams.get("v");
-      if (!videoId && u.pathname.startsWith("/embed/")) videoId = u.pathname.split("/")[2];
+      if (!videoId && (u.pathname.startsWith("/embed/") || u.pathname.startsWith("/shorts/"))) videoId = u.pathname.split("/")[2];
     }
     return videoId ? `https://www.youtube.com/embed/${videoId}` : null;
   } catch {
@@ -3991,6 +3994,12 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
     );
   };
 
+  // よくある質問の保存（失敗は呼び出し側で表示する）
+  const handleUpdateFaq = async (id, faq) => {
+    await sbUpdate("protocols", id, { faq });
+    setMasterProtocols((prev) => prev.map((p) => (p.id === id ? { ...p, faq } : p)));
+  };
+
   const handleUpdateVideoUrl = async (id, url) => {
     try {
       await sbUpdate("protocols", id, { video_url: url.trim() || null });
@@ -4016,6 +4025,7 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
             onSaveVideo={handleUpdateVideoUrl}
             onSaveScheme={handleUpdateScheme}
             onSaveContent={handleUpdateContent}
+            onSaveFaq={handleUpdateFaq}
           />
         ))}
         {masterProtocols.length === 0 && (
@@ -4141,7 +4151,7 @@ function ProtocolManagement({ orgId, masterProtocols, setMasterProtocols }) {
   );
 }
 
-function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme, onSaveContent }) {
+function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme, onSaveContent, onSaveFaq }) {
   const [videoUrl, setVideoUrl] = useState(protocol.videoUrl || "");
   const [savingVideo, setSavingVideo] = useState(false);
   // 中身の編集（フェーズの数は変えない）
@@ -4306,6 +4316,7 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme, onSaveCon
           </div>
         ))}
       </div>
+      <FaqEditor protocol={protocol} onSave={onSaveFaq} />
       <div className="mt-3 pt-3 border-t border-slate-100">
         <label className="text-xs text-slate-500">分類の分岐</label>
         <select
@@ -4979,6 +4990,8 @@ function PlayerDetailPanel({
 
         {dtab === "record" && (
           <>
+          <MeetingNotes player={player} viewer="staff" />
+
           <StaffNotes player={player} />
 
           <ImagingFindingsCard player={player} onSave={onSaveImagingFindings} />
@@ -7449,6 +7462,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
             </div>
           )}
 
+          <FaqList faq={protocol?.faq} />
         </>
       )}
 
@@ -7702,6 +7716,8 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
           />
 
           <ConsultationRequestCard orgId={orgId} player={player} setMyPlayer={setMyPlayer} />
+
+          <MeetingNotes player={player} viewer="self" />
         </>
       )}
 
@@ -8356,6 +8372,307 @@ function RecoverySummary({ player, protocol }) {
       </div>
       <p className="text-xs font-bold text-slate-600 mt-4 mb-2">日報の推移（全期間）</p>
       <SimpleTrendChart reports={player.reports} limit={null} />
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------
+// 種目の動きを確認する（v32）
+//   指導者が種目ごとに動画の URL を登録できる。登録があればその動画を、なければ種目名で YouTube を検索した結果を開く。
+// ------------------------------------------------------------------
+function exerciseSearchUrl(name) {
+  // 「Jump Lv3｜SL Hop 前後・左右」→「SL Hop 前後・左右」のように、種目名の部分だけで探す
+  const q = String(name || "").split("｜").pop().replace(/[（(].*?[）)]/g, " ").replace(/\s+/g, " ").trim();
+  return `https://www.youtube.com/results?search_query=${encodeURIComponent(q + " exercise")}`;
+}
+
+function ExerciseVideo({ exercise, canEdit, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const url = safeHref(exercise.video_url);
+  const embed = getYouTubeEmbedUrl(url);
+  const linkClass = "inline-flex items-center gap-1 min-h-[36px] px-3 rounded-full border border-red-200 bg-white text-xs font-bold text-red-600";
+
+  const edit = async () => {
+    const next = await askText(`${exercise.name} の動画`, {
+      body: "YouTube などの URL を貼り付けてください。空にすると、種目名での検索に戻ります。",
+      initial: exercise.video_url || "",
+      placeholder: "https://www.youtube.com/watch?v=...",
+      okLabel: "保存する",
+    });
+    if (next === null) return;
+    const value = next.trim();
+    if (value && !safeHref(value)) {
+      showMessage("保存できませんでした", { body: "https:// で始まる URL を貼り付けてください。" });
+      return;
+    }
+    try {
+      await sbUpdate("exercises", exercise.id, { video_url: value || null });
+      onSaved?.(exercise.id, value || null);
+    } catch (err) {
+      showMessage("保存できませんでした", { body: errText(err) });
+    }
+  };
+
+  return (
+    <div className="mt-2">
+      <div className="flex flex-wrap items-center gap-2">
+        {embed ? (
+          <button onClick={() => setOpen((v) => !v)} className={linkClass} aria-expanded={open}>
+            <Youtube size={14} /> {open ? "動画を閉じる" : "動きを見る"}
+          </button>
+        ) : (
+          <a href={url || exerciseSearchUrl(exercise.name)} target="_blank" rel="noreferrer" className={linkClass}>
+            <Youtube size={14} /> 動きを見る
+          </a>
+        )}
+        {canEdit && (
+          <button onClick={edit} className="min-h-[36px] px-3 rounded-full border border-slate-200 bg-white text-xs text-slate-500">
+            {url ? "動画を変更" : "動画を登録"}
+          </button>
+        )}
+      </div>
+      {open && embed && (
+        <div className="mt-2 aspect-video w-full rounded-lg overflow-hidden bg-black">
+          <iframe
+            src={embed}
+            title={`${exercise.name} の動画`}
+            className="w-full h-full"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+            allowFullScreen
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------
+// 面談メモ（v32）：面談の内容を指導者が書き、選手本人と指導者が読む
+// ------------------------------------------------------------------
+function MeetingNotes({ player, viewer }) {
+  const [notes, setNotes] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [date, setDate] = useState(todayStr());
+  const [role, setRole] = useState(CHAT_STAFF_ROLES[0].value);
+  const [text, setText] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const staff = viewer === "staff";
+
+  useEffect(() => {
+    let active = true;
+    setNotes([]);
+    setLoaded(false);
+    sbSelect("meeting_notes", `?player_id=eq.${encodeURIComponent(player.id)}&select=*&order=held_on.desc.nullslast,created_at.desc`)
+      .then((rows) => active && setNotes(rows || []))
+      .catch((err) => active && staff && setError(errText(err)))
+      .finally(() => active && setLoaded(true));
+    return () => {
+      active = false;
+    };
+  }, [player.id]);
+
+  const add = async () => {
+    const body = text.trim();
+    if (!body) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const [row] = await sbInsert("meeting_notes", { player_id: player.id, held_on: date || null, author_role: role, body });
+      setNotes((prev) => [row, ...prev]);
+      setText("");
+      setOpen(false);
+      // 選手に知らせる（チャットに1行残す。通知も届く）
+      try {
+        await sbInsert("messages", {
+          player_id: player.id,
+          sender: "staff",
+          staff_role: role,
+          content: `【面談の記録】${date ? date + " の" : ""}面談のメモを追加しました。「連絡・面談」で読めます。`,
+        });
+      } catch {
+        // 知らせられなくても、メモは保存できている
+      }
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const remove = async (id) => {
+    if (!(await askConfirm("この面談メモを削除しますか？", { body: "選手の画面からも消えます。", okLabel: "削除する", danger: true }))) return;
+    try {
+      await sbDelete("meeting_notes", id);
+      setNotes((prev) => prev.filter((n) => n.id !== id));
+    } catch (err) {
+      setError(errText(err));
+    }
+  };
+
+  // 選手側：メモがまだなければカードごと出さない
+  if (!staff && (!loaded || notes.length === 0)) return null;
+
+  return (
+    <div className={`bg-white border border-slate-200 p-5 ${staff ? "rounded-xl" : "rounded-2xl shadow-sm"}`}>
+      <p className="text-sm font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+        <History size={16} className="text-blue-600" /> 面談メモ
+      </p>
+      {staff && <p className="text-xs text-slate-400 mb-3">選手本人も読めます。</p>}
+      {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
+      {staff &&
+        (open ? (
+          <div className="space-y-2 mb-3">
+            <div className="flex gap-2">
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="面談の日" className="flex-1 min-w-0 border border-slate-300 rounded-lg px-3 py-2.5 text-sm bg-white" />
+              <select value={role} onChange={(e) => setRole(e.target.value)} aria-label="書く人の立場" className="border border-slate-300 rounded-lg px-2 py-2.5 text-sm bg-white">
+                {CHAT_STAFF_ROLES.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              rows={6}
+              placeholder="面談の内容を貼り付け"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm"
+            />
+            <div className="flex gap-2">
+              <button onClick={() => setOpen(false)} className="flex-1 py-2.5 rounded-lg border border-slate-300 text-sm text-slate-600">
+                やめる
+              </button>
+              <button onClick={add} disabled={saving || !text.trim()} className="flex-1 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-bold disabled:bg-slate-300">
+                {saving ? "保存中..." : "保存して選手に知らせる"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button onClick={() => setOpen(true)} className="w-full mb-3 py-2.5 rounded-lg border border-dashed border-slate-300 text-sm font-bold text-slate-600">
+            面談メモを追加
+          </button>
+        ))}
+      <ul className="space-y-2">
+        {notes.map((n) => (
+          <li key={n.id} className="bg-slate-50 rounded-lg px-3 py-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-bold text-slate-600">
+                {n.held_on || formatDateTimeJa(n.created_at)}
+                <span className="font-normal text-slate-400 ml-1.5">{CHAT_STAFF_ROLE_LABELS[n.author_role] || "指導者"}</span>
+              </p>
+              {staff && (
+                <button onClick={() => remove(n.id)} className="text-slate-300 hover:text-red-500 p-2 -m-2" aria-label="この面談メモを削除">
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
+            <p className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed mt-1">{n.body}</p>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------
+// よくある質問（v32）：プロトコルごと。指導者がプロトコルの画面で編集し、選手はメニューで読む
+// ------------------------------------------------------------------
+function FaqList({ faq }) {
+  const [openIdx, setOpenIdx] = useState(null);
+  if (!faq || faq.length === 0) return null;
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+      <p className="text-sm font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+        <HelpCircle size={16} className="text-blue-600" /> よくある質問
+      </p>
+      <ul className="divide-y divide-slate-100">
+        {faq.map((f, i) => (
+          <li key={i}>
+            <button
+              onClick={() => setOpenIdx(openIdx === i ? null : i)}
+              aria-expanded={openIdx === i}
+              className="w-full flex items-center justify-between gap-2 py-3 text-left text-sm font-bold text-slate-700"
+            >
+              {f.q}
+              {openIdx === i ? <ChevronUp size={16} className="shrink-0 text-slate-400" /> : <ChevronDown size={16} className="shrink-0 text-slate-400" />}
+            </button>
+            {openIdx === i && <p className="text-sm text-slate-600 leading-relaxed whitespace-pre-wrap pb-3">{f.a}</p>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function FaqEditor({ protocol, onSave }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const [a, setA] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const faq = protocol.faq || [];
+  const save = async (next) => {
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave(protocol.id, next);
+      return true;
+    } catch (err) {
+      setError(errText(err));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+  const add = async () => {
+    if (!q.trim() || !a.trim()) return;
+    if (await save([...faq, { q: q.trim(), a: a.trim() }])) {
+      setQ("");
+      setA("");
+    }
+  };
+  const remove = async (idx) => {
+    if (!(await askConfirm("この質問を削除しますか？", { body: faq[idx].q, okLabel: "削除する", danger: true }))) return;
+    save(faq.filter((_, i) => i !== idx));
+  };
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="mt-2 w-full flex items-center justify-between px-3 py-2.5 rounded-lg bg-slate-50 text-sm text-slate-600"
+      >
+        よくある質問 {faq.length}件
+        <ChevronDown size={16} />
+      </button>
+    );
+  }
+  return (
+    <div className="mt-2 rounded-lg bg-slate-50/60 border border-slate-100 p-3">
+      <button onClick={() => setOpen(false)} className="w-full flex items-center justify-between text-xs font-bold text-slate-600 mb-2">
+        よくある質問（選手のメニューに出ます）
+        <ChevronUp size={16} />
+      </button>
+      <ul className="space-y-1.5 mb-2">
+        {faq.map((f, i) => (
+          <li key={i} className="bg-white border border-slate-100 rounded-lg px-3 py-2 flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-slate-700">{f.q}</p>
+              <p className="text-xs text-slate-500 whitespace-pre-wrap mt-0.5">{f.a}</p>
+            </div>
+            <button onClick={() => remove(i)} disabled={saving} className="text-slate-300 hover:text-red-500 p-2 -m-1 shrink-0" aria-label="この質問を削除">
+              <Trash2 size={14} />
+            </button>
+          </li>
+        ))}
+      </ul>
+      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="質問" className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mb-1.5" />
+      <textarea value={a} onChange={(e) => setA(e.target.value)} rows={2} placeholder="答え" className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
+      {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
+      <button onClick={add} disabled={saving || !q.trim() || !a.trim()} className="mt-1.5 px-4 py-2 rounded-lg bg-slate-800 text-white text-xs font-bold disabled:bg-slate-300">
+        質問を追加
+      </button>
     </div>
   );
 }
@@ -9311,7 +9628,13 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
           )}
         </div>
 
-        {e.notes && <p className="text-[10px] text-amber-600 mt-1">※{e.notes}</p>}
+        {e.notes && <p className="text-[11px] text-amber-700 mt-1 leading-relaxed">※{e.notes}</p>}
+
+        <ExerciseVideo
+          exercise={e}
+          canEdit={!readOnly}
+          onSaved={(id, url) => setExercises((prev) => prev.map((x) => (x.id === id ? { ...x, video_url: url } : x)))}
+        />
 
         {exSteps.length > 0 && (
           <div className="mt-2 bg-slate-50 rounded px-2 py-1.5">
