@@ -69,7 +69,7 @@ function makeState({ phase = 5, injuryDaysAgo = 20, booked = false, checks = [],
   };
   st.player = () => ({ id: "p-1", org_id: "default", name: "山田 太郎", pin: "1111", protocol_id: st.protocolId, current_phase: st.phase, checklist: [], sos: false,
     injury_date: st.injury, booked_slot_id: st.slots.find((s) => s.booked_by === "p-1")?.id ?? null,
-    completed_at: st.completedAt || null, reports: st.reports || [], messages: st.messages, treatments: [], phase_history: st.phaseHistory || [], player_exercise_progress: [], consultation_requests: st.consult });
+    completed_at: st.completedAt || null, reports: st.reports || [], messages: st.messages, treatments: [], phase_history: st.phaseHistory || [], player_exercise_progress: [], report_comments: st.reportComments || [], consultation_requests: st.consult });
   return st;
 }
 function respond(st, url, method, body) {
@@ -635,23 +635,26 @@ try {
     ok(t.includes("本音とコメント") && t.includes("正直、走るのが少し怖いです"), "指導者の日報に、本音とコメントの欄が出る");
     await clickText(c, "コメントする"); await sleep(300);
     await c.type('textarea[placeholder="コメント"]', "怖さがあるのは自然です。");
-    await clickText(c, "送る"); await sleep(400);
-    ok((await text(c)).includes("名前を入力してください") && !(st.reportComments || []).length, "名前がないと送れない");
+    ok(!(await c.$('input[aria-label="書く人の名前"]')), "名前の入力欄はない（チャットと同じく立場を選ぶ）");
     await c.select('select[aria-label="書く人の立場"]', "doctor");
-    await c.type('input[aria-label="書く人の名前"]', "井口");
     await clickText(c, "送る"); await sleep(800);
     const rc = st.reportComments?.[0];
-    ok(rc?.report_id === 1 && rc.player_id === "p-1" && rc.sender === "staff" && rc.author_role === "doctor" && rc.author_name === "井口" && rc.body === "怖さがあるのは自然です。", "コメントが、立場と名前つきで日報に残る");
+    ok(rc?.report_id === 1 && rc.player_id === "p-1" && rc.sender === "staff" && rc.author_role === "doctor" && !rc.author_name && rc.body === "怖さがあるのは自然です。", "コメントが、立場つきで日報に残る");
     t = await text(c);
-    ok(/井口\s*医師/.test(t) && t.includes("怖さがあるのは自然です。") && !st.posts.some((x) => x.p === "/rest/v1/messages"), "誰のコメントかが表示される（チャットには入らない）");
+    ok(/医師\s*\d+\/\d+/.test(t) && t.includes("怖さがあるのは自然です。") && !st.posts.some((x) => x.p === "/rest/v1/messages"), "誰のコメントかが表示される（チャットには入らない）");
     ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
     await c.close();
     // 選手：日報タブで読んで、返信する
     const p = await newPage(st);
     await playerLogin(p);
+    const badge = () => p.$$eval("nav button", (bs) => { const b = bs.find((x) => x.innerText.includes("日報")); return b?.querySelector("span.bg-red-500")?.innerText || ""; });
+    ok((await badge()) === "1", "選手の「日報」タブに、未読のコメントの数が出る");
+    await clickText(p, "日報", "nav button"); await sleep(800);
+    await clickText(p, "ホーム", "nav button"); await sleep(400);
+    ok((await badge()) === "", "日報タブを開くと、未読の数が消える");
     await clickText(p, "日報", "nav button"); await sleep(800);
     t = await text(p);
-    ok(t.includes("日報へのコメント") && /井口\s*医師/.test(t) && t.includes("怖さがあるのは自然です。") && t.includes("正直、走るのが少し怖いです"), "選手は日報タブで、誰からのコメントかと内容を読める");
+    ok(t.includes("日報へのコメント") && /医師\s*\d+\/\d+/.test(t) && t.includes("怖さがあるのは自然です。") && t.includes("正直、走るのが少し怖いです"), "選手は日報タブで、誰からのコメントかと内容を読める");
     await clickText(p, "返信する"); await sleep(300);
     await p.type('textarea[placeholder="返信"]', "ありがとうございます。");
     await clickText(p, "送る"); await sleep(800);

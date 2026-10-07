@@ -273,7 +273,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.21";
+const APP_BUILD = "v15.22";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -687,6 +687,7 @@ function normalizePlayer(row) {
       .sort((a, b) => new Date(a.entered_at) - new Date(b.entered_at))
       .map(normalizePhaseHistoryEntry),
     exerciseProgress: (row.player_exercise_progress || []).map(normalizeExerciseProgress),
+    reportComments: row.report_comments || [],
     consultations: (row.consultation_requests || [])
       .slice()
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
@@ -720,7 +721,7 @@ const VAS_ANCHORS = [
 ];
 const MENTAL_FACES = ["😞", "😕", "😐", "🙂", "😄"];
 const PLAYER_FIELDS =
-  "*,reports(*),messages(*),treatments(*),phase_history(*),player_exercise_progress(*),consultation_requests(*)";
+  "*,reports(*),messages(*),treatments(*),phase_history(*),player_exercise_progress(*),consultation_requests(*),report_comments(*)";
 const PLAYER_EMBED_ORDER =
   "&reports.order=created_at.asc&messages.order=created_at.asc&treatments.order=created_at.asc&phase_history.order=entered_at.asc";
 
@@ -7029,10 +7030,22 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
     return lastStaffId;
   });
   const unreadStaff = tab === "chat" ? 0 : player.messages.filter((m) => m.sender === "staff" && Number(m.id) > seenId).length;
+  // 日報へのコメント：指導者からの未読（この端末で最後に見たコメントより新しいもの）
+  const commentSeenKey = `resprint.reportSeen.${player.id}`;
+  const staffComments = (player.reportComments || []).filter((c) => c.sender !== "player");
+  const lastCommentId = Math.max(0, ...staffComments.map((c) => Number(c.id) || 0));
+  const [seenCommentId, setSeenCommentId] = useState(() => Number(readDraft(commentSeenKey)) || 0);
+  const unreadComments = tab === "report" ? 0 : staffComments.filter((c) => Number(c.id) > seenCommentId).length;
   useEffect(() => {
-    setIconBadge(unreadStaff);
+    if (tab === "report" && lastCommentId > seenCommentId) {
+      setSeenCommentId(lastCommentId);
+      writeDraft(commentSeenKey, lastCommentId);
+    }
+  }, [tab, lastCommentId]);
+  useEffect(() => {
+    setIconBadge(unreadStaff + unreadComments);
     return () => setIconBadge(0);
-  }, [unreadStaff]);
+  }, [unreadStaff, unreadComments]);
   // 通知をオンにしてある端末は、開くたびに登録を最新にする
   useEffect(() => {
     refreshPush(sbRpc, { orgId, role: "player", playerId: player.id });
@@ -7283,7 +7296,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
     setMyPlayer((prev) => ({ ...prev, treatments: prev.treatments.filter((t) => t.id !== id) }));
   };
 
-  const TABS = PLAYER_TAB_DEFS.map((t) => (t.key === "chat" ? { ...t, badge: unreadStaff } : t));
+  const TABS = PLAYER_TAB_DEFS.map((t) => (t.key === "chat" ? { ...t, badge: unreadStaff } : t.key === "report" ? { ...t, badge: unreadComments } : t));
 
   return (
     <div className="max-w-md mx-auto px-4 pt-5 pb-28 space-y-5">
@@ -8722,7 +8735,6 @@ function ReportThread({ player, viewer }) {
   const [showAll, setShowAll] = useState(false);
   const [text, setText] = useState("");
   const [role, setRole] = useState(CHAT_STAFF_ROLES.some((o) => o.value === saved.role) ? saved.role : CHAT_STAFF_ROLES[0].value);
-  const [name, setName] = useState(typeof saved.name === "string" ? saved.name : "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
@@ -8749,10 +8761,6 @@ function ReportThread({ player, viewer }) {
   const send = async (report) => {
     const body = text.trim();
     if (!body) return;
-    if (staff && !name.trim()) {
-      setError("名前を入力してください。");
-      return;
-    }
     setSaving(true);
     setError(null);
     try {
@@ -8761,7 +8769,7 @@ function ReportThread({ player, viewer }) {
         player_id: player.id,
         sender: staff ? "staff" : "player",
         author_role: staff ? role : null,
-        author_name: staff ? name.trim() : null,
+        author_name: null,
         body,
       });
       setComments((prev) => [...prev, row]);
@@ -8769,7 +8777,7 @@ function ReportThread({ player, viewer }) {
       setOpenId(null);
       if (staff) {
         try {
-          localStorage.setItem(COMMENT_AUTHOR_KEY, JSON.stringify({ role, name: name.trim() }));
+          localStorage.setItem(COMMENT_AUTHOR_KEY, JSON.stringify({ role }));
         } catch {
           // 保存できなくても、次回入力し直すだけ
         }
@@ -8811,9 +8819,9 @@ function ReportThread({ player, viewer }) {
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-[11px] text-slate-500">
                     <span className="font-bold text-slate-700">
-                      {c.sender === "player" ? (staff ? player.name : "自分") : c.author_name || "指導者"}
+                      {c.sender === "player" ? (staff ? player.name : "自分") : CHAT_STAFF_ROLE_LABELS[c.author_role] || "指導者"}
                     </span>
-                    {c.sender !== "player" && <span className="ml-1">{CHAT_STAFF_ROLE_LABELS[c.author_role] || "指導者"}</span>}
+                    {c.sender !== "player" && c.author_name && <span className="ml-1">{c.author_name}</span>}
                     <span className="ml-1.5">{formatDateTimeJa(c.created_at)}</span>
                   </p>
                   {staff && c.sender !== "player" && (
@@ -8828,23 +8836,13 @@ function ReportThread({ player, viewer }) {
             {openId === r.id ? (
               <div className="mt-2 space-y-2">
                 {staff && (
-                  <div className="flex gap-2">
-                    <select value={role} onChange={(e) => setRole(e.target.value)} aria-label="書く人の立場" className="border border-slate-300 rounded-lg px-2 py-2.5 text-sm bg-white shrink-0">
-                      {CHAT_STAFF_ROLES.map((o) => (
-                        <option key={o.value} value={o.value}>
-                          {o.label}
-                        </option>
-                      ))}
-                    </select>
-                    <input
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      maxLength={30}
-                      placeholder="名前"
-                      aria-label="書く人の名前"
-                      className="flex-1 min-w-0 border border-slate-300 rounded-lg px-3 py-2.5 text-sm"
-                    />
-                  </div>
+                  <select value={role} onChange={(e) => setRole(e.target.value)} aria-label="書く人の立場" className="border border-slate-300 rounded-lg px-2 py-2.5 text-sm bg-white">
+                    {CHAT_STAFF_ROLES.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
                 )}
                 <textarea
                   value={text}

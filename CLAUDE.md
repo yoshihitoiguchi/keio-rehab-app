@@ -332,10 +332,10 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 公開の確認は、本番の JS に番号が入っているかで行う（`curl` で `/assets/index-*.js` を取り、`v15.14` を探す）。
 
 ```js
-const APP_BUILD = "v15.21";
+const APP_BUILD = "v15.22";
 ```
 
-本番に出ているのは `v15.21`（2026-10-07 公開）。
+本番に出ているのは `v15.22`（2026-10-07 公開）。
 
 過去に「全く改善されてない」が3回続き、原因が
 **App.jsx をリポジトリ直下に置いていて `src/` に入っていなかった**ことだった。
@@ -474,7 +474,7 @@ const APP_BUILD = "v15.21";
 2. **本番DBを変える前に控えを取る**：`select * from resprint_backup.take_snapshot('v23 の前');`（書き込み用の接続から）。
    戻し方は `supabase_migration_v22_snapshot.sql` の冒頭。写真・動画のファイルは対象外。
 3. **端末に保存しているものの名前と形を変えない**：`resprint.auth` / `resprint.org` / `resprint.player`（ログイン）、
-   `resprint.draft.report.<選手ID>` / `resprint.draft.chat.<選手ID>`（書きかけ）、`resprint.chatSeen.<選手ID>`（既読）。
+   `resprint.draft.report.<選手ID>` / `resprint.draft.chat.<選手ID>`（書きかけ）、`resprint.chatSeen.<選手ID>` / `resprint.reportSeen.<選手ID>`（既読）。
    変えると選手がログアウトされたり、書きかけが消えたりする。変えるなら古い形も読めるようにする。
 4. **ログインの保存を消すのは、本当に無効なときだけ。** 通信エラーでは消さない（「もう一度試す」を出す）。
 5. **勝手に読み込み直さない。** 更新は `UpdateNotice` のボタン（または長く使っていなかったとき）に任せる。
@@ -614,6 +614,14 @@ v16 後も残る穴（優先順。2026-09-27 のレビューで確認したも�
 ---
 
 ## 変更履歴
+
+### 2026-10-07（v15.22：Claude Code）
+- 日報へのコメントの書き手を、チャットと同じ「立場を選ぶ」だけに（作者の指示。名前の入力欄を削除）。表示は「医師 10/7 13:02」。
+  v15.21 で名前つきで書かれたコメントは、立場の後ろに名前も出る（`author_name` の列は残してある）。
+- 選手の下タブ「日報」に、指導者からの未読コメントの数（`resprint.reportSeen.<選手ID>` に、最後に見たコメントの番号を端末ごとに保存。日報タブを開くと消える）。
+  ホーム画面のアイコンの数にも加える。そのため、選手の読み込みに `report_comments(*)` を足した（`player.reportComments`）。
+  指導者側の未読（選手の返信）の印は未実装（通知は届く）。
+- 検証：画面 163、SQL 267＋26、送信役 8。DB の変更なし。
 
 ### 2026-10-07（v15.21：Claude Code）
 - 日報の本音へのコメント・返信（`ReportThread`・v35 `report_comments`）。チャットとは別に、日報1件ごとに残す。
