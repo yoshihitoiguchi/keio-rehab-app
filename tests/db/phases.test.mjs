@@ -682,6 +682,26 @@ ok(pr34[2].title === "P3" && JSON.stringify(pr34[2].conditions) === JSON.stringi
 ok(!(await run("supabase_migration_v34_phase8_gate_rdl_note.sql"))
    && JSON.stringify((await db.query("select phases from protocols where id = 'comm-b-proto-hamstring-10'")).rows[0].phases) === JSON.stringify(pr34), "[v34] 2回実行しても内容が変わらない");
 
+// ===== v35：日報の本音へのコメント =====
+ok(!(await run("supabase_migration_v35_report_comments.sql")), "[v35] 適用 1 回目");
+ok(!(await run("supabase_migration_v35_report_comments.sql")), "[v35] 適用 2 回目（冪等）");
+const rep35 = (await db.query("insert into reports (player_id, vas) values ('p-b1', 2) returning id")).rows[0].id;
+const repA35 = (await db.query("insert into reports (player_id, vas) select id, 1 from players where org_id <> 'comm-b' limit 1 returning id, player_id")).rows[0];
+await db.exec("delete from net.calls");
+ok(!(await as(U4, `insert into report_comments (report_id, player_id, sender, author_role, author_name, body) values (${rep35}, 'p-b1', 'staff', 'doctor', '井口', '無理せずいきましょう')`)).error
+   && !(await as(U6, `insert into report_comments (report_id, player_id, sender, body) values (${rep35}, 'p-b1', 'player', 'ありがとうございます')`)).error
+   && (await as(U6, "select author_name from report_comments where player_id = 'p-b1' order by id")).rows?.length === 2, "[v35] 同じ組織の人は、日報にコメント・返信を書ける・読める");
+const calls35 = (await db.query("select body->>'body' b from net.calls order by id")).rows.map((r) => r.b);
+ok(!calls35.some((b) => /井口|無理せず|ありがとう/.test(b || "")), "[v35] 通知に、本文・名前は入らない " + JSON.stringify(calls35));
+ok((await as(U1, "select body from report_comments")).rows?.length === 0
+   && !!(await as(U1, `insert into report_comments (report_id, player_id, body) values (${rep35}, 'p-b1', 'x')`)).error
+   && !!(await as(null, "select * from report_comments")).error, "[v35] ほかの組織・匿名キーからは読めない・書けない");
+ok(!!(await as(U4, `insert into report_comments (report_id, player_id, body) values (${repA35.id}, 'p-b1', 'x')`)).error, "[v35] ほかの選手の日報に、自分の組織の選手の名義で書くことはできない");
+ok(!!(await as(U4, `insert into report_comments (report_id, player_id, sender, body) values (${rep35}, 'p-b1', 'admin', 'x')`)).error
+   && !!(await as(U4, `update report_comments set body = '書き換え' where player_id = 'p-b1'`)).error, "[v35] 送り手は指導者・選手だけ。書き換えはできない");
+await db.exec(`delete from reports where id = ${rep35}`);
+ok((await db.query("select count(*)::int n from report_comments where player_id = 'p-b1'")).rows[0].n === 0, "[v35] 日報を消すと、コメントも消える");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

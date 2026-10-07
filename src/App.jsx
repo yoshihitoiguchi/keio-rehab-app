@@ -273,7 +273,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.20";
+const APP_BUILD = "v15.21";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -4951,12 +4951,9 @@ function PlayerDetailPanel({
                     <p className="text-sm font-bold text-slate-700">{report.slippingContact ? "あり" : "なし"}</p>
                   </div>
                 )}
-                <div className="col-span-3 bg-slate-50 rounded-lg p-3">
-                  <p className="text-xs text-slate-400 mb-1">本音</p>
-                  <p className="text-sm text-slate-700">{report.honne || "（未記入）"}</p>
-                </div>
               </div>
             )}
+            {report && <ReportThread player={player} viewer="staff" />}
             {report && (
               <ObservationRecord
                 key={report.id}
@@ -7716,6 +7713,8 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
             )}
           </div>
 
+          <ReportThread player={player} viewer="self" />
+
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
             <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
               <TrendingUp size={16} className="text-blue-600" /> これまでの記録
@@ -7805,8 +7804,8 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 //   アプリを閉じていても、端末に通知が届くようにする。端末ごとに本人が許可する必要がある。
 //   通知の文面は短い定型文だけ（選手名・メッセージの本文は出さない）。
 const NOTIFY_EVENTS = {
-  player: "指導者からメッセージが届いたとき、面談が決まったとき・近づいたとき、夜8時に日報がまだのとき",
-  coach: "選手からメッセージ・面談の申し込み・面談の予約・SOS があったとき、面談が近づいたとき",
+  player: "指導者からメッセージ・日報へのコメントが届いたとき、面談が決まったとき・近づいたとき、夜8時に日報がまだのとき",
+  coach: "選手からメッセージ・日報への返信・面談の申し込み・面談の予約・SOS があったとき、面談が近づいたとき",
 };
 function NotifyToggle({ orgId, role, playerId }) {
   const [state, setState] = useState("loading"); // loading | unsupported | denied | on | off
@@ -8697,6 +8696,189 @@ function FaqEditor({ protocol, onSave }) {
       <button onClick={add} disabled={saving || !q.trim() || !a.trim()} className="mt-1.5 px-4 py-2 rounded-lg bg-slate-800 text-white text-xs font-bold disabled:bg-slate-300">
         質問を追加
       </button>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------
+// 日報の「本音」へのコメント・返信（v35）：チャットとは別に、日報1件ごとに残す
+// ------------------------------------------------------------------
+const COMMENT_AUTHOR_KEY = "resprint.commentAuthor"; // この端末で最後に使った立場と名前
+function readCommentAuthor() {
+  try {
+    const v = JSON.parse(localStorage.getItem(COMMENT_AUTHOR_KEY) || "null");
+    return v && typeof v === "object" ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+function ReportThread({ player, viewer }) {
+  const staff = viewer === "staff";
+  const saved = staff ? readCommentAuthor() : {};
+  const [comments, setComments] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [openId, setOpenId] = useState(null); // 入力欄を開いている日報
+  const [showAll, setShowAll] = useState(false);
+  const [text, setText] = useState("");
+  const [role, setRole] = useState(CHAT_STAFF_ROLES.some((o) => o.value === saved.role) ? saved.role : CHAT_STAFF_ROLES[0].value);
+  const [name, setName] = useState(typeof saved.name === "string" ? saved.name : "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    setComments([]);
+    setLoaded(false);
+    setOpenId(null);
+    sbSelect("report_comments", `?player_id=eq.${encodeURIComponent(player.id)}&select=*&order=created_at.asc`)
+      .then((rows) => active && setComments(rows || []))
+      .catch((err) => active && staff && setError(errText(err)))
+      .finally(() => active && setLoaded(true));
+    return () => {
+      active = false;
+    };
+  }, [player.id]);
+
+  const of = (reportId) => comments.filter((c) => String(c.report_id) === String(reportId));
+  const all = player.reports.slice().reverse(); // 新しい順
+  // 指導者：本音かコメントのある日報（最新の日報は必ず）。選手：コメントのある日報だけ
+  const list = all.filter((r, i) => of(r.id).length > 0 || (staff && (i === 0 || (r.honne || "").trim())));
+  const shown = showAll ? list.slice(0, 30) : list.slice(0, 3);
+
+  const send = async (report) => {
+    const body = text.trim();
+    if (!body) return;
+    if (staff && !name.trim()) {
+      setError("名前を入力してください。");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const [row] = await sbInsert("report_comments", {
+        report_id: report.id,
+        player_id: player.id,
+        sender: staff ? "staff" : "player",
+        author_role: staff ? role : null,
+        author_name: staff ? name.trim() : null,
+        body,
+      });
+      setComments((prev) => [...prev, row]);
+      setText("");
+      setOpenId(null);
+      if (staff) {
+        try {
+          localStorage.setItem(COMMENT_AUTHOR_KEY, JSON.stringify({ role, name: name.trim() }));
+        } catch {
+          // 保存できなくても、次回入力し直すだけ
+        }
+      }
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const remove = async (id) => {
+    if (!(await askConfirm("このコメントを削除しますか？", { body: "選手の画面からも消えます。", okLabel: "削除する", danger: true }))) return;
+    try {
+      await sbDelete("report_comments", id);
+      setComments((prev) => prev.filter((c) => c.id !== id));
+    } catch (err) {
+      setError(errText(err));
+    }
+  };
+
+  if (!staff && (!loaded || list.length === 0)) return null;
+  if (staff && list.length === 0) return null;
+
+  return (
+    <div className={staff ? "mt-3" : "bg-white rounded-2xl border border-slate-200 p-5 shadow-sm"}>
+      <p className={`font-bold text-slate-700 mb-2 flex items-center gap-1.5 ${staff ? "text-xs" : "text-sm"}`}>
+        <MessageCircle size={staff ? 14 : 16} className="text-blue-600" /> {staff ? "本音とコメント" : "日報へのコメント"}
+      </p>
+      {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
+      <ul className="space-y-2">
+        {shown.map((r) => (
+          <li key={r.id} className="bg-slate-50 rounded-lg p-3">
+            <p className="text-[11px] font-bold text-slate-500">{r.date}</p>
+            <p className={`text-sm whitespace-pre-wrap leading-relaxed mt-0.5 ${(r.honne || "").trim() ? "text-slate-800" : "text-slate-400"}`}>
+              {(r.honne || "").trim() || "本音の記入なし"}
+            </p>
+            {of(r.id).map((c) => (
+              <div key={c.id} className={`mt-2 rounded-lg px-3 py-2 border ${c.sender === "player" ? "bg-white border-slate-200 ml-6" : "bg-blue-50 border-blue-100 mr-6"}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[11px] text-slate-500">
+                    <span className="font-bold text-slate-700">
+                      {c.sender === "player" ? (staff ? player.name : "自分") : c.author_name || "指導者"}
+                    </span>
+                    {c.sender !== "player" && <span className="ml-1">{CHAT_STAFF_ROLE_LABELS[c.author_role] || "指導者"}</span>}
+                    <span className="ml-1.5">{formatDateTimeJa(c.created_at)}</span>
+                  </p>
+                  {staff && c.sender !== "player" && (
+                    <button onClick={() => remove(c.id)} className="text-slate-300 hover:text-red-500 p-2 -m-2" aria-label="このコメントを削除">
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
+                <p className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed mt-0.5">{c.body}</p>
+              </div>
+            ))}
+            {openId === r.id ? (
+              <div className="mt-2 space-y-2">
+                {staff && (
+                  <div className="flex gap-2">
+                    <select value={role} onChange={(e) => setRole(e.target.value)} aria-label="書く人の立場" className="border border-slate-300 rounded-lg px-2 py-2.5 text-sm bg-white shrink-0">
+                      {CHAT_STAFF_ROLES.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      maxLength={30}
+                      placeholder="名前"
+                      aria-label="書く人の名前"
+                      className="flex-1 min-w-0 border border-slate-300 rounded-lg px-3 py-2.5 text-sm"
+                    />
+                  </div>
+                )}
+                <textarea
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  rows={3}
+                  maxLength={2000}
+                  placeholder={staff ? "コメント" : "返信"}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm bg-white"
+                />
+                <div className="flex gap-2">
+                  <button onClick={() => { setOpenId(null); setError(null); }} className="flex-1 py-2.5 rounded-lg border border-slate-300 bg-white text-sm text-slate-600">
+                    やめる
+                  </button>
+                  <button onClick={() => send(r)} disabled={saving || !text.trim()} className="flex-1 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-bold disabled:bg-slate-300">
+                    {saving ? "送信中..." : "送る"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => { setOpenId(r.id); setText(""); setError(null); }}
+                className="mt-2 min-h-[36px] px-3 rounded-full border border-slate-300 bg-white text-xs font-bold text-slate-600"
+              >
+                {staff ? "コメントする" : "返信する"}
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {!showAll && list.length > 3 && (
+        <button onClick={() => setShowAll(true)} className="mt-2 w-full py-2.5 rounded-lg bg-slate-50 text-xs font-bold text-slate-600">
+          以前の日報を見る
+        </button>
+      )}
     </div>
   );
 }

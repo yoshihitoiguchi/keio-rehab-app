@@ -101,6 +101,10 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/exercises") return exercises.map((e) => ({ ...e, org_id: "default", protocol_id: st.protocolId }));
   if (p === "/rest/v1/exercise_videos") return Object.entries(st.videos || {}).map(([name, video_url]) => ({ name, video_url }));
   if (p === "/rest/v1/rpc/exercise_video_set") { st.videoSets = [...(st.videoSets || []), json]; return true; }
+  if (p === "/rest/v1/report_comments") {
+    if (method === "POST") { const row = { id: 90 + (st.reportComments || []).length, created_at: iso(new Date()), ...json }; st.reportComments = [...(st.reportComments || []), row]; return [row]; }
+    return st.reportComments || [];
+  }
   if (p === "/rest/v1/meeting_notes") {
     if (method === "POST") { const row = { id: 70 + (st.meetingNotes || []).length, created_at: iso(new Date()), ...json }; st.meetingNotes = [row, ...(st.meetingNotes || [])]; return [row]; }
     return st.meetingNotes || [];
@@ -181,7 +185,7 @@ const noOverflow = (p) => p.evaluate(() => document.documentElement.scrollWidth 
 async function step(name, fn) { try { await fn(); } catch (e) { ok(false, `${name}: ${e.message}`); } }
 
 try {
-  browser = await puppeteer.launch({ executablePath: CHROME, headless: true, userDataDir: profile });
+  browser = await puppeteer.launch({ executablePath: CHROME, headless: true, userDataDir: profile, timeout: 180000, protocolTimeout: 180000 });
 
   await step("ログイン画面", async () => {
     const p = await newPage(makeState());
@@ -620,6 +624,52 @@ try {
     ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
   });
 
+  await step("日報の本音へのコメント・返信（v15.21）", async () => {
+    const today = ((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`)(new Date());
+    const st = makeState({ injuryDaysAgo: 3, phase: 5 });
+    st.reports = [{ id: 1, player_id: "p-1", date: today, vas: 2, mental: 3, fatigue: 3, sleep_quality: 7, honne: "正直、走るのが少し怖いです", created_at: iso(new Date()) }];
+    // 指導者：本音にコメントする（立場と名前つき）
+    const c = await newPage(st);
+    await coachLogin(c);
+    let t = await text(c);
+    ok(t.includes("本音とコメント") && t.includes("正直、走るのが少し怖いです"), "指導者の日報に、本音とコメントの欄が出る");
+    await clickText(c, "コメントする"); await sleep(300);
+    await c.type('textarea[placeholder="コメント"]', "怖さがあるのは自然です。");
+    await clickText(c, "送る"); await sleep(400);
+    ok((await text(c)).includes("名前を入力してください") && !(st.reportComments || []).length, "名前がないと送れない");
+    await c.select('select[aria-label="書く人の立場"]', "doctor");
+    await c.type('input[aria-label="書く人の名前"]', "井口");
+    await clickText(c, "送る"); await sleep(800);
+    const rc = st.reportComments?.[0];
+    ok(rc?.report_id === 1 && rc.player_id === "p-1" && rc.sender === "staff" && rc.author_role === "doctor" && rc.author_name === "井口" && rc.body === "怖さがあるのは自然です。", "コメントが、立場と名前つきで日報に残る");
+    t = await text(c);
+    ok(/井口\s*医師/.test(t) && t.includes("怖さがあるのは自然です。") && !st.posts.some((x) => x.p === "/rest/v1/messages"), "誰のコメントかが表示される（チャットには入らない）");
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+    await c.close();
+    // 選手：日報タブで読んで、返信する
+    const p = await newPage(st);
+    await playerLogin(p);
+    await clickText(p, "日報", "nav button"); await sleep(800);
+    t = await text(p);
+    ok(t.includes("日報へのコメント") && /井口\s*医師/.test(t) && t.includes("怖さがあるのは自然です。") && t.includes("正直、走るのが少し怖いです"), "選手は日報タブで、誰からのコメントかと内容を読める");
+    await clickText(p, "返信する"); await sleep(300);
+    await p.type('textarea[placeholder="返信"]', "ありがとうございます。");
+    await clickText(p, "送る"); await sleep(800);
+    const rp = st.reportComments?.[1];
+    ok(rp?.sender === "player" && rp.report_id === 1 && rp.body === "ありがとうございます。" && !rp.author_name && (await text(p)).includes("ありがとうございます。"), "選手は返信できる");
+    ok(!(await p.$('button[aria-label="このコメントを削除"]')), "選手には削除のボタンは出ない");
+    ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
+    await p.close();
+    // コメントのない選手には、カードを出さない
+    const st0 = makeState({ injuryDaysAgo: 3, phase: 5 });
+    st0.reports = st.reports;
+    const p0 = await newPage(st0);
+    await playerLogin(p0);
+    await clickText(p0, "日報", "nav button"); await sleep(800);
+    ok(!(await text(p0)).includes("日報へのコメント"), "コメントがまだない選手には、カードを出さない");
+    await p0.close();
+  });
+
   await step("表記の統一", async () => {
     const bad = /Phase |フェーズ|スタッフ|Supabase|おかえりなさい|🏃|📋|📎|⚠️|v15\./;
     const p = await newPage(makeState({ injuryDaysAgo: 20 }));
@@ -674,7 +724,7 @@ try {
     ok(t.includes("面談未実施") && t.includes("面談がまだ行われていません"), "受傷2週間・面談未実施の選手が、一覧と詳細で分かる");
     ok((await p.$$eval("nav button", (a) => a[0].innerText.replace(/\D/g, ""))) === "1", "対応が必要な人数がタブに出る");
     await clickText(p, "その他", "nav button"); await sleep(1000);
-    ok((await text(p)).includes("選手からメッセージ・面談の申し込み・面談の予約・SOS"), "指導者の「その他」に通知の設定が出る");
+    ok((await text(p)).includes("選手からメッセージ・日報への返信・面談の申し込み・面談の予約・SOS"), "指導者の「その他」に通知の設定が出る");
     await clickText(p, "日程調整", "nav button"); await sleep(900);
     t = await text(p);
     ok(t.includes("2人以上") && (t.match(/公開対象/g) || []).length === 1, "コーチ＋ドクターの2人が一致した日時だけが公開対象（1人だけの日時は対象外）");
