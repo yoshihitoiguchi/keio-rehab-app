@@ -226,6 +226,19 @@ normalizePlayer / normalizeSlot
 v2〜v17 まであり、**v8 は破棄済み**（v8 でしか定義していなかった3カラムが抜けて
 PGRST204 エラーになった経緯がある。v12 で復旧済み）。
 
+### クラウドの Claude から本番DBに反映する（2026-10-25 から）
+
+GitHub Actions の **「本番DBに反映」**（`.github/workflows/db-apply.yml`）を使う。
+手動で起動したときだけ動き、**控えを取る → SQL を流す → 確認の SELECT** を順に行う。結果は実行ページの Summary に出る。
+
+- **作者が「反映して」と指示したときだけ起動する。** 指示なしに流さない。
+- 起動は main から。入力は `file`（例 `supabase_migration_v37_returned_list.sql`）・`branch`（ファイルを読むブランチ。
+  画面より先に DB を変えるときは PR のブランチを指定し、反映を確かめてから PR を合流する）・`check_sql`（任意の SELECT 1文）。
+- 控えの名前は空なら「vNN の前」。
+- 秘密キー `SUPABASE_ACCESS_TOKEN`（Supabase の Access Token）を作者がリポジトリの Secrets に登録している前提。
+- Supabase の Management API（`/v1/projects/{ref}/database/query`）で流すので、`supabase_migrations.schema_migrations` には記録されない。
+  適用状況は下の表に書く。
+
 ### 本番DBへの適用状況（2026-09-27 に読み取りのみで確認）
 
 | ファイル | 状態 | 根拠 |
