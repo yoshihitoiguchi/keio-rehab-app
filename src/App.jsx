@@ -29,6 +29,7 @@ import {
   Youtube,
   Building2,
   Trophy,
+  Undo2,
   Link as LinkIcon,
   FlaskConical,
   Printer,
@@ -644,6 +645,7 @@ function normalizePlayer(row) {
     bookedSlotId: row.booked_slot_id,
     injuryDate: row.injury_date,
     completedAt: row.completed_at,
+    movedToReturnedAt: row.moved_to_returned_at || null,
     imagingFindings: row.imaging_findings || "",
     bamicGrade: row.bamic_grade || null,
     hamstringMuscle: row.hamstring_muscle || null,
@@ -968,8 +970,9 @@ function upcomingMeeting(player, slots) {
       .sort((a, b) => a.datetime.localeCompare(b.datetime))[0] || null
   );
 }
-// 要件④：Phase5完遂から14日以上経過した選手は「復帰者リスト」へ自動的に移動する
+// 復帰者リストに入る選手：指導者が移した選手（v37）と、復帰の記録から14日を過ぎた選手（自動）
 function isGraduatedOut(player) {
+  if (player.movedToReturnedAt) return true;
   if (!player.completedAt) return false;
   return daysSince(player.completedAt) > 14;
 }
@@ -4483,6 +4486,34 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
     );
   };
 
+  // 最後の PHASE まで来た選手を、指導者が選んで復帰者リストへ移す（戻すこともできる）
+  const moveToReturned = async (target) => {
+    const ok = await askConfirm(`${target.name} を復帰者リストへ移しますか？`, { okLabel: "移す" });
+    if (!ok) return;
+    const now = new Date().toISOString();
+    try {
+      await sbUpdate("players", target.id, { moved_to_returned_at: now });
+      setCoachPlayers((prev) => prev.map((p) => (p.id === target.id ? { ...p, movedToReturnedAt: now } : p)));
+      setListView("graduated");
+      setError(null);
+    } catch (err) {
+      setError(errText(err));
+    }
+  };
+
+  const moveBackToActive = async (target) => {
+    const ok = await askConfirm(`${target.name} を現役選手に戻しますか？`, { okLabel: "戻す" });
+    if (!ok) return;
+    try {
+      await sbUpdate("players", target.id, { moved_to_returned_at: null });
+      setCoachPlayers((prev) => prev.map((p) => (p.id === target.id ? { ...p, movedToReturnedAt: null } : p)));
+      setListView("active");
+      setError(null);
+    } catch (err) {
+      setError(errText(err));
+    }
+  };
+
   const resolveSos = async (playerId) => {
     await sbUpdate("players", playerId, { sos: false });
     setCoachPlayers((prev) => prev.map((p) => (p.id === playerId ? { ...p, sos: false } : p)));
@@ -4659,7 +4690,7 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
                         <MessageCircle size={10} /> {unread}
                       </span>
                     )}
-                    {!isCompleted && !reportedToday(p) && (
+                    {listView === "active" && !isCompleted && !reportedToday(p) && (
                       <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border border-slate-300 text-slate-500">
                         日報なし
                       </span>
@@ -4709,6 +4740,8 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
             toggleChecklist={toggleChecklist}
             onDelete={() => deletePlayer(selectedPlayer.id, selectedPlayer.name)}
             onResetPin={() => resetPin(selectedPlayer)}
+            onMoveToReturned={() => moveToReturned(selectedPlayer)}
+            onMoveBackToActive={() => moveBackToActive(selectedPlayer)}
             onSendMessage={(content, role, extra) => sendCoachMessage(selectedPlayer.id, content, role, extra)}
             onSaveZoomUrl={saveZoomUrl}
             onAddTreatments={(types, note, date) => addTreatments(selectedPlayer.id, types, note, date)}
@@ -4755,6 +4788,8 @@ function PlayerDetailPanel({
   onResolveChatStatus,
   onCloseConsultation,
   onResetPin,
+  onMoveToReturned,
+  onMoveBackToActive,
   setCoachPlayers,
 }) {
   const report = latestReport(player);
@@ -4865,6 +4900,22 @@ function PlayerDetailPanel({
             >
               <Printer size={14} /> レポート出力
             </button>
+            {!isGraduatedOut(player) && protocol && player.currentPhase >= phaseCountOf(protocol) && (
+              <button
+                onClick={onMoveToReturned}
+                className="flex items-center gap-1 text-xs text-green-700 border border-green-300 hover:border-green-400 rounded-full px-3 py-2"
+              >
+                <Trophy size={14} /> 復帰者リストへ移す
+              </button>
+            )}
+            {player.movedToReturnedAt && (
+              <button
+                onClick={onMoveBackToActive}
+                className="flex items-center gap-1 text-xs text-slate-600 border border-slate-200 rounded-full px-3 py-2"
+              >
+                <Undo2 size={14} /> 現役選手に戻す
+              </button>
+            )}
             <button
               onClick={onResetPin}
               className="flex items-center gap-1 text-xs text-slate-600 border border-slate-200 rounded-full px-3 py-2"

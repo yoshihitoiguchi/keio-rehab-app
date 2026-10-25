@@ -161,7 +161,7 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `org_login_failures` | 組織ログインの失敗記録（利用者ごと15分に10回、組織ごと15分に100回の制限。1日で消える）（v15） |
 | `resprint_migration_backup` | ③の直前のポリシー・権限・設定の退避と、③を戻した記録（v16。アプリからは読めない） |
 | `app_settings` | 組織ごとの設定（指導者パスワードなど） |
-| `players` | 選手。`pin`（4桁）、`bamic_grade`、`hamstring_muscle`、`hamstring_location` ほか |
+| `players` | 選手。`pin`（4桁）、`bamic_grade`、`hamstring_muscle`、`hamstring_location` ほか。`moved_to_returned_at` は指導者が復帰者リストへ移した日時（v37。null なら従来どおり、復帰の記録から15日目に自動で復帰者リスト） |
 | `protocols` | プロトコル本体。`phases` はJSON配列。**PHASE数は可変**（ハムストリングは10） |
 | `phase_menus` / `exercises` / `exercise_steps` | フェーズ別メニューと種目内ステップ |
 | `offsite_domains` / `offsite_items` / `player_offsite_selections` | オフサイトメニュー（A〜Kの11ドメイン）と選手ごとの選択 |
@@ -238,6 +238,7 @@ PGRST204 エラーになった経緯がある。v12 で復旧済み）。
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
+| v37_returned_list | **未適用（ステージのみ）** | `players.moved_to_returned_at`（指導者が復帰者リストへ移した日時）。列の追加だけ。戻し方はファイルの冒頭 |
 | v35_report_comments | **適用済み（2026-10-07）** | `report_comments`（日報の本音へのコメント・返信。日報1件ごと）と通知のトリガー。表の追加だけ。戻し方はファイルの冒頭 |
 | v34_phase8_gate_rdl_note | **適用済み（2026-10-06）** | データだけ。PHASE 8 の Tantrums の条件を「50回×3set を違和感なく」の1項目に（15秒…の項目は外す）。ウエイト解禁は PHASE 3 の名称から外し、条件の Bilateral RDL の項目に併記。戻すときは控え「v34 の前」から |
 | v33_shared_videos_protocol_fix | **適用済み（2026-10-06）** | `exercise_videos`（種目名ごとの動画。全組織で共通）と `exercise_video_set()`（指導者パスワードをサーバーで確かめて登録）。PHASE 8 の Tantrums の条件を2つに（15秒…／50回×3set）、Mini Hurdle「狭め」→「身長幅」、PHASE 3 の名称に「両脚RDLができたらウエイト解禁」、よくある質問の2件を外す。戻すときは控え「v33 の前」から |

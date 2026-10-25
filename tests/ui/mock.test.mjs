@@ -69,7 +69,7 @@ function makeState({ phase = 5, injuryDaysAgo = 20, booked = false, checks = [],
   };
   st.player = () => ({ id: "p-1", org_id: "default", name: "山田 太郎", pin: "1111", protocol_id: st.protocolId, current_phase: st.phase, checklist: [], sos: false,
     injury_date: st.injury, booked_slot_id: st.slots.find((s) => s.booked_by === "p-1")?.id ?? null,
-    completed_at: st.completedAt || null, reports: st.reports || [], messages: st.messages, treatments: [], phase_history: st.phaseHistory || [], player_exercise_progress: [], report_comments: st.reportComments || [], consultation_requests: st.consult });
+    completed_at: st.completedAt || null, moved_to_returned_at: st.movedAt || null, reports: st.reports || [], messages: st.messages, treatments: [], phase_history: st.phaseHistory || [], player_exercise_progress: [], report_comments: st.reportComments || [], consultation_requests: st.consult });
   return st;
 }
 function respond(st, url, method, body) {
@@ -130,6 +130,7 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/players") {
     if (u.searchParams.get("select") === "pin") return [{ pin: "1111" }];
     if (method === "PATCH" && json?.current_phase) st.phase = json.current_phase;
+    if (method === "PATCH" && json && "moved_to_returned_at" in json) st.movedAt = json.moved_to_returned_at;
     return [st.player()];
   }
   if (method !== "GET") return [Array.isArray(json) ? json[0] : json || {}];
@@ -735,6 +736,28 @@ try {
     await clickText(p, "そろった日時を公開する"); await sleep(900);
     const posted = st.posts.find((x) => x.p === "/rest/v1/slots");
     ok(posted?.b?.length === 1 && posted.b[0].matched_roles.sort().join() === "coach,doctor", "公開されるのは2人以上が一致した枠だけ");
+    ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
+  });
+
+  await step("指導者：最後の PHASE の選手を復帰者リストへ移す", async () => {
+    const st5 = makeState({ phase: 5 });
+    const p5 = await newPage(st5);
+    await coachLogin(p5);
+    ok(!(await text(p5)).includes("復帰者リストへ移す"), "最後の PHASE より前の選手には「復帰者リストへ移す」が出ない");
+    await p5.close();
+    const st = makeState({ phase: 10 });
+    const p = await newPage(st);
+    await coachLogin(p);
+    ok((await text(p)).includes("復帰者リスト (0)"), "移す前は復帰者リストが0名");
+    await clickText(p, "復帰者リストへ移す"); await sleep(400);
+    await clickText(p, "移す", "div[role=dialog] button, .fixed button"); await sleep(800);
+    ok(typeof st.movedAt === "string", "移した日時が保存される");
+    let t = await text(p);
+    ok(t.includes("復帰者リスト (1)") && t.includes("現役選手 (0)") && t.includes("現役選手に戻す"), "復帰者リストに移り、戻すボタンが出る");
+    await clickText(p, "現役選手に戻す"); await sleep(400);
+    await clickText(p, "戻す", "div[role=dialog] button, .fixed button"); await sleep(800);
+    t = await text(p);
+    ok(st.movedAt === null && t.includes("現役選手 (1)") && t.includes("復帰者リストへ移す"), "現役選手に戻せる");
     ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
   });
 

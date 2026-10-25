@@ -702,6 +702,19 @@ ok(!!(await as(U4, `insert into report_comments (report_id, player_id, sender, b
 await db.exec(`delete from reports where id = ${rep35}`);
 ok((await db.query("select count(*)::int n from report_comments where player_id = 'p-b1'")).rows[0].n === 0, "[v35] 日報を消すと、コメントも消える");
 
+// ===== v37：指導者が選手を復帰者リストへ移す =====
+ok(!(await run("supabase_migration_v37_returned_list.sql")), "[v37] 適用 1 回目");
+ok(!(await run("supabase_migration_v37_returned_list.sql")), "[v37] 適用 2 回目（冪等）");
+ok(!(await as(U4, "update players set moved_to_returned_at = now() where id = 'p-b1'")).error
+   && (await db.query("select moved_to_returned_at is not null v from players where id = 'p-b1'")).rows[0].v === true,
+   "[v37] 同じ組織の人は、復帰者リストへ移せる");
+ok(!(await as(U4, "update players set moved_to_returned_at = null where id = 'p-b1'")).error
+   && (await db.query("select moved_to_returned_at is null v from players where id = 'p-b1'")).rows[0].v === true,
+   "[v37] 現役選手に戻せる");
+await as(U1, "update players set moved_to_returned_at = now() where id = 'p-b1'");
+ok((await db.query("select moved_to_returned_at is null v from players where id = 'p-b1'")).rows[0].v === true,
+   "[v37] ほかの組織からは書き換えられない");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");
