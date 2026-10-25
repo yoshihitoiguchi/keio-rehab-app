@@ -273,7 +273,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.22";
+const APP_BUILD = "v15.23";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -643,6 +643,7 @@ function normalizePlayer(row) {
     sos: row.sos,
     bookedSlotId: row.booked_slot_id,
     injuryDate: row.injury_date,
+    reinjuryDate: row.reinjury_date || null,
     completedAt: row.completed_at,
     imagingFindings: row.imaging_findings || "",
     bamicGrade: row.bamic_grade || null,
@@ -952,12 +953,32 @@ function matchedStaffCount(roleSet) {
 }
 // 受傷からこの日数を過ぎても面談をしていない選手に、面談の案内を出す（チームの決まり。症状の入力とは関係しない）
 const MEETING_REMINDER_DAYS = 14;
+// いまの受傷の起点。再受傷を記録していれば、その日から数え直す（面談の目安もここから）
+function episodeStartDate(player) {
+  return player?.reinjuryDate || player?.injuryDate || null;
+}
 function meetingAlertLevel(player, slots) {
-  if (!player.injuryDate || player.completedAt) return null;
-  const held = slots.some((s) => s.bookedBy === player.id && parseDatetime(s.datetime) <= new Date());
+  const start = episodeStartDate(player);
+  if (!start || player.completedAt) return null;
+  const startAt = parseDatetime(`${start} 00:00`);
+  const now = new Date();
+  // 起点より後に行った面談があれば案内は出さない（再受傷の前の面談は数えない）
+  const held = slots.some((s) => {
+    if (s.bookedBy !== player.id) return false;
+    const at = parseDatetime(s.datetime);
+    return at >= startAt && at <= now;
+  });
   if (held) return null;
-  const elapsed = daysSince(player.injuryDate);
+  const elapsed = daysSince(start);
   if (elapsed >= MEETING_REMINDER_DAYS) return "yellow";
+  return null;
+}
+// 面談の日が、受傷（または再受傷）から何日後か
+function meetingDaysLabel(player, datetime) {
+  if (!player) return null;
+  const re = player.reinjuryDate;
+  if (re && parseDatetime(datetime) >= parseDatetime(`${re} 00:00`)) return `再受傷後${diffDaysBetween(re, datetime)}日`;
+  if (player.injuryDate) return `受傷後${diffDaysBetween(player.injuryDate, datetime)}日`;
   return null;
 }
 // これからの面談の予約（あれば、その枠）
@@ -3358,7 +3379,7 @@ function MeetingsBoard({ orgId, slots, setSlots, coachPlayers, setCoachPlayers, 
                     <p className="text-sm text-slate-700 break-words">{player?.name ?? "（選手が見つかりません）"}</p>
                     <p className="text-[11px] text-slate-500">
                       {rolesOf(s) || "参加者未設定"}
-                      {player?.injuryDate ? `・受傷後${diffDaysBetween(player.injuryDate, s.datetime)}日` : ""}
+                      {meetingDaysLabel(player, s.datetime) ? `・${meetingDaysLabel(player, s.datetime)}` : ""}
                     </p>
                   </div>
                   <button
@@ -4831,6 +4852,11 @@ function PlayerDetailPanel({
             {player.injuryDate && (
               <p className="text-xs text-slate-400 mt-1">
                 受傷日：{player.injuryDate}（受傷から{daysSince(player.injuryDate)}日経過）
+                {player.reinjuryDate && (
+                  <span className="text-amber-600">
+                    {" "}・ 再受傷日：{player.reinjuryDate}（{daysSince(player.reinjuryDate)}日経過）
+                  </span>
+                )}
                 {avg && (
                   <span className="text-blue-500"> ・ 過去{avg.sampleSize}人の平均完遂日数：{avg.avgDays}日</span>
                 )}
@@ -5012,6 +5038,8 @@ function PlayerDetailPanel({
 
         {dtab === "record" && (
           <>
+          <ReinjuryCard player={player} protocol={protocol} setCoachPlayers={setCoachPlayers} />
+
           <MeetingNotes player={player} viewer="staff" />
 
           <StaffNotes player={player} />
@@ -5039,8 +5067,15 @@ function PlayerDetailPanel({
             <ul className="space-y-2">
               {myMeetings.map((s) => {
                 const held = parseDatetime(s.datetime) <= new Date();
-                const daysAfter = player.injuryDate ? diffDaysBetween(player.injuryDate, s.datetime) : null;
-                return <MeetingRow key={s.id} slot={s} held={held} daysAfter={daysAfter} onSaveZoomUrl={onSaveZoomUrl} />;
+                return (
+                  <MeetingRow
+                    key={s.id}
+                    slot={s}
+                    held={held}
+                    daysLabel={meetingDaysLabel(player, s.datetime)}
+                    onSaveZoomUrl={onSaveZoomUrl}
+                  />
+                );
               })}
             </ul>
           </div>
@@ -5297,14 +5332,17 @@ function TodayCard({ player, onReport, onMenu }) {
 function MeetingReminder({ player, slots, viewer, hasOpenSlots, onGoBooking, onGoRequest }) {
   if (meetingAlertLevel(player, slots) !== "yellow") return null;
   const upcoming = upcomingMeeting(player, slots);
-  const days = daysSince(player.injuryDate);
+  const days = daysSince(episodeStartDate(player));
+  const since = player.reinjuryDate ? "再受傷から" : "受傷から";
   if (upcoming) {
     return (
       <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4 flex items-start gap-2">
         <CalendarClock size={18} className="text-blue-600 shrink-0 mt-0.5" />
         <p className="text-sm text-blue-800">
           <span className="font-bold">面談の予定：{upcoming.datetime}</span>
-          <span className="block text-xs text-blue-700 mt-0.5">受傷から{days}日。初回の面談はこの日時に行います。</span>
+          <span className="block text-xs text-blue-700 mt-0.5">
+            {since}{days}日。{player.reinjuryDate ? "再受傷後" : "初回"}の面談はこの日時に行います。
+          </span>
         </p>
       </div>
     );
@@ -5316,7 +5354,7 @@ function MeetingReminder({ player, slots, viewer, hasOpenSlots, onGoBooking, onG
         {viewer === "self" ? "面談をしましょう" : "面談がまだ行われていません"}
       </p>
       <p className="text-xs text-yellow-900/80 mt-1 leading-relaxed">
-        受傷から{days}日がたちました。チームでは、受傷から{MEETING_REMINDER_DAYS}日を目安に、
+        {since}{days}日がたちました。チームでは、{since}{MEETING_REMINDER_DAYS}日を目安に、
         {viewer === "self" ? "指導者との面談を行うことにしています。" : "選手との面談を行うことにしています。日程調整で枠を公開するか、チャットで日時を相談してください。"}
       </p>
       {viewer === "self" && (
@@ -5987,7 +6025,7 @@ function PrintSummary({ player, protocol, phaseInfo, avg, myMeetings }) {
   );
 }
 
-function MeetingRow({ slot, held, daysAfter, onSaveZoomUrl }) {
+function MeetingRow({ slot, held, daysLabel, onSaveZoomUrl }) {
   const [zoomUrl, setZoomUrl] = useState(slot.zoomUrl || "");
   const [saving, setSaving] = useState(false);
 
@@ -6005,7 +6043,7 @@ function MeetingRow({ slot, held, daysAfter, onSaveZoomUrl }) {
       <div className="flex items-center justify-between">
         <span className="text-slate-600">{slot.datetime}</span>
         <span className="flex items-center gap-2">
-          {daysAfter !== null && <span className="text-slate-400">受傷後{daysAfter}日</span>}
+          {daysLabel && <span className="text-slate-400">{daysLabel}</span>}
           <span className={`font-bold ${held ? "text-green-600" : "text-blue-500"}`}>
             {held ? "実施済み" : "予定"}
           </span>
@@ -6871,6 +6909,11 @@ function InjuryDateCard({ orgId, player, protocol, setMyPlayer }) {
         </button>
       </div>
       {elapsed !== null && <p className="text-xs text-slate-500">受傷から {elapsed} 日経過しています。</p>}
+      {player.reinjuryDate && (
+        <p className="text-xs text-amber-700 mt-1">
+          再受傷日：{player.reinjuryDate}（再受傷から {daysSince(player.reinjuryDate)} 日）
+        </p>
+      )}
       {avg && avg.sample_size > 0 ? (
         <p className="text-xs text-blue-600 mt-2 flex items-start gap-1">
           <TrendingUp size={14} className="shrink-0 mt-0.5" />
@@ -7111,8 +7154,9 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
   const continueRule = activeContinueRule(protocol, player.currentPhase);
   const remainingWeeks = weeksRemaining(protocol, player.currentPhase);
   const progressPct = ((player.currentPhase - 1) / phaseCountOf(protocol)) * 100;
-  const bookedSlot = slots.find((s) => s.id === player.bookedSlotId);
-  const availableSlots = slots.filter((s) => !s.bookedBy);
+  // 予約済みとして出すのは「これからの面談」だけ。日が過ぎたら、また別の日の枠を選べる
+  const bookedSlot = upcomingMeeting(player, slots);
+  const availableSlots = slots.filter((s) => !s.bookedBy && parseDatetime(s.datetime) > new Date());
   const embedUrl = getYouTubeEmbedUrl(protocol?.videoUrl);
 
   useEffect(() => {
@@ -8195,6 +8239,240 @@ function BroadcastBox({ players, setCoachPlayers }) {
 }
 
 // 指導者どうしの申し送りメモ（選手の画面には出さない）
+// 再受傷の記録（指導者）。同じ選手のカルテ（日報・チャット・治療の記録など）はそのまま残し、
+// 指定した PHASE から伴走し直す。復帰を記録したあとでも、復帰の途中でも使える。
+// 面談の目安（14日）は再受傷日から数え直す（episodeStartDate）。
+function ReinjuryCard({ player, protocol, setCoachPlayers }) {
+  const [history, setHistory] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [date, setDate] = useState(todayStr());
+  const [phase, setPhase] = useState(1);
+  const [note, setNote] = useState("");
+  const [role, setRole] = useState(CHAT_STAFF_ROLES[0].value);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    setHistory([]);
+    setOpen(false);
+    setError(null);
+    sbSelect("player_reinjuries", `?player_id=eq.${encodeURIComponent(player.id)}&select=*&order=reinjured_on.desc,id.desc`)
+      .then((rows) => active && setHistory(rows || []))
+      .catch(() => {}); // 表がまだない（v36 の前）ときは、記録の一覧を出さないだけ
+    return () => {
+      active = false;
+    };
+  }, [player.id]);
+
+  const startForm = () => {
+    setDate(todayStr());
+    setPhase(1);
+    setNote("");
+    setError(null);
+    setOpen(true);
+  };
+
+  const save = async () => {
+    if (!date) return;
+    if (date > todayStr()) {
+      setError("今日より後の日付は選べません。");
+      return;
+    }
+    const sure = await askConfirm(`${player.name}の再受傷を記録しますか？`, {
+      body: `再受傷日：${date}\nPHASE ${phase} から再開します。これまでの記録はそのまま残ります。`,
+      okLabel: "記録する",
+    });
+    if (!sure) return;
+    setSaving(true);
+    setError(null);
+    const now = new Date().toISOString();
+    const count = protocol?.phases?.[phase - 1]?.conditions?.length ?? 0;
+    const checklist = Array(count).fill(false);
+    try {
+      // 1. 再受傷の記録（以前の PHASE と復帰日も残す）
+      const [row] = await sbInsert("player_reinjuries", {
+        player_id: player.id,
+        reinjured_on: date,
+        phase_before: player.currentPhase,
+        completed_before: player.completedAt || null,
+        restart_phase: phase,
+        note: note.trim() || null,
+      });
+      // 2. 選手を指定の PHASE に戻し、復帰の記録を外して現役に戻す
+      await sbUpdate("players", player.id, {
+        reinjury_date: date,
+        completed_at: null,
+        current_phase: phase,
+        checklist,
+      });
+      // 復帰者リストへ移した印（v37 の列）があれば外す。列がまだない DB では何もしない
+      try {
+        await sbUpdate("players", player.id, { moved_to_returned_at: null });
+      } catch {
+        // v37 の前は列がないので無視する
+      }
+      // 3. PHASE の滞在履歴：いまの PHASE を閉じて、再開する PHASE を始める
+      const leftAt = player.completedAt || now;
+      await sb(`phase_history?player_id=eq.${encodeURIComponent(player.id)}&left_at=is.null`, {
+        method: "PATCH",
+        body: JSON.stringify({ left_at: leftAt }),
+        prefer: "return=minimal",
+      });
+      const [hist] = await sbInsert("phase_history", {
+        player_id: player.id,
+        protocol_id: player.protocolId,
+        phase_number: phase,
+        entered_at: now,
+      });
+      // 4. 選手に知らせる（チャットに残り、通知も届く）
+      let msg = null;
+      try {
+        [msg] = await sbInsert("messages", {
+          player_id: player.id,
+          sender: "staff",
+          staff_role: role,
+          content: `【再受傷の記録】再受傷日 ${date}。PHASE ${phase} からもう一度一緒に進めます。面談の日程もあらためて決めましょう。`,
+        });
+      } catch {
+        // 知らせられなくても、記録そのものは終わっている
+      }
+      setCoachPlayers((prev) =>
+        prev.map((p) =>
+          p.id === player.id
+            ? {
+                ...p,
+                reinjuryDate: date,
+                completedAt: null,
+                movedToReturnedAt: null,
+                currentPhase: phase,
+                checklist,
+                phaseHistory: [
+                  ...p.phaseHistory.map((h) => (h.leftAt ? h : { ...h, leftAt })),
+                  ...(hist ? [normalizePhaseHistoryEntry(hist)] : []),
+                ],
+                messages: msg ? [...p.messages, normalizeMessage(msg)] : p.messages,
+              }
+            : p
+        )
+      );
+      if (row) setHistory((prev) => [row, ...prev]);
+      setOpen(false);
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-5">
+      <div className="flex items-center justify-between gap-2">
+        <h4 className="text-sm font-bold text-slate-700 flex items-center gap-1.5">
+          <Repeat size={16} className="text-blue-600" /> 再受傷
+        </h4>
+        {!open && (
+          <button
+            onClick={startForm}
+            className="text-xs font-bold text-blue-600 border border-blue-200 rounded-full px-3 py-1.5"
+          >
+            再受傷を記録する
+          </button>
+        )}
+      </div>
+
+      {open && (
+        <div className="mt-3 space-y-3">
+          <label className="block">
+            <span className="text-xs font-bold text-slate-600">再受傷日</span>
+            <input
+              type="date"
+              value={date}
+              max={todayStr()}
+              aria-label="再受傷日"
+              onChange={(e) => setDate(e.target.value)}
+              className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs font-bold text-slate-600">再開する PHASE</span>
+            <select
+              value={phase}
+              aria-label="再開する PHASE"
+              onChange={(e) => setPhase(Number(e.target.value))}
+              className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
+            >
+              {phaseRange(protocol).map((n) => (
+                <option key={n} value={n}>
+                  PHASE {n}
+                  {protocol?.phases?.[n - 1]?.title ? `：${protocol.phases[n - 1].title}` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-xs font-bold text-slate-600">メモ</span>
+            <textarea
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              rows={2}
+              placeholder="受傷の状況など"
+              className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+            />
+          </label>
+          <div className="flex gap-2">
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              aria-label="記録する人の立場"
+              className="border border-slate-300 rounded-lg px-2 py-2.5 text-sm bg-white shrink-0"
+            >
+              {CHAT_STAFF_ROLES.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => setOpen(false)}
+              disabled={saving}
+              className="ml-auto px-4 py-2.5 rounded-lg border border-slate-200 text-sm text-slate-600"
+            >
+              やめる
+            </button>
+            <button
+              onClick={save}
+              disabled={saving || !date}
+              className="px-4 py-2.5 rounded-lg bg-slate-800 text-white text-sm font-bold disabled:bg-slate-300"
+            >
+              {saving ? "記録中..." : "記録する"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {error && <p className="text-xs text-red-500 mt-2">{error}</p>}
+
+      {history.length > 0 && (
+        <ul className="mt-3 space-y-2">
+          {history.map((h) => (
+            <li key={h.id} className="bg-slate-50 rounded-lg px-3 py-2 text-xs text-slate-600">
+              <span className="font-bold text-slate-800">{h.reinjured_on}</span>
+              {h.completed_before
+                ? `・復帰後（${new Date(h.completed_before).toLocaleDateString("ja-JP")} 復帰）`
+                : h.phase_before
+                ? `・PHASE ${h.phase_before} で`
+                : ""}
+              {h.restart_phase ? ` → PHASE ${h.restart_phase} から再開` : ""}
+              {h.note && <span className="block text-slate-500 whitespace-pre-wrap mt-0.5">{h.note}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function StaffNotes({ player }) {
   const [notes, setNotes] = useState([]);
   const [text, setText] = useState("");

@@ -69,6 +69,7 @@ function makeState({ phase = 5, injuryDaysAgo = 20, booked = false, checks = [],
   };
   st.player = () => ({ id: "p-1", org_id: "default", name: "山田 太郎", pin: "1111", protocol_id: st.protocolId, current_phase: st.phase, checklist: [], sos: false,
     injury_date: st.injury, booked_slot_id: st.slots.find((s) => s.booked_by === "p-1")?.id ?? null,
+    reinjury_date: st.reinjury || null,
     completed_at: st.completedAt || null, reports: st.reports || [], messages: st.messages, treatments: [], phase_history: st.phaseHistory || [], player_exercise_progress: [], report_comments: st.reportComments || [], consultation_requests: st.consult });
   return st;
 }
@@ -109,6 +110,10 @@ function respond(st, url, method, body) {
     if (method === "POST") { const row = { id: 70 + (st.meetingNotes || []).length, created_at: iso(new Date()), ...json }; st.meetingNotes = [row, ...(st.meetingNotes || [])]; return [row]; }
     return st.meetingNotes || [];
   }
+  if (p === "/rest/v1/player_reinjuries") {
+    if (method === "POST") { const row = { id: 40 + (st.reinjuries || []).length, created_at: iso(new Date()), ...json }; st.reinjuries = [row, ...(st.reinjuries || [])]; return [row]; }
+    return st.reinjuries || [];
+  }
   if (p === "/rest/v1/exercise_steps") return steps;
   if (p === "/rest/v1/gate_item_checks" && method === "GET") return st.checks;
   if (p === "/rest/v1/app_settings") {
@@ -130,6 +135,8 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/players") {
     if (u.searchParams.get("select") === "pin") return [{ pin: "1111" }];
     if (method === "PATCH" && json?.current_phase) st.phase = json.current_phase;
+    if (method === "PATCH" && json && "completed_at" in json) st.completedAt = json.completed_at;
+    if (method === "PATCH" && json?.reinjury_date) st.reinjury = json.reinjury_date;
     return [st.player()];
   }
   if (method !== "GET") return [Array.isArray(json) ? json[0] : json || {}];
@@ -762,6 +769,67 @@ try {
     await clickText(p, "公開をやめる", '[role="dialog"] button'); await sleep(800);
     ok((await text(p)).includes("公開中の枠（まだ予約なし）0件"), "予約のない枠は、公開をやめられる");
     ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
+  });
+  await step("選手：面談の日が過ぎたら、別の日の面談を取り直せる", async () => {
+    const st = makeState({ injuryDaysAgo: 30 });
+    // 以前に予約して、もう日が過ぎた面談（players.booked_slot_id もこの枠を指したまま）
+    st.slots.unshift({ id: "slot-0", org_id: "default", datetime: `${dayStr(-5)} 18:00`, booked_by: "p-1", matched_roles: ["coach", "doctor"], zoom_url: null });
+    // 日が過ぎた空き枠（選べないこと）
+    st.slots.push({ id: "slot-old", org_id: "default", datetime: `${dayStr(-1)} 09:00`, booked_by: null, matched_roles: ["coach", "doctor"], zoom_url: null });
+    const p = await newPage(st);
+    await playerLogin(p);
+    let t = await text(p);
+    ok(!t.includes(`予約済み：${dayStr(-5)}`) && t.includes("この枠で予約"), "面談の日が過ぎたら「予約済み」のままにならず、別の枠を選べる");
+    ok(!t.includes(`${dayStr(-1)} 09:00`) && (await p.$$eval("button", (a) => a.filter((n) => n.innerText.includes("この枠で予約")).length)) === 1, "日が過ぎた空き枠は出ない");
+    ok(!t.includes("面談をしましょう"), "受傷後に面談をしていれば、面談の案内は出ない");
+    await clickText(p, "この枠で予約"); await sleep(1000);
+    t = await text(p);
+    ok(st.patches.some((x) => x.p === "/rest/v1/slots" && x.q.includes("slot-1") && x.b.booked_by === "p-1") && t.includes(`予約済み：${dayStr(3)} 18:00`), "2回目の面談を予約できる");
+    ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
+  });
+
+  await step("再受傷：同じカルテで伴走し直し、面談の目安を再受傷日から数え直す", async () => {
+    const st = makeState({ injuryDaysAgo: 60, phase: 10 });
+    st.completedAt = iso(new Date(now.getTime() - 3 * 86400000));
+    st.slots.unshift({ id: "slot-0", org_id: "default", datetime: `${dayStr(-40)} 18:00`, booked_by: "p-1", matched_roles: ["coach", "doctor"], zoom_url: null });
+    const c = await newPage(st);
+    await coachLogin(c);
+    const inDetail = async (label) => { for (const e of await c.$$("button")) { const tt = await e.evaluate((x) => x.innerText.trim()); const inNav = await e.evaluate((x) => !!x.closest("nav")); if (tt === label && !inNav) { await e.evaluate((n) => n.scrollIntoView({ block: "center" })); await e.click(); return; } } throw new Error("no " + label); };
+    ok(!(await text(c)).includes("面談がまだ行われていません"), "復帰を記録した選手には、面談の案内は出ない");
+    await inDetail("記録"); await sleep(800);
+    await clickText(c, "再受傷を記録する"); await sleep(300);
+    await c.evaluate((v) => {
+      const i = document.querySelector('input[aria-label="再受傷日"]');
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(i, v);
+      i.dispatchEvent(new Event("input", { bubbles: true }));
+    }, dayStr(-15));
+    await c.select('select[aria-label="再開する PHASE"]', "3");
+    await c.type('textarea[placeholder="受傷の状況など"]', "流しの最中に再受傷");
+    for (const e of await c.$$("button")) if ((await e.evaluate((n) => n.innerText.trim())) === "記録する") { await e.click(); break; }
+    await sleep(400);
+    ok((await text(c)).includes("再受傷を記録しますか？"), "記録の前に確認が出る");
+    await clickText(c, "記録する", '[role="dialog"] button'); await sleep(1500);
+    const rec = st.posts.find((x) => x.p === "/rest/v1/player_reinjuries")?.b;
+    ok(rec?.reinjured_on === dayStr(-15) && rec.phase_before === 10 && rec.restart_phase === 3 && !!rec.completed_before && rec.note === "流しの最中に再受傷", "再受傷の記録に、再受傷日・以前の PHASE・復帰日・再開する PHASE が残る");
+    const pp = st.patches.find((x) => x.p === "/rest/v1/players" && x.b.reinjury_date)?.b;
+    ok(pp?.reinjury_date === dayStr(-15) && pp.completed_at === null && pp.current_phase === 3 && pp.checklist?.length === 2, "選手は PHASE 3 に戻り、復帰の記録が外れる（選手は同じまま）");
+    ok(st.patches.some((x) => x.p === "/rest/v1/players" && x.b && "moved_to_returned_at" in x.b && x.b.moved_to_returned_at === null), "復帰者リストへ移した印も外す");
+    ok(st.posts.some((x) => x.p === "/rest/v1/phase_history" && x.b.phase_number === 3), "PHASE の履歴に、再開した PHASE が加わる");
+    ok(st.posts.some((x) => x.p === "/rest/v1/messages" && x.b.sender === "staff" && x.b.content.startsWith("【再受傷の記録】")), "選手にチャット（と通知）で知らされる");
+    let t = await text(c);
+    ok(t.includes(`再受傷日：${dayStr(-15)}`) && t.includes("PHASE 3 から再開") && t.includes("PHASE 3/10"), "詳細に再受傷日と記録が出る");
+    ok(t.includes("受傷後20日"), "面談履歴は、再受傷の前の面談を「受傷後」で表示する");
+    await inDetail("日報"); await sleep(500);
+    t = await text(c);
+    ok(t.includes("面談がまだ行われていません") && t.includes("再受傷から15日"), "再受傷から2週間たって面談がまだなら、面談の案内がまた出る（再受傷の前の面談は数えない）");
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+
+    // 選手の画面：再受傷日から数えた面談の案内と、枠の予約
+    const p = await newPage(st);
+    await playerLogin(p);
+    t = await text(p);
+    ok(t.includes("面談をしましょう") && t.includes("再受傷から15日") && t.includes("この枠で予約"), "選手にも、再受傷日から数えた面談の案内が出て、枠を選べる");
+    ok(p.errs.length === 0, "例外なし " + p.errs.join("|"));
   });
 } finally {
   try { await browser?.close(); } catch {}
