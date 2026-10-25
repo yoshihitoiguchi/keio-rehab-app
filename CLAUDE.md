@@ -165,6 +165,7 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `protocols` | プロトコル本体。`phases` はJSON配列。**PHASE数は可変**（ハムストリングは10） |
 | `phase_menus` / `exercises` / `exercise_steps` | フェーズ別メニューと種目内ステップ |
 | `offsite_domains` / `offsite_items` / `player_offsite_selections` | オフサイトメニュー（A〜Kの11ドメイン）と選手ごとの選択 |
+| `player_offsite_custom_items` | 共通リストにない患部外トレーニングを選手ごとに足したもの（種目名・荷重・回数メモ）。v38。表がない DB では「個別に追加」を出さない |
 | `reports` | 日報。VAS・メンタル・疲労・睡眠・恐怖心・抜ける接地・RPE ほか |
 | `gate_item_checks` | GATE項目のチェック記録 |
 | `phase_history` / `phase_advances` | フェーズ遷移の履歴 |

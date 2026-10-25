@@ -702,6 +702,23 @@ ok(!!(await as(U4, `insert into report_comments (report_id, player_id, sender, b
 await db.exec(`delete from reports where id = ${rep35}`);
 ok((await db.query("select count(*)::int n from report_comments where player_id = 'p-b1'")).rows[0].n === 0, "[v35] 日報を消すと、コメントも消える");
 
+// ===== v38：患部外トレーニングを選手ごとに個別に追加 =====
+ok(!(await run("supabase_migration_v38_offsite_custom_items.sql")), "[v38] 適用 1 回目");
+ok(!(await run("supabase_migration_v38_offsite_custom_items.sql")), "[v38] 適用 2 回目（冪等）");
+const c38 = (await as(U4, "insert into player_offsite_custom_items (player_id, name, load_type, note) values ('p-b1', 'チューブ外旋', 'unloaded', '15回×3set') returning id")).rows?.[0]?.id;
+ok(!!c38 && (await as(U6, "select name from player_offsite_custom_items where player_id = 'p-b1'")).rows?.[0]?.name === "チューブ外旋",
+   "[v38] 同じ組織の人は、選手ごとに種目を足せる・読める");
+ok((await as(U4, `update player_offsite_custom_items set note = '20回×3set' where id = ${c38} returning note`)).rows?.[0]?.note === "20回×3set",
+   "[v38] 回数・メモを書き直せる");
+ok((await as(U1, "select id from player_offsite_custom_items")).rows?.length === 0
+   && !!(await as(U1, "insert into player_offsite_custom_items (player_id, name) values ('p-b1', 'x')")).error
+   && !!(await as(null, "select * from player_offsite_custom_items")).error, "[v38] ほかの組織・匿名キーからは読めない・書けない");
+ok(!!(await as(U4, "insert into player_offsite_custom_items (player_id, name) values ('p-b1', '  ')")).error
+   && !!(await as(U4, "insert into player_offsite_custom_items (player_id, name, load_type) values ('p-b1', 'x', 'heavy')")).error,
+   "[v38] 空の名前・決まっていない荷重は入らない");
+ok(!(await as(U4, `delete from player_offsite_custom_items where id = ${c38}`)).error
+   && (await db.query("select count(*)::int n from player_offsite_custom_items")).rows[0].n === 0, "[v38] 消せる");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");
