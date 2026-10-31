@@ -107,6 +107,7 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/player_directory") return [{ id: "p-1", name: "山田 太郎" }];
   if (p === "/rest/v1/exercises") return exercises.map((e) => ({ ...e, org_id: "default", protocol_id: st.protocolId }));
   if (p === "/rest/v1/exercise_videos") return Object.entries(st.videos || {}).map(([name, video_url]) => ({ name, video_url }));
+  if (p === "/rest/v1/rpc/same_injury_remaining_days") { st.remainArgs = json; return st.remaining === undefined ? { __status: 404 } : st.remaining; }
   if (p === "/rest/v1/rpc/same_injury_return_days") { st.returnArgs = json; return st.returnDays === undefined ? { __status: 404 } : st.returnDays; }
   if (p === "/rest/v1/rpc/same_injury_phase_compare") { st.compareArgs = json; return st.compare === undefined ? { __status: 404 } : st.compare; }
   if (p === "/rest/v1/rpc/exercise_video_set") { st.videoSets = [...(st.videoSets || []), json]; return true; }
@@ -1063,6 +1064,29 @@ try {
     await playerLogin(p2);
     await clickText(p2, "その他", "nav button"); await sleep(800);
     ok((await text(p2)).includes("同じ受傷の選手の記録は、まだありません。") && p2.errs.length === 0, "同じ受傷の記録がなければ、ないと出る");
+    ok(p.errs.length === 0, "例外なし " + p.errs.join("|"));
+  });
+
+  await step("全体復帰まであと：同じ受傷の選手の、いまの PHASE から PHASE 10 までの日数（v43）", async () => {
+    const st = makeState({ phase: 3, injuryDaysAgo: 10 });
+    st.phaseHistory = [{ id: 1, player_id: "p-1", protocol_id: "hs", phase_number: 3, entered_at: iso(new Date(now.getTime() - 4 * 86400000)), left_at: null }];
+    st.remaining = [{ phase_number: 3, sample_size: 2, avg_days: "24.0", min_days: 20, max_days: 28 }];
+    const p = await newPage(st);
+    await playerLogin(p);
+    await sleep(800);
+    let t = await text(p);
+    ok(st.remainArgs?.p_player_id === "p-1", "自分の選手IDで読み込む");
+    ok(t.includes("全体復帰（PHASE 10）まであと約 20 日") && t.includes("2人は、PHASE 3 から PHASE 10 まで平均 24日（20〜28日）"),
+       "平均日数から、いまの PHASE にいる日数を引いた日数と、根拠（人数・平均・範囲）が出る");
+    ok(!t.includes("週間") || t.includes("約3週間"), "プロトコルの週数を割った数字は出さない");
+    for (const [label, rem] of [["記録なし", []], ["DB 更新前", undefined]]) {
+      const s2 = makeState({ phase: 3 }); s2.remaining = rem;
+      const p2 = await newPage(s2);
+      await playerLogin(p2);
+      await sleep(800);
+      const t2 = await text(p2);
+      ok(t2.includes("同じ受傷の選手の記録がまだないため、PHASE 10 までの目安は出せません。") && !t2.includes("全体復帰まであと") && p2.errs.length === 0, `${label}は数字を出さない`);
+    }
     ok(p.errs.length === 0, "例外なし " + p.errs.join("|"));
   });
 

@@ -277,7 +277,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.31";
+const APP_BUILD = "v15.32";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -967,12 +967,6 @@ function phaseCountOf(protocol) {
 }
 function phaseRange(protocol) {
   return Array.from({ length: phaseCountOf(protocol) }, (_, i) => i + 1);
-}
-function weeksRemaining(protocol, currentPhase) {
-  if (!protocol) return 0;
-  const n = phaseCountOf(protocol);
-  const perPhase = protocol.totalWeeks / n;
-  return Math.max(0, Math.round(perPhase * (n - currentPhase + 1)));
 }
 function daysSince(dateStr) {
   if (!dateStr) return null;
@@ -7380,6 +7374,59 @@ function SameInjuryPhaseComparison({ player, protocol }) {
   );
 }
 
+// 「全体復帰まであと」（v15.32〜。作者の指示）：同じ受傷（プロトコル・BAMIC分類・損傷筋・部位が一致）のほかの選手が、
+//   いまの PHASE に入ってから最後の PHASE に入るまでにかかった日数の平均から、いまの PHASE にいる日数を引く（DB の same_injury_remaining_days）。
+//   同じ受傷の記録がなければ数字は出さない（プロトコルの週数を割った数字は使わない）。
+function RemainingToReturn({ player, protocol }) {
+  const [stat, setStat] = useState(undefined); // undefined＝読み込み中、null＝記録なし
+  const last = phaseCountOf(protocol);
+  const atLast = player.currentPhase >= last;
+  useEffect(() => {
+    let active = true;
+    setStat(undefined);
+    if (!protocol || atLast) return;
+    sbRpc("same_injury_remaining_days", { p_player_id: player.id })
+      .then((rows) => {
+        const r = Array.isArray(rows) ? rows[0] : rows;
+        if (active) setStat(r && r.sample_size > 0 && r.phase_number === player.currentPhase ? r : null);
+      })
+      .catch(() => {
+        if (active) setStat(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [player.id, player.currentPhase, protocol?.id, atLast, player.bamicGrade, player.hamstringMuscle, player.hamstringLocation]);
+
+  if (atLast) return <p className="text-2xl font-extrabold text-slate-800 mb-1">PHASE {last} に到達しています</p>;
+  if (stat === undefined) return <p className="text-sm text-slate-400 mb-1">読み込み中...</p>;
+  if (!stat) {
+    return (
+      <p className="text-sm text-slate-500 mb-1">
+        同じ受傷の選手の記録がまだないため、PHASE {last} までの目安は出せません。
+      </p>
+    );
+  }
+  // いまの PHASE に入ってからの日数（いちばん新しい滞在）
+  const stay = latestStaysByPhase(player.phaseHistory)[player.currentPhase];
+  const inPhase = stay ? Math.max(0, dayDiff(toLocalDate(new Date(stay.enteredAt)), new Date())) : 0;
+  const avg = Number(stat.avg_days);
+  const rest = Math.max(0, Math.round(avg - inPhase));
+  return (
+    <>
+      <p className="text-2xl font-extrabold text-slate-800 mb-1">
+        全体復帰（PHASE {last}）まであと約 {rest} 日
+        {rest >= 14 && <span className="text-sm font-bold text-slate-500 ml-1">（約{Math.round(rest / 7)}週間）</span>}
+      </p>
+      <p className="text-[11px] text-slate-500 mb-1">
+        同じ受傷{classificationLabel(player) ? `（${classificationLabel(player)}）` : ""}の{stat.sample_size}人は、PHASE{" "}
+        {player.currentPhase} から PHASE {last} まで平均 {avg}日（{stat.min_days}〜{stat.max_days}日）
+        {stat.sample_size < 3 ? "・件数が少ないため参考値" : ""}
+      </p>
+    </>
+  );
+}
+
 function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, setSlots, phaseMenus, onLogout }) {
   // 画面下のタブ：'home' | 'menu' | 'report' | 'chat' | 'guide' | 'more'
   // 更新などで読み込み直しても同じタブに戻れるよう、このタブの間だけ覚えておく
@@ -7503,7 +7550,6 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
   const phaseInfo = protocol?.phases[player.currentPhase - 1];
   const continueRule = activeContinueRule(protocol, player.currentPhase);
-  const remainingWeeks = weeksRemaining(protocol, player.currentPhase);
   const progressPct = ((player.currentPhase - 1) / phaseCountOf(protocol)) * 100;
   // 予約済みとして出すのは「これからの面談」だけ。日が過ぎたら、また別の日の枠を選べる
   const bookedSlot = upcomingMeeting(player, slots);
@@ -7732,7 +7778,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
             <p className="text-sm font-bold text-slate-700 mb-2">復帰ロードマップ</p>
-            <p className="text-2xl font-extrabold text-slate-800 mb-1">全体復帰まであと {remainingWeeks} 週間</p>
+            <RemainingToReturn player={player} protocol={protocol} />
             <p className="text-xs text-slate-400 mb-3">{protocol?.name}</p>
 
             <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden flex">

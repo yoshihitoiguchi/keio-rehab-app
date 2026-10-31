@@ -870,6 +870,39 @@ ok((await as(U1, "select * from public.same_injury_return_days('p41-me')")).rows
    && !!(await as(null, "select * from public.same_injury_return_days('p41-me')")).error, "[v41] ほかの組織からは0件・匿名キーでは呼べない");
 await db.exec("delete from players where id like 'p41-%'");
 
+// ===== v43：全体復帰まであと＝同じ受傷の選手が、いまの PHASE から最後の PHASE までにかかった日数 =====
+await db.exec("alter table players add column if not exists current_phase int");
+const nph43 = (await db.query("select jsonb_array_length(phases::jsonb) n from protocols where id = 'comm-b-proto-hamstring-10'")).rows[0].n;
+await db.exec(`insert into players (id, org_id, name, pin, protocol_id, current_phase, bamic_grade, hamstring_muscle, hamstring_location, injury_date) values
+    ('p43-me',   'comm-b', '本人',   '0000', 'comm-b-proto-hamstring-10', 3, '1b', 'biceps_femoris', 'mid_distal', '2026-10-01'),
+    ('p43-a',    'comm-b', '先輩A',  '0000', 'comm-b-proto-hamstring-10', ${nph43}, '1b', 'biceps_femoris', 'mid_distal', '2026-09-01'),
+    ('p43-b',    'comm-b', '先輩B',  '0000', 'comm-b-proto-hamstring-10', ${nph43}, '1b', 'biceps_femoris', 'mid_distal', '2026-09-01'),
+    ('p43-c',    'comm-b', '途中',   '0000', 'comm-b-proto-hamstring-10', 5, '1b', 'biceps_femoris', 'mid_distal', '2026-09-01'),
+    ('p43-demo', 'comm-b', 'デモ',   '0000', 'comm-b-proto-hamstring-10', ${nph43}, '1b', 'biceps_femoris', 'mid_distal', '2026-09-01'),
+    ('p43-oth',  'comm-b', '別の筋', '0000', 'comm-b-proto-hamstring-10', ${nph43}, '1b', 'semimembranosus', 'mid_distal', '2026-09-01');
+  update players set is_demo = true where id = 'p43-demo';
+  insert into phase_history (player_id, protocol_id, phase_number, entered_at, left_at) values
+    ('p43-a',    'comm-b-proto-hamstring-10', 3, '2026-09-10 01:00+00', '2026-09-15 01:00+00'),
+    ('p43-a',    'comm-b-proto-hamstring-10', ${nph43}, '2026-09-30 01:00+00', null),
+    ('p43-b',    'comm-b-proto-hamstring-10', 3, '2026-09-05 01:00+00', '2026-09-06 01:00+00'),
+    ('p43-b',    'comm-b-proto-hamstring-10', 3, '2026-09-12 01:00+00', '2026-09-14 01:00+00'),
+    ('p43-b',    'comm-b-proto-hamstring-10', ${nph43}, '2026-10-02 01:00+00', null),
+    ('p43-c',    'comm-b-proto-hamstring-10', 3, '2026-09-10 01:00+00', '2026-09-12 01:00+00'),
+    ('p43-demo', 'comm-b-proto-hamstring-10', 3, '2026-09-10 01:00+00', '2026-09-11 01:00+00'),
+    ('p43-demo', 'comm-b-proto-hamstring-10', ${nph43}, '2026-09-12 01:00+00', null),
+    ('p43-oth',  'comm-b-proto-hamstring-10', 3, '2026-09-10 01:00+00', '2026-09-11 01:00+00'),
+    ('p43-oth',  'comm-b-proto-hamstring-10', ${nph43}, '2026-09-13 01:00+00', null);`);
+ok(!(await run("supabase_migration_v43_remaining_days.sql")), "[v43] 適用 1 回目");
+ok(!(await run("supabase_migration_v43_remaining_days.sql")), "[v43] 適用 2 回目（冪等）");
+const r43 = (await as(U6, "select * from public.same_injury_remaining_days('p43-me')")).rows?.[0];
+ok(r43?.phase_number === 3 && r43.sample_size === 2 && Number(r43.avg_days) === 20 && r43.min_days === 20 && r43.max_days === 20,
+   "[v43] 同じ受傷で PHASE 10 まで進んだ選手の、いまの PHASE に入った日から PHASE 10 までの日数（デモ・別の筋・途中の選手は含めない。何度か入った PHASE は最後の日） " + JSON.stringify(r43));
+await db.exec("update players set current_phase = 4 where id = 'p43-me'");
+ok((await as(U6, "select * from public.same_injury_remaining_days('p43-me')")).rows?.length === 0, "[v43] 記録がない PHASE では0行（作った数字は出さない）");
+ok((await as(U1, "select * from public.same_injury_remaining_days('p43-me')")).rows?.length === 0
+   && !!(await as(null, "select * from public.same_injury_remaining_days('p43-me')")).error, "[v43] ほかの組織からは0件・匿名キーでは呼べない");
+await db.exec("delete from players where id like 'p43-%'");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

@@ -199,6 +199,10 @@ v40 から、上の3つの集計ビューはデモの選手（`players.is_demo`�
 すべて一致するほかの選手とだけ比べる（`same_injury_return_days()`、指導者側は `computeAvgRecoveryFromPlayers`）。復帰者リストへの移動は今までどおり手動（と復帰の記録から15日目の自動）。
 `protocol_avg_recovery` と `hamstring_recovery_by_classification` も v41 でこの数え方に作り直した。
 
+**全体復帰まであと（v43・作者の指示 2026-10-31）**：選手ホームの復帰ロードマップの数字は、同じ受傷のほかの選手（デモ・削除済みを除く）が
+いまの PHASE に入ってから最後の PHASE に入るまでにかかった日数の平均から、いまの PHASE にいる日数を引いたもの（`same_injury_remaining_days()`・`RemainingToReturn`）。
+記録がなければ数字は出さない。以前の「プロトコルの週数 ÷ PHASE 数」（`weeksRemaining`）は根拠がないので削除した。`protocols.total_weeks` は画面の設定にだけ残っている。
+
 ### 関数 `same_injury_phase_compare(選手ID)`（v40）
 
 選手の「その他」と指導者の「記録」に出す「同じ受傷の選手と PHASE ごとの比較」（`SameInjuryPhaseComparison`）の元。
@@ -269,6 +273,7 @@ GitHub Actions の **「本番DBに反映」**（`.github/workflows/db-apply.yml
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
 | v42_auto_publish_slots | **適用済み（2026-10-31）** | 2人以上そろった日時を自動で公開するトリガー（`sync_slot`）と、過ぎた空き枠・空き時間の削除（`purge_past_schedule`、毎時）。戻し方はファイルの冒頭 |
+| v43_remaining_days | **適用済み（2026-10-31）** | `same_injury_remaining_days()`（同じ受傷の選手の、いまの PHASE から最後の PHASE までの日数）。関数の追加だけ。戻し方はファイルの冒頭 |
 | v41_return_days_final_phase | **適用済み（2026-10-31）** | `player_return_days`（受傷から最後の PHASE に入った日までの日数）・`same_injury_return_days()`。集計の2ビューもこの数え方に。戻し方はファイルの冒頭 |
 | v40_same_injury_compare | **適用済み（2026-10-31）** | `players.is_demo`（デモの選手）・`same_injury_phase_compare()`（同じ受傷の選手との PHASE ごとの比較）。集計の3ビューもデモを除く。戻し方はファイルの冒頭 |
 | v39_report_reactions | **適用済み（2026-10-31）** | `report_reactions`（日報へのリアクション）と通知のトリガー。表の追加だけ。戻し方はファイルの冒頭 |
@@ -369,10 +374,10 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 公開の確認は、本番の JS に番号が入っているかで行う（`curl` で `/assets/index-*.js` を取り、`v15.14` を探す）。
 
 ```js
-const APP_BUILD = "v15.31";
+const APP_BUILD = "v15.32";
 ```
 
-本番に出ているのは `v15.31`（2026-10-31 公開）。
+本番に出ているのは `v15.32`（2026-10-31 公開）。
 
 過去に「全く改善されてない」が3回続き、原因が
 **App.jsx をリポジトリ直下に置いていて `src/` に入っていなかった**ことだった。
