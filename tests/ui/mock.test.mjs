@@ -102,6 +102,7 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/player_directory") return [{ id: "p-1", name: "山田 太郎" }];
   if (p === "/rest/v1/exercises") return exercises.map((e) => ({ ...e, org_id: "default", protocol_id: st.protocolId }));
   if (p === "/rest/v1/exercise_videos") return Object.entries(st.videos || {}).map(([name, video_url]) => ({ name, video_url }));
+  if (p === "/rest/v1/rpc/same_injury_return_days") { st.returnArgs = json; return st.returnDays === undefined ? { __status: 404 } : st.returnDays; }
   if (p === "/rest/v1/rpc/same_injury_phase_compare") { st.compareArgs = json; return st.compare === undefined ? { __status: 404 } : st.compare; }
   if (p === "/rest/v1/rpc/exercise_video_set") { st.videoSets = [...(st.videoSets || []), json]; return true; }
   if (p === "/rest/v1/report_comments") {
@@ -563,12 +564,13 @@ try {
     // 復帰した選手：復帰までの記録
     const stR = makeState({ injuryDaysAgo: 40, phase: 10 });
     stR.completedAt = iso(now);
-    stR.phaseHistory = [{ id: 1, phase_number: 1, entered_at: iso(new Date(Date.now() - 40 * 86400000)), left_at: iso(new Date(Date.now() - 30 * 86400000)) }];
+    stR.phaseHistory = [{ id: 1, phase_number: 1, entered_at: iso(new Date(Date.now() - 40 * 86400000)), left_at: iso(new Date(Date.now() - 30 * 86400000)) },
+      { id: 2, phase_number: 10, entered_at: iso(new Date(Date.now() - 5 * 86400000)), left_at: null }];
     const pr = await newPage(stR);
     await playerLogin(pr);
     await clickText(pr, "その他", "nav button"); await sleep(700);
     t = await text(pr);
-    ok(t.includes("復帰までの記録") && t.includes("40") && t.includes("受傷から復帰まで"), "復帰した選手に、復帰までの記録が出る");
+    ok(t.includes("復帰までの記録") && t.includes("35日（受傷から復帰まで）") && t.includes("受傷から復帰まで"), "復帰した選手に、復帰までの記録が出る（受傷から PHASE 10 に入った日まで）");
 
     // 指導者：暗証番号の再設定・申し送りメモ・全員に連絡・書き出し
     const st2 = makeState({ injuryDaysAgo: 3 });
@@ -981,6 +983,25 @@ try {
     await c.$eval('button[aria-label="デモの選手"]', (n) => { n.scrollIntoView({ block: "center" }); n.click(); }); await sleep(800);
     ok(st.patches.some((x) => x.p === "/rest/v1/players" && x.b?.is_demo === true) && (await text(c)).includes("集計に含めない"), "デモの選手にすると、集計に含めない");
     ok(c.errs.length === 0, "例外なし " + c.errs.join("|"));
+  });
+
+  await step("復帰の目安：同じ受傷の選手が最後の PHASE に入るまでの日数（v41）", async () => {
+    const st = makeState({ phase: 3, injuryDaysAgo: 10 });
+    st.returnDays = [{ sample_size: 2, avg_days: "24.0", min_days: 20, max_days: 28 }];
+    const p = await newPage(st);
+    await playerLogin(p);
+    await clickText(p, "その他", "nav button"); await sleep(900);
+    let t = await text(p);
+    ok(st.returnArgs?.p_player_id === "p-1", "自分の選手IDで、同じ受傷の選手の日数を読み込む");
+    ok(t.includes("同じ受傷（BAMIC 1b / 大腿二頭筋 / 中間位〜遠位）の2人が PHASE 10 に入るまでの平均は") && t.includes("24日・20〜28日"),
+       "選手：同じ受傷の選手が PHASE 10 に入るまでの平均・範囲が出る");
+    ok(!t.includes("完遂"), "「完遂」の言い方は使わない");
+    const s2 = makeState({ phase: 3 }); s2.returnDays = [];
+    const p2 = await newPage(s2);
+    await playerLogin(p2);
+    await clickText(p2, "その他", "nav button"); await sleep(800);
+    ok((await text(p2)).includes("同じ受傷の選手の記録は、まだありません。") && p2.errs.length === 0, "同じ受傷の記録がなければ、ないと出る");
+    ok(p.errs.length === 0, "例外なし " + p.errs.join("|"));
   });
 
   await step("選手：面談の日が過ぎたら、別の日の面談を取り直せる", async () => {

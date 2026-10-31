@@ -833,6 +833,43 @@ ok((await db.query("select sample_size::int n from protocol_phase_avg_duration w
    "[v40] PHASE 別の平均日数のビューもデモを除く（見る人の権限で動くまま）");
 await db.exec("delete from players where id like 'p40-%'");
 
+// ===== v41：復帰の日数は最後の PHASE に入った日で数える・同じ受傷とだけ比べる =====
+const nph41 = (await db.query("select jsonb_array_length(phases::jsonb) n from protocols where id = 'comm-b-proto-hamstring-10'")).rows[0].n;
+await db.exec(`insert into players (id, org_id, name, pin, protocol_id, bamic_grade, hamstring_muscle, hamstring_location, injury_date, reinjury_date, completed_at) values
+    ('p41-me',   'comm-b', '本人',   '0000', 'comm-b-proto-hamstring-10', '1b', 'biceps_femoris', 'mid_distal', '2026-10-01', null, null),
+    ('p41-a',    'comm-b', '先輩A',  '0000', 'comm-b-proto-hamstring-10', '1b', 'biceps_femoris', 'mid_distal', '2026-09-01', null, '2026-10-20'),
+    ('p41-b',    'comm-b', '先輩B',  '0000', 'comm-b-proto-hamstring-10', '1b', 'biceps_femoris', 'mid_distal', '2026-09-01', '2026-09-20', null),
+    ('p41-demo', 'comm-b', 'デモ',   '0000', 'comm-b-proto-hamstring-10', '1b', 'biceps_femoris', 'mid_distal', '2026-09-01', null, null),
+    ('p41-mus',  'comm-b', '別の筋', '0000', 'comm-b-proto-hamstring-10', '1b', 'semimembranosus', 'mid_distal', '2026-09-01', null, null),
+    ('p41-grd',  'comm-b', '別分類', '0000', 'comm-b-proto-hamstring-10', '2a', 'biceps_femoris', 'mid_distal', '2026-09-01', null, null);
+  update players set is_demo = true where id = 'p41-demo';
+  insert into phase_history (player_id, protocol_id, phase_number, entered_at, left_at) values
+    ('p41-a',    'comm-b-proto-hamstring-10', ${nph41}, '2026-09-29 01:00+00', null),
+    ('p41-b',    'comm-b-proto-hamstring-10', ${nph41}, '2026-09-11 01:00+00', '2026-09-20 01:00+00'),
+    ('p41-b',    'comm-b-proto-hamstring-10', ${nph41}, '2026-10-10 01:00+00', null),
+    ('p41-b',    'comm-b-proto-hamstring-10', ${nph41 - 1}, '2026-10-01 01:00+00', '2026-10-10 01:00+00'),
+    ('p41-demo', 'comm-b-proto-hamstring-10', ${nph41}, '2026-09-03 01:00+00', null),
+    ('p41-mus',  'comm-b-proto-hamstring-10', ${nph41}, '2026-09-05 01:00+00', null),
+    ('p41-grd',  'comm-b-proto-hamstring-10', ${nph41}, '2026-09-06 01:00+00', null);`);
+ok(!(await run("supabase_migration_v41_return_days_final_phase.sql")), "[v41] 適用 1 回目");
+ok(!(await run("supabase_migration_v41_return_days_final_phase.sql")), "[v41] 適用 2 回目（冪等）");
+const rd41 = Object.fromEntries((await db.query("select player_id, days from player_return_days where player_id like 'p41-%'")).rows.map((r) => [r.player_id, r.days]));
+ok(rd41["p41-a"] === 28 && rd41["p41-b"] === 20 && rd41["p41-me"] === undefined,
+   "[v41] 復帰の日数は、受傷（再受傷）から最後の PHASE に入った日まで（復帰の記録の日ではない） " + JSON.stringify(rd41));
+const r41 = (await as(U6, "select * from public.same_injury_return_days('p41-me')")).rows?.[0];
+ok(r41?.sample_size === 2 && Number(r41.avg_days) === 24 && r41.min_days === 20 && r41.max_days === 28,
+   "[v41] 同じ受傷（損傷筋・BAMIC・部位が一致）の選手だけ。デモ・別の筋・別の分類は含めない " + JSON.stringify(r41));
+const hc41 = (await as(U6, "select bamic_grade, hamstring_muscle, sample_size::int n, avg_days from hamstring_recovery_by_classification where org_id = 'comm-b' order by 1, 2")).rows || [];
+ok(hc41.find((r) => r.bamic_grade === "1b" && r.hamstring_muscle === "biceps_femoris")?.n === 2
+   && hc41.find((r) => r.hamstring_muscle === "semimembranosus")?.n === 1 && hc41.find((r) => r.bamic_grade === "2a")?.n === 1,
+   "[v41] 分類別の比較も、分類ごとに別々に数える（デモは除く） " + JSON.stringify(hc41));
+await db.exec("delete from players where id = 'p41-a'");
+ok((await as(U6, "select * from public.same_injury_return_days('p41-me')")).rows?.[0]?.sample_size === 1, "[v41] 一覧から削除した選手は含まれない");
+ok((await as(U1, "select * from public.same_injury_return_days('p41-me')")).rows?.length === 0
+   && (await as(U1, "select * from player_return_days where player_id like 'p41-%'")).rows?.length === 0
+   && !!(await as(null, "select * from public.same_injury_return_days('p41-me')")).error, "[v41] ほかの組織からは0件・匿名キーでは呼べない");
+await db.exec("delete from players where id like 'p41-%'");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");
