@@ -253,7 +253,8 @@ GitHub Actions の **「本番DBに反映」**（`.github/workflows/db-apply.yml
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
-| v37_returned_list | **未適用（ステージのみ）** | `players.moved_to_returned_at`（指導者が復帰者リストへ移した日時）。列の追加だけ。戻し方はファイルの冒頭 |
+| v38_offsite_custom_items | **適用済み（2026-10-31）** | `player_offsite_custom_items`（選手ごとに足した患部外トレーニング）。表の追加だけ。SQL Editor で作者が実行（コネクタの確認が届かなかったため）。戻し方はファイルの冒頭 |
+| v37_returned_list | **適用済み（2026-10-31）** | `players.moved_to_returned_at`（指導者が復帰者リストへ移した日時）。列の追加だけ。戻し方はファイルの冒頭 |
 | v36_reinjury | **適用済み（2026-10-25）** | `players.reinjury_date` と `player_reinjuries`（再受傷の記録）。列と表の追加だけ。公開中のアプリはそのまま動く。戻し方はファイルの冒頭 |
 | v35_report_comments | **適用済み（2026-10-07）** | `report_comments`（日報の本音へのコメント・返信。日報1件ごと）と通知のトリガー。表の追加だけ。戻し方はファイルの冒頭 |
 | v34_phase8_gate_rdl_note | **適用済み（2026-10-06）** | データだけ。PHASE 8 の Tantrums の条件を「50回×3set を違和感なく」の1項目に（15秒…の項目は外す）。ウエイト解禁は PHASE 3 の名称から外し、条件の Bilateral RDL の項目に併記。戻すときは控え「v34 の前」から |
