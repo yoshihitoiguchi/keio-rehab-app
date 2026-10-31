@@ -841,9 +841,9 @@ try {
 
   await step("まだ返事していない日報（v15.33）", async () => {
     const ld = (off) => ((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`)(new Date(Date.now() + off * 86400000));
-    const rep = (id, off, honne = "") => ({ id, player_id: "p-1", date: ld(off), vas: 2, mental: 3, fatigue: 3, sleep_quality: 7, honne, created_at: iso(new Date(Date.now() + off * 86400000)) });
+    const rep = (id, hoursAgo, honne = "") => { const d = new Date(Date.now() - hoursAgo * 3600000); return { id, player_id: "p-1", date: ld(-hoursAgo / 24), vas: 2, mental: 3, fatigue: 3, sleep_quality: 7, honne, created_at: iso(d) }; };
     const st = makeState({ injuryDaysAgo: 20, phase: 5 });
-    st.reports = [rep(1, -10), rep(2, -3), rep(3, -2, "張りがある"), rep(5, -1, "少し不安"), rep(4, 0)];
+    st.reports = [rep(1, 30), rep(2, 20), rep(3, 10, "張りがある"), rep(5, 5, "少し不安"), rep(4, 1)];
     st.reportComments = [
       { id: 91, report_id: 3, player_id: "p-1", sender: "staff", author_role: "coach", body: "了解です", created_at: iso(now) },
       { id: 92, report_id: 5, player_id: "p-1", sender: "player", author_role: null, body: "追記です", created_at: iso(now) },
@@ -853,20 +853,19 @@ try {
     let t = await text(c);
     const card = async () => c.evaluate(() => document.querySelector('[data-testid="unreplied-reports"]')?.innerText || "");
     let k = await card();
-    ok(t.includes("まだ返事していない日報") && /まだ返事していない日報\s*3/.test(k), "返事のない直近7日の日報が3件並ぶ " + JSON.stringify(k));
+    ok(t.includes("まだ返事していない日報") && /まだ返事していない日報\s*3/.test(k), "返事のない、送信から24時間以内の日報が3件並ぶ " + JSON.stringify(k));
     ok(k.includes("山田 太郎") && k.includes("少し不安"), "選手名と日付・本音が出る");
-    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ld(-3));
-    const label3 = `${Number(m[2])}月${Number(m[3])}日`;
-    ok(!k.includes(`${Number(/-(\d{2})-(\d{2})$/.exec(ld(-2))[1])}月${Number(/-(\d{2})$/.exec(ld(-2))[1])}日`), "指導者がコメントした日報は出ない");
+    ok(!k.includes("張りがある"), "指導者がコメントした日報は出ない");
     if (process.env.SHOT_DIR) await c.screenshot({ path: process.env.SHOT_DIR + "/unreplied-list.png" });
-    await clickText(c, label3, '[data-testid="unreplied-reports"] button'); await sleep(900);
+    const rows = await c.$$('[data-testid="unreplied-reports"] li button');
+    await rows[rows.length - 1].evaluate((n) => n.scrollIntoView({ block: "center" })); await rows[rows.length - 1].click(); await sleep(900);
     const focused = await c.evaluate(() => document.querySelector("#report-2")?.className || "");
     ok(focused.includes("ring-2"), "押すと、その日報が選手の日報タブに開く");
     const btn = await c.$("#report-2 button[aria-pressed]");
     await btn.click(); await sleep(900);
     ok(st.reactions?.some((x) => x.report_id === 2), "その場でリアクションできる");
     k = await card();
-    ok(/まだ返事していない日報\s*2/.test(k) && !k.includes(label3), "返事した日報は一覧から消える " + JSON.stringify(k));
+    ok(/まだ返事していない日報\s*2/.test(k) && (await c.$$('[data-testid="unreplied-reports"] li')).length === 2, "返事した日報は一覧から消える " + JSON.stringify(k));
     if (process.env.SHOT_DIR) await c.screenshot({ path: process.env.SHOT_DIR + "/unreplied-coach.png" });
     ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
     await c.close();
