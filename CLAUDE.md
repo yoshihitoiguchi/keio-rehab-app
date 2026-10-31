@@ -171,7 +171,7 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `phase_history` / `phase_advances` | フェーズ遷移の履歴 |
 | `treatments` | 治療介入の記録 |
 | `messages` | チャット。`staff_role` でスタッフ種別 |
-| `slots` / `staff_availability` | 三者面談の日程調整。空き日程は「11月5日 13時〜17時」のように文で書き、`src/lib/availabilityText.js` が毎時ちょうどに始まる1時間の枠に直す（面談は約40分のため。v15.28〜）。受傷・再受傷から2週間の面談の案内は1回だけ。ほかの面談は指導者が選手の「記録」の「面談を追加」から入れる |
+| `slots` / `staff_availability` | 三者面談の日程調整。空き日程は「11月5日 13時〜17時」のように文で書き、`src/lib/availabilityText.js` が毎時ちょうどに始まる1時間の枠に直す（面談は約40分のため。v15.28〜）。受傷・再受傷から2週間の面談の案内は1回だけ。ほかの面談は指導者が選手の「記録」の「面談を追加」から入れる。コーチ・トレーナー・ドクターのうち2人以上がそろった日時は DB のトリガーが自動で公開し、そろわなくなれば予約のない枠を消す（v42 `sync_slot`）。時間が過ぎた空き枠・空き時間は画面に出さず、DB からも毎時消す（v42 `purge_past_schedule`・pg_cron `resprint-purge-past-schedule`）。予約の入った枠は面談履歴として残す |
 | `consultation_requests` | 相談リクエスト（医師枠は未公開） |
 | `media_attachments` | 写真・動画。`expires_at` は90日 |
 | `staff_notes` | 指導者どうしの申し送りメモ（選手ごと。選手の画面には出さない。ただし組織の中の仕切りは画面だけなので、API を直接使えば同じ組織の人は読める）（v30） |
@@ -268,6 +268,7 @@ GitHub Actions の **「本番DBに反映」**（`.github/workflows/db-apply.yml
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
+| v42_auto_publish_slots | **適用済み（2026-10-31）** | 2人以上そろった日時を自動で公開するトリガー（`sync_slot`）と、過ぎた空き枠・空き時間の削除（`purge_past_schedule`、毎時）。戻し方はファイルの冒頭 |
 | v41_return_days_final_phase | **適用済み（2026-10-31）** | `player_return_days`（受傷から最後の PHASE に入った日までの日数）・`same_injury_return_days()`。集計の2ビューもこの数え方に。戻し方はファイルの冒頭 |
 | v40_same_injury_compare | **適用済み（2026-10-31）** | `players.is_demo`（デモの選手）・`same_injury_phase_compare()`（同じ受傷の選手との PHASE ごとの比較）。集計の3ビューもデモを除く。戻し方はファイルの冒頭 |
 | v39_report_reactions | **適用済み（2026-10-31）** | `report_reactions`（日報へのリアクション）と通知のトリガー。表の追加だけ。戻し方はファイルの冒頭 |
@@ -368,10 +369,10 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 公開の確認は、本番の JS に番号が入っているかで行う（`curl` で `/assets/index-*.js` を取り、`v15.14` を探す）。
 
 ```js
-const APP_BUILD = "v15.30";
+const APP_BUILD = "v15.31";
 ```
 
-本番に出ているのは `v15.30`（2026-10-31 公開）。
+本番に出ているのは `v15.31`（2026-10-31 公開）。
 
 過去に「全く改善されてない」が3回続き、原因が
 **App.jsx をリポジトリ直下に置いていて `src/` に入っていなかった**ことだった。

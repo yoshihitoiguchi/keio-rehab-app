@@ -277,7 +277,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.30";
+const APP_BUILD = "v15.31";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -982,6 +982,16 @@ function daysSince(dateStr) {
 function parseDatetime(str) {
   return new Date(str.replace(" ", "T"));
 }
+// 日時（"YYYY-MM-DD HH:MM"）がまだ来ていないか
+function isUpcomingDatetime(str) {
+  const d = parseDatetime(String(str || ""));
+  return !Number.isNaN(d.getTime()) && d > new Date();
+}
+// 面談の枠：時間が過ぎた空き枠（予約なし）は出さない。予約の入った枠は面談履歴として残す
+// （DB からも毎時消している：v42 purge_past_schedule）
+function liveSlots(rows) {
+  return rows.map(normalizeSlot).filter((s) => s.bookedBy || isUpcomingDatetime(s.datetime));
+}
 function diffDaysBetween(dateStr, datetimeStr) {
   return Math.floor((parseDatetime(datetimeStr) - new Date(dateStr)) / 86400000);
 }
@@ -1257,7 +1267,7 @@ function RehabApp() {
         return;
       }
       setMasterProtocols(protocolRows.map(normalizeProtocol));
-      setSlots(slotRows.map(normalizeSlot));
+      setSlots(liveSlots(slotRows));
       setPlayerDirectory(dirRows);
       setPhaseMenus(menuRows.map(normalizeMenu));
     } catch (err) {
@@ -1310,7 +1320,7 @@ function RehabApp() {
       setCoachPlayers(rows.map(normalizePlayer));
       if (silent) {
         const slotRows = await sbSelect("slots", `?org_id=eq.${encodeURIComponent(org.id)}&select=*&order=datetime.asc`);
-        setSlots(slotRows.map(normalizeSlot));
+        setSlots(liveSlots(slotRows));
       }
     } catch (err) {
       if (!silent) setLoadError(errText(err));
@@ -3602,7 +3612,6 @@ function CoachScheduling({ orgId, slots, setSlots }) {
   const [freeText, setFreeText] = useState("");
   const [saving, setSaving] = useState(false);
   const [savedCount, setSavedCount] = useState(null);
-  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState(null);
   const parsed = useMemo(() => parseAvailabilityText(freeText), [freeText]);
   const alreadyMine = new Set(availability.filter((a) => a.role === role).map((a) => a.datetime));
@@ -3615,7 +3624,8 @@ function CoachScheduling({ orgId, slots, setSlots }) {
         "staff_availability",
         `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=datetime.asc`
       );
-      setAvailability(rows);
+      // 時間が過ぎた空き時間は出さない
+      setAvailability(rows.filter((a) => isUpcomingDatetime(a.datetime)));
     } catch (err) {
       setError(errText(err));
     } finally {
@@ -3640,6 +3650,7 @@ function CoachScheduling({ orgId, slots, setSlots }) {
       setAvailability((prev) => [...prev, ...inserted].sort((a, b) => a.datetime.localeCompare(b.datetime)));
       setSavedCount(inserted.length);
       setFreeText("");
+      await refreshSlots();
     } catch (err) {
       setError(errText(err));
     } finally {
@@ -3651,6 +3662,7 @@ function CoachScheduling({ orgId, slots, setSlots }) {
     try {
       await sbDelete("staff_availability", id);
       setAvailability((prev) => prev.filter((a) => a.id !== id));
+      await refreshSlots();
     } catch (err) {
       setError(errText(err));
     }
@@ -3662,30 +3674,13 @@ function CoachScheduling({ orgId, slots, setSlots }) {
     grouped[a.datetime].add(a.role);
   });
 
-  const handleSync = async () => {
-    setSyncing(true);
-    setError(null);
+  // 2人以上そろった日時は DB が自動で公開する（v42 のトリガー）。登録・削除のあとに、公開中の枠を読み直す
+  const refreshSlots = async () => {
     try {
-      const matched = Object.entries(grouped)
-        .filter(([, roleSet]) => matchedStaffCount(roleSet) >= MEETING_MIN_STAFF)
-        .map(([datetime, roleSet]) => ({
-          org_id: orgId,
-          datetime,
-          matched_roles: Array.from(roleSet),
-        }));
-      if (matched.length > 0) {
-        await sb("slots?on_conflict=org_id,datetime", {
-          method: "POST",
-          body: JSON.stringify(matched),
-          prefer: "resolution=merge-duplicates,return=representation",
-        });
-      }
       const rows = await sbSelect("slots", `?org_id=eq.${encodeURIComponent(orgId)}&select=*&order=datetime.asc`);
-      setSlots(rows.map(normalizeSlot));
-    } catch (err) {
-      setError(errText(err));
-    } finally {
-      setSyncing(false);
+      setSlots(liveSlots(rows));
+    } catch {
+      // 読み直せなくても、登録そのものは済んでいる
     }
   };
 
@@ -3742,15 +3737,8 @@ function CoachScheduling({ orgId, slots, setSlots }) {
         <h3 className="font-bold text-slate-700 text-sm mb-2">登録済みの日時</h3>
         <p className="text-xs text-slate-400 mb-3">
           コーチ・トレーナー・ドクターのうち <span className="font-bold text-slate-600">2人以上</span>
-          が空いている日時が公開されます。
+          そろった日時は、自動で選手に公開されます。
         </p>
-        <button
-          onClick={handleSync}
-          disabled={syncing}
-          className="w-full mb-4 py-3 rounded-lg bg-slate-800 text-white text-sm font-bold disabled:bg-slate-300 flex items-center justify-center gap-2"
-        >
-          {syncing && <Loader2 size={14} className="animate-spin" />} そろった日時を公開する
-        </button>
         {loading ? (
           <p className="text-sm text-slate-400">読み込み中...</p>
         ) : (
@@ -3769,7 +3757,7 @@ function CoachScheduling({ orgId, slots, setSlots }) {
                   >
                     <div className="flex items-center justify-between">
                       <span className="font-semibold text-slate-700">{datetime}</span>
-                      {qualifies && <span className="text-green-600 font-bold">公開対象</span>}
+                      {qualifies && <span className="text-green-600 font-bold">公開中</span>}
                     </div>
                     <p className="text-slate-500 mt-1">
                       {roles.map((r) => SCHEDULING_ROLE_LABELS[r]).join(" / ")}
