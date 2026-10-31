@@ -171,7 +171,7 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `phase_history` / `phase_advances` | フェーズ遷移の履歴 |
 | `treatments` | 治療介入の記録 |
 | `messages` | チャット。`staff_role` でスタッフ種別 |
-| `slots` / `staff_availability` | 三者面談の日程調整 |
+| `slots` / `staff_availability` | 三者面談の日程調整。空き日程は「11月5日 13時〜17時」のように文で書き、`src/lib/availabilityText.js` が毎時ちょうどに始まる1時間の枠に直す（面談は約40分のため。v15.28〜）。受傷・再受傷から2週間の面談の案内は1回だけ。ほかの面談は指導者が選手の「記録」の「面談を追加」から入れる |
 | `consultation_requests` | 相談リクエスト（医師枠は未公開） |
 | `media_attachments` | 写真・動画。`expires_at` は90日 |
 | `staff_notes` | 指導者どうしの申し送りメモ（選手ごと。選手の画面には出さない。ただし組織の中の仕切りは画面だけなので、API を直接使えば同じ組織の人は読める）（v30） |
@@ -362,10 +362,10 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 公開の確認は、本番の JS に番号が入っているかで行う（`curl` で `/assets/index-*.js` を取り、`v15.14` を探す）。
 
 ```js
-const APP_BUILD = "v15.27";
+const APP_BUILD = "v15.28";
 ```
 
-本番に出ているのは `v15.27`（2026-10-31 公開）。
+本番に出ているのは `v15.28`（2026-10-31 公開）。
 
 過去に「全く改善されてない」が3回続き、原因が
 **App.jsx をリポジトリ直下に置いていて `src/` に入っていなかった**ことだった。

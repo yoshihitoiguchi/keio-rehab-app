@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   Activity,
   Lock,
@@ -68,6 +68,7 @@ import {
   signOut,
 } from "./lib/auth.js";
 import { pushState, enablePush, disablePush, refreshPush } from "./lib/push.js";
+import { parseAvailabilityText, slotLabel } from "./lib/availabilityText.js";
 
 // ============================================================
 // Supabase 接続設定とログイン状態は src/lib/auth.js にまとめてある。
@@ -276,7 +277,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.27";
+const APP_BUILD = "v15.28";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -3497,15 +3498,15 @@ function CoachScheduling({ orgId, slots, setSlots }) {
   const [availability, setAvailability] = useState([]);
   const [loading, setLoading] = useState(true);
   const [role, setRole] = useState("coach");
-  const now = new Date();
-  const [year, setYear] = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth() + 1);
-  const [day, setDay] = useState(now.getDate());
-  const [hour, setHour] = useState(10);
-  const [minute, setMinute] = useState(0);
+  // 空き日程は自由に書く（例「11月5日 13時〜17時 OK」）。1時間ごとの枠に直して登録する
+  const [freeText, setFreeText] = useState("");
   const [saving, setSaving] = useState(false);
+  const [savedCount, setSavedCount] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState(null);
+  const parsed = useMemo(() => parseAvailabilityText(freeText), [freeText]);
+  const alreadyMine = new Set(availability.filter((a) => a.role === role).map((a) => a.datetime));
+  const newSlots = parsed.slots.filter((dt) => !alreadyMine.has(dt));
 
   const loadAvailability = async () => {
     setLoading(true);
@@ -3526,21 +3527,19 @@ function CoachScheduling({ orgId, slots, setSlots }) {
     loadAvailability();
   }, [orgId]);
 
-  const daysInMonth = new Date(year, month, 0).getDate();
-  useEffect(() => {
-    if (day > daysInMonth) setDay(daysInMonth);
-  }, [daysInMonth, day]);
-
   const handleAddAvailability = async () => {
-    const datetime = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(
-      2,
-      "0"
-    )} ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+    if (!newSlots.length) return;
     setSaving(true);
     setError(null);
+    setSavedCount(null);
     try {
-      const [inserted] = await sbInsert("staff_availability", { role, datetime, org_id: orgId });
-      setAvailability((prev) => [...prev, inserted].sort((a, b) => a.datetime.localeCompare(b.datetime)));
+      const inserted = await sbInsert(
+        "staff_availability",
+        newSlots.map((datetime) => ({ role, datetime, org_id: orgId }))
+      );
+      setAvailability((prev) => [...prev, ...inserted].sort((a, b) => a.datetime.localeCompare(b.datetime)));
+      setSavedCount(inserted.length);
+      setFreeText("");
     } catch (err) {
       setError(errText(err));
     } finally {
@@ -3606,53 +3605,48 @@ function CoachScheduling({ orgId, slots, setSlots }) {
             </option>
           ))}
         </select>
-        <label className="text-xs text-slate-500">日付</label>
-        <input
-          type="date"
-          value={`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`}
-          min={localDateStr(now)}
+        <label className="text-xs text-slate-500">空いている日時</label>
+        <textarea
+          value={freeText}
           onChange={(e) => {
-            const [y, m, d] = e.target.value.split("-").map(Number);
-            if (!y || !m || !d) return;
-            setYear(y);
-            setMonth(m);
-            setDay(d);
+            setFreeText(e.target.value);
+            setSavedCount(null);
           }}
-          className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm mt-1 mb-3 bg-white"
+          rows={4}
+          placeholder={"11月5日 13時〜17時 OK\n11/6, 11/7 10時〜12時"}
+          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
-        <label className="text-xs text-slate-500">時刻</label>
-        <div className="grid grid-cols-2 gap-2 mt-1 mb-3">
-          <select
-            value={hour}
-            onChange={(e) => setHour(Number(e.target.value))}
-            className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
-          >
-            {Array.from({ length: 24 }, (_, i) => i).map((h) => (
-              <option key={h} value={h}>
-                {String(h).padStart(2, "0")}時
-              </option>
+        {freeText.trim() && (
+          <div className="mb-3">
+            <p className="text-xs text-slate-500 mb-1">
+              1時間ごとの枠 {newSlots.length}件
+              {parsed.slots.length > newSlots.length && `（登録済み ${parsed.slots.length - newSlots.length}件は除く）`}
+            </p>
+            {newSlots.length > 0 && (
+              <ul className="flex flex-wrap gap-1.5">
+                {newSlots.map((dt) => (
+                  <li key={dt} className="text-[11px] px-2 py-1 rounded-md bg-blue-50 text-blue-700 border border-blue-100">
+                    {slotLabel(dt)}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {parsed.problems.map((msg) => (
+              <p key={msg} className="text-[11px] text-amber-600 mt-1">
+                {msg}
+              </p>
             ))}
-          </select>
-          <select
-            value={minute}
-            onChange={(e) => setMinute(Number(e.target.value))}
-            className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
-          >
-            {[0, 30].map((m) => (
-              <option key={m} value={m}>
-                {String(m).padStart(2, "0")}分
-              </option>
-            ))}
-          </select>
-        </div>
+          </div>
+        )}
+        {savedCount != null && <p className="text-xs text-green-600 mb-2">{savedCount}件の枠を登録しました。</p>}
         {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
         <button
           onClick={handleAddAvailability}
-          disabled={saving}
+          disabled={saving || newSlots.length === 0}
           className="w-full py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:bg-slate-300 flex items-center justify-center gap-2"
         >
           {saving && <Loader2 size={14} className="animate-spin" />}
-          {saving ? "登録中..." : "登録する"}
+          {saving ? "登録中..." : newSlots.length ? `${newSlots.length}件を登録する` : "登録する"}
         </button>
       </div>
 
@@ -4577,6 +4571,44 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
     setSlots((prev) => prev.map((s) => (s.id === slotId ? { ...s, zoomUrl: url.trim() || null } : s)));
   };
 
+  // 指導者が面談を追加する（受傷・再受傷から2週間の面談は1回。ほかは必要なときに指導者が足す）
+  //   公開中の空き枠と同じ日時ならその枠を使い、なければその日時の枠を作って予約する
+  const addMeeting = async (player, datetime) => {
+    const existing = slots.find((s) => s.datetime === datetime);
+    if (existing?.bookedBy) throw new Error(existing.bookedBy === player.id ? "この日時の面談はもう入っています" : "この日時には別の選手の面談が入っています");
+    let autoUrl = null;
+    if (!existing?.zoomUrl) {
+      try {
+        autoUrl = (await fetchMeetingUrl(orgId)) || null;
+      } catch {
+        autoUrl = null;
+      }
+    }
+    let slot;
+    if (existing) {
+      await sbUpdate("slots", existing.id, autoUrl ? { booked_by: player.id, zoom_url: autoUrl } : { booked_by: player.id });
+      slot = { ...existing, bookedBy: player.id, zoomUrl: existing.zoomUrl || autoUrl };
+      setSlots((prev) => prev.map((s) => (s.id === existing.id ? slot : s)));
+    } else {
+      const [row] = await sbInsert("slots", {
+        org_id: orgId,
+        datetime,
+        booked_by: player.id,
+        matched_roles: [],
+        zoom_url: autoUrl,
+      });
+      slot = normalizeSlot(row);
+      setSlots((prev) => [...prev, slot].sort((a, b) => a.datetime.localeCompare(b.datetime)));
+    }
+    await sbUpdate("players", player.id, { booked_slot_id: slot.id });
+    setCoachPlayers((prev) => prev.map((p) => (p.id === player.id ? { ...p, bookedSlotId: slot.id } : p)));
+    try {
+      await sendCoachMessage(player.id, `【面談の追加】${datetime} に面談を入れました。`, "coach");
+    } catch {
+      // チャットに残せなくても、面談そのものは入っている
+    }
+  };
+
   const addTreatments = async (playerId, types, note, treatedDate) => {
     const payload = types.map((type) => ({
       player_id: playerId,
@@ -4769,6 +4801,7 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
             onMoveBackToActive={() => moveBackToActive(selectedPlayer)}
             onSendMessage={(content, role, extra) => sendCoachMessage(selectedPlayer.id, content, role, extra)}
             onSaveZoomUrl={saveZoomUrl}
+            onAddMeeting={(datetime) => addMeeting(selectedPlayer, datetime)}
             onAddTreatments={(types, note, date) => addTreatments(selectedPlayer.id, types, note, date)}
             onDeleteTreatment={(id) => deleteTreatment(selectedPlayer.id, id)}
             onSaveImagingFindings={(text) => saveImagingFindings(selectedPlayer.id, text)}
@@ -4805,6 +4838,7 @@ function PlayerDetailPanel({
   onDelete,
   onSendMessage,
   onSaveZoomUrl,
+  onAddMeeting,
   onAddTreatments,
   onDeleteTreatment,
   onSaveImagingFindings,
@@ -5123,6 +5157,7 @@ function PlayerDetailPanel({
             {myMeetings.length === 0 && (
               <p className="text-sm text-slate-400">まだ面談の予約・実施履歴がありません。</p>
             )}
+            {onAddMeeting && <AddMeetingForm slots={slots} onAdd={onAddMeeting} />}
             <ul className="space-y-2">
               {myMeetings.map((s) => {
                 const held = parseDatetime(s.datetime) <= new Date();
@@ -6080,6 +6115,94 @@ function PrintSummary({ player, protocol, phaseInfo, avg, myMeetings }) {
           </tbody>
         </table>
       )}
+    </div>
+  );
+}
+
+// 指導者が面談を追加する（2週間の面談のあとも、必要なときに何回でも）
+function AddMeetingForm({ slots, onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [done, setDone] = useState(null);
+  const openSlots = slots
+    .filter((s) => !s.bookedBy && parseDatetime(s.datetime) > new Date())
+    .sort((a, b) => a.datetime.localeCompare(b.datetime));
+  const parsed = useMemo(() => parseAvailabilityText(text), [text]);
+  const typed = parsed.slots.length === 1 ? parsed.slots[0] : null;
+
+  const add = async (datetime) => {
+    setBusy(true);
+    setError(null);
+    setDone(null);
+    try {
+      await onAdd(datetime);
+      setDone(datetime);
+      setText("");
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="mt-3 w-full py-2 rounded-lg border border-blue-200 text-blue-600 text-sm font-medium flex items-center justify-center gap-1.5"
+      >
+        <PlusCircle size={14} /> 面談を追加
+      </button>
+    );
+  }
+  return (
+    <div className="mt-3 border border-blue-100 bg-blue-50/40 rounded-lg p-3 space-y-2">
+      {openSlots.length > 0 && (
+        <>
+          <p className="text-xs text-slate-500">公開中の枠から選ぶ</p>
+          <div className="flex flex-wrap gap-1.5">
+            {openSlots.slice(0, 8).map((s) => (
+              <button
+                key={s.id}
+                onClick={() => add(s.datetime)}
+                disabled={busy}
+                className="text-[11px] px-2 py-1.5 rounded-md bg-white border border-slate-200 text-slate-700 hover:border-blue-400 disabled:opacity-40"
+              >
+                {slotLabel(s.datetime)}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+      <p className="text-xs text-slate-500">日時を書いて入れる</p>
+      <div className="flex gap-2">
+        <input
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value);
+            setDone(null);
+          }}
+          placeholder="11月12日 13時"
+          className="flex-1 min-w-0 border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
+        />
+        <button
+          onClick={() => typed && add(typed)}
+          disabled={busy || !typed}
+          className="shrink-0 px-3 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium disabled:bg-slate-300"
+        >
+          入れる
+        </button>
+      </div>
+      {text.trim() && typed && <p className="text-[11px] text-blue-700">{slotLabel(typed)}</p>}
+      {text.trim() && !typed && (
+        <p className="text-[11px] text-amber-600">
+          {parsed.slots.length > 1 ? "日時を1つだけ書いてください" : parsed.problems[0] || "日時として読めません"}
+        </p>
+      )}
+      {done && <p className="text-xs text-green-600">{done} に面談を入れました。選手にはチャットで知らせました。</p>}
+      {error && <p className="text-xs text-red-500">{error}</p>}
     </div>
   );
 }

@@ -145,9 +145,13 @@ function respond(st, url, method, body) {
     return st.meetingUrl ? [{ value: st.meetingUrl }] : [];
   }
   if (p === "/rest/v1/staff_availability" && method === "GET") return st.availability;
+  if (p === "/rest/v1/staff_availability" && method === "POST") {
+    const rows = (Array.isArray(json) ? json : [json]).map((r, i) => ({ id: 500 + st.availability.length + i, ...r }));
+    st.availability.push(...rows); return rows;
+  }
   if (p === "/rest/v1/slots") {
     if (method === "PATCH") { const id = /id=eq\.([^&]+)/.exec(u.search)?.[1]; const s = st.slots.find((x) => x.id === id); if (s) Object.assign(s, json); return s ? [s] : []; }
-    if (method === "POST") { for (const r of json) st.slots.push({ id: `slot-${st.slots.length + 1}`, booked_by: null, zoom_url: null, ...r }); return st.slots; }
+    if (method === "POST") { const added = (Array.isArray(json) ? json : [json]).map((r, i) => ({ id: `slot-${st.slots.length + 1 + i}`, booked_by: null, zoom_url: null, ...r })); st.slots.push(...added); return added; }
     return st.slots;
   }
   if (p === "/rest/v1/reports" && method === "POST") { st.reports = [...(st.reports || []), { id: 900, created_at: iso(new Date()), ...json }]; return [json]; }
@@ -509,7 +513,8 @@ try {
   });
 
   await step("指導者：プロトコルと日程調整の画面", async () => {
-    const c = await newPage(makeState({ injuryDaysAgo: 3 }));
+    const cst = makeState({ injuryDaysAgo: 3 });
+    const c = await newPage(cst); c.st = cst;
     await coachLogin(c);
     await clickText(c, "プロトコル", "nav button"); await sleep(800);
     let t = await text(c);
@@ -521,7 +526,19 @@ try {
     await clickText(c, "プロトコルを追加"); await sleep(300);
     ok((await text(c)).includes("怪我の名称"), "「プロトコルを追加」で追加フォームが開く");
     await clickText(c, "日程調整", "nav button"); await sleep(800);
-    ok((await c.$$('input[type="date"]')).length === 1 && (await c.$$("select")).length <= 3, "日程調整：日付は1つの入力欄で選べる（年・月・日の3つのプルダウンをやめた）");
+    ok((await c.$$('input[type="date"]')).length === 0 && (await c.$$("select")).length === 1, "日程調整：日付・時刻のプルダウンはなく、空き日程は文で書く");
+    const y = new Date().getFullYear() + 1; // 来年の日付なら、いつテストしても未来になる
+    await c.type('textarea[placeholder^="11月5日"]', `${y}年1月14日 13時〜17時 OK\n${y}/1/15, ${y}/1/16 9時半-12時\n1時間`);
+    await sleep(300);
+    let t2 = await text(c);
+    ok(t2.includes("1時間ごとの枠 8件") && t2.includes("1/14(木) 13:00〜14:00") && t2.includes("1/14(木) 16:00〜17:00") && !t2.includes("17:00〜18:00")
+       && t2.includes("1/15(金) 10:00〜11:00") && !t2.includes("09:30"), "書いた空き日程が、1時間ごとの枠としてプレビューされる（9時半〜は10時から）");
+    ok(t2.includes("8件を登録する"), "登録ボタンに件数が出る");
+    await clickText(c, "8件を登録する"); await sleep(800);
+    const avPost = c.st.posts.find((x) => x.p === "/rest/v1/staff_availability");
+    ok(Array.isArray(avPost?.b) && avPost.b.length === 8 && avPost.b.every((r) => r.role === "coach" && /:00$/.test(r.datetime)) && avPost.b[0].datetime === `${y}-01-14 13:00`,
+       "まとめて登録される（コーチ・毎時ちょうど）");
+    ok((await text(c)).includes("8件の枠を登録しました"), "登録したことが分かる");
     ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
   });
 
@@ -1026,6 +1043,34 @@ try {
     t = await text(p);
     ok(t.includes("面談をしましょう") && t.includes("再受傷から15日") && t.includes("この枠で予約"), "選手にも、再受傷日から数えた面談の案内が出て、枠を選べる");
     ok(p.errs.length === 0, "例外なし " + p.errs.join("|"));
+  });
+
+  await step("指導者：面談を追加する（2週間の面談のあとも必要なときに）", async () => {
+    const st = makeState({ injuryDaysAgo: 20 });
+    st.slots.unshift({ id: "slot-0", org_id: "default", datetime: `${dayStr(-4)} 18:00`, booked_by: "p-1", matched_roles: ["coach", "doctor"], zoom_url: null });
+    const c = await newPage(st);
+    await coachLogin(c);
+    const inDetail = async (label) => { for (const e of await c.$$("button")) { const tt = await e.evaluate((x) => x.innerText.trim()); const inNav = await e.evaluate((x) => !!x.closest("nav")); if (tt === label && !inNav) { await e.evaluate((n) => n.scrollIntoView({ block: "center" })); await e.click(); return; } } throw new Error("no " + label); };
+    ok(!(await text(c)).includes("面談がまだ行われていません"), "2週間の面談が済んでいれば、面談の案内は出ない（2週間の面談は1回だけ）");
+    await inDetail("記録"); await sleep(800);
+    await clickText(c, "面談を追加"); await sleep(300);
+    // 公開中の枠を選ぶ
+    const [, mm, dd] = dayStr(3).split("-").map(Number);
+    await clickText(c, `${mm}/${dd}(`); await sleep(1000);
+    ok(st.patches.some((x) => x.p === "/rest/v1/slots" && x.q.includes("slot-1") && x.b.booked_by === "p-1"), "公開中の枠を選んで、選手の面談を入れられる");
+    ok(st.posts.some((x) => x.p === "/rest/v1/messages" && x.b.sender === "staff" && x.b.content.startsWith("【面談の追加】")), "面談を入れると、選手にチャットで知らせる");
+    // 日時を書いて入れる（枠がない日時）
+    const y = new Date().getFullYear() + 1;
+    await c.type('input[placeholder="11月12日 13時"]', `${y}年2月3日 13時〜17時`); await sleep(200);
+    ok((await text(c)).includes("日時を1つだけ書いてください"), "範囲を書いたら、1つにするよう出る");
+    await c.evaluate(() => { const i = document.querySelector('input[placeholder="11月12日 13時"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(i, ""); i.dispatchEvent(new Event("input", { bubbles: true })); });
+    await c.type('input[placeholder="11月12日 13時"]', `${y}年2月3日 13時`); await sleep(200);
+    await clickText(c, "入れる"); await sleep(1000);
+    const made = st.posts.find((x) => x.p === "/rest/v1/slots" && !Array.isArray(x.b))?.b;
+    ok(made?.datetime === `${y}-02-03 13:00` && made.booked_by === "p-1", "書いた日時で面談の枠を作って入れられる");
+    const t = await text(c);
+    ok(t.includes("面談履歴（3件）"), "面談履歴に追加した面談が並ぶ");
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
   });
 } finally {
   try { await browser?.close(); } catch {}
