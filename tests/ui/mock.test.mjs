@@ -59,11 +59,16 @@ function makeState({ phase = 5, injuryDaysAgo = 20, booked = false, checks = [],
     phase, checks, protocolId, messages: [{ id: 5, player_id: "p-1", sender: "player", content: "よろしくお願いします", is_read: true, created_at: iso(now) }],
     consult: [], slots: [
       { id: "slot-1", org_id: "default", datetime: `${dayStr(3)} 18:00`, booked_by: booked ? "p-1" : null, matched_roles: ["coach", "doctor"], zoom_url: null },
+      // 時間が過ぎた空き枠：どの画面にも出さない
+      { id: "slot-past", org_id: "default", datetime: `${dayStr(-2)} 10:00`, booked_by: null, matched_roles: ["coach", "doctor"], zoom_url: null },
     ],
     availability: [
       { id: 1, org_id: "default", role: "coach", datetime: `${dayStr(5)} 18:00` },
       { id: 2, org_id: "default", role: "doctor", datetime: `${dayStr(5)} 18:00` },
       { id: 3, org_id: "default", role: "trainer", datetime: `${dayStr(6)} 18:00` },
+      // 時間が過ぎた空き時間（2人そろっていても公開の対象にしない・一覧に出さない）
+      { id: 4, org_id: "default", role: "coach", datetime: `${dayStr(-2)} 10:00` },
+      { id: 5, org_id: "default", role: "doctor", datetime: `${dayStr(-2)} 10:00` },
     ],
     injury: dayStr(-injuryDaysAgo), posts: [], patches: [],
   };
@@ -148,7 +153,13 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/staff_availability" && method === "GET") return st.availability;
   if (p === "/rest/v1/staff_availability" && method === "POST") {
     const rows = (Array.isArray(json) ? json : [json]).map((r, i) => ({ id: 500 + st.availability.length + i, ...r }));
-    st.availability.push(...rows); return rows;
+    st.availability.push(...rows);
+    // DB のトリガー（v42）の代わり：2人以上そろった日時を公開する
+    for (const r of rows) {
+      const roles = [...new Set(st.availability.filter((a) => a.datetime === r.datetime).map((a) => a.role))];
+      if (roles.length >= 2 && !st.slots.some((x) => x.datetime === r.datetime)) st.slots.push({ id: `slot-auto-${st.slots.length + 1}`, org_id: "default", datetime: r.datetime, booked_by: null, matched_roles: roles, zoom_url: null });
+    }
+    return rows;
   }
   if (p === "/rest/v1/slots") {
     if (method === "PATCH") { const id = /id=eq\.([^&]+)/.exec(u.search)?.[1]; const s = st.slots.find((x) => x.id === id); if (s) Object.assign(s, json); return s ? [s] : []; }
@@ -884,11 +895,17 @@ try {
     ok((await text(p)).includes("選手からメッセージ・日報への返信・面談の申し込み・面談の予約・SOS"), "指導者の「その他」に通知の設定が出る");
     await clickText(p, "日程調整", "nav button"); await sleep(900);
     t = await text(p);
-    ok(t.includes("2人以上") && (t.match(/公開対象/g) || []).length === 1, "コーチ＋ドクターの2人が一致した日時だけが公開対象（1人だけの日時は対象外）");
+    ok(t.includes("2人以上") && (t.match(/公開中(?!の枠)/g) || []).length === 1, "コーチ＋ドクターの2人が一致した日時だけが公開中（1人だけの日時は対象外）");
     ok(t.includes("決まった面談") && t.includes("公開中の枠（まだ予約なし）1件"), "日程調整に、決まった面談と公開中の枠の一覧がある");
-    await clickText(p, "そろった日時を公開する"); await sleep(900);
-    const posted = st.posts.find((x) => x.p === "/rest/v1/slots");
-    ok(posted?.b?.length === 1 && posted.b[0].matched_roles.sort().join() === "coach,doctor", "公開されるのは2人以上が一致した枠だけ");
+    ok(!t.includes(`${dayStr(-2)} 10:00`), "時間が過ぎた空き枠・空き時間は、日程調整のどこにも出ない");
+    ok(!t.includes("そろった日時を公開する"), "「そろった日時を公開する」のボタンはない（自動で公開）");
+    // トレーナーだけが空いている日時に、コーチが空きを登録 → 2人そろうので自動で公開される
+    const [, m6, d6] = dayStr(6).split("-").map(Number);
+    await p.type('textarea[placeholder^="11月5日"]', `${m6}月${d6}日 18時〜19時`); await sleep(300);
+    await clickText(p, "1件を登録する"); await sleep(1200);
+    t = await text(p);
+    ok(t.includes("公開中の枠（まだ予約なし）2件") && (t.match(/公開中(?!の枠)/g) || []).length === 2, "2人そろった日時は、登録しただけで公開中の枠に加わる");
+    ok(!st.posts.some((x) => x.p === "/rest/v1/slots"), "公開は DB が行う（アプリから枠を書き込まない）");
     ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
   });
 
