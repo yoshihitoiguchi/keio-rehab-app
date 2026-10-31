@@ -42,6 +42,7 @@ import {
   Gauge,
   ChevronUp,
   ChevronDown,
+  ChevronRight,
   Smartphone,
   X,
   Home,
@@ -277,7 +278,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.32";
+const APP_BUILD = "v15.33";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -4455,6 +4456,7 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme, onSaveCon
 // ---------- 選手管理（2ペイン） ----------
 function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayers, slots, setSlots, phaseMenus }) {
   const [selectedId, setSelectedId] = useState(null);
+  const [focus, setFocus] = useState(null); // 「まだ返事していない日報」から開いた日報
   const detailRef = React.useRef(null);
   const [listView, setListView] = useState("active"); // 'active' | 'graduated'
   const [error, setError] = useState(null);
@@ -4706,7 +4708,15 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
     );
   };
 
+  const openUnreplied = (playerId, reportId) => {
+    setListView("active");
+    setSelectedId(playerId);
+    setFocus({ playerId, reportId, at: Date.now() });
+  };
+
   return (
+    <div className="space-y-4 print:block">
+    <UnrepliedReports players={coachPlayers} onOpen={openUnreplied} />
     <div className="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6 print:block">
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden h-fit print:hidden">
         <div className="flex border-b border-slate-200">
@@ -4761,6 +4771,7 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
                 <button
                   onClick={() => {
                     setSelectedId(p.id);
+                    setFocus(null);
                     // スマホ（1列表示）では、選んだ選手の詳細まで画面を送る
                     if (window.matchMedia("(max-width: 1023px)").matches) {
                       setTimeout(() => detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
@@ -4882,9 +4893,11 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
             onCloseConsultation={(requestId) => closeConsultation(selectedPlayer.id, requestId)}
             onResolveChatStatus={() => resolveChatStatus(selectedPlayer.id)}
             setCoachPlayers={setCoachPlayers}
+            focus={focus}
           />
         )}
       </div>
+    </div>
     </div>
   );
 }
@@ -4920,8 +4933,10 @@ function PlayerDetailPanel({
   onMoveToReturned,
   onMoveBackToActive,
   setCoachPlayers,
+  focus = null,
 }) {
   const report = latestReport(player);
+  const focusReportId = focus && focus.playerId === player.id ? focus.reportId : null;
   const phaseInfo = protocol?.phases[player.currentPhase - 1];
 
   // 要件⑤：同一組織内の実データ（injury_date・completed_at）から直接JavaScriptで算出。
@@ -4931,6 +4946,9 @@ function PlayerDetailPanel({
   // 詳細の中のタブ。選手を切り替えたら「日報」に戻す
   const [dtab, setDtab] = useState("report");
   useEffect(() => setDtab("report"), [player.id]);
+  useEffect(() => {
+    if (focus) setDtab("report");
+  }, [focus]);
   const unreadChat = player.messages.filter((m) => m.sender === "player" && !m.isRead).length;
 
   // チャットのタブを開いたときに、選手からのメッセージを既読にする
@@ -5139,7 +5157,7 @@ function PlayerDetailPanel({
                 )}
               </div>
             )}
-            {report && <ReportThread player={player} viewer="staff" />}
+            {report && <ReportThread player={player} viewer="staff" focusReportId={focusReportId} focusAt={focus?.at ?? null} />}
             {report && (
               <ObservationRecord
                 key={report.id}
@@ -9460,7 +9478,104 @@ function ReportSummaryLine({ r }) {
   );
 }
 
-function ReportThread({ player, viewer }) {
+// 日報に返事（リアクション・コメント）が付いた・消えたことを、指導者トップの「まだ返事していない日報」に知らせる
+const reportReplySubs = new Set();
+function notifyReportReplied() {
+  reportReplySubs.forEach((f) => f());
+}
+// 指導者トップ：リアクションも指導者のコメントもまだ付いていない日報（直近7日・デモの選手と復帰者リストの選手は除く）
+const UNREPLIED_DAYS = 7;
+function formatReportDate(date) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date || "");
+  if (!m) return date || "";
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return `${d.getMonth() + 1}月${d.getDate()}日（${WEEKDAYS[d.getDay()]}）`;
+}
+function UnrepliedReports({ players, onOpen }) {
+  const since = localDateStr(new Date(Date.now() - (UNREPLIED_DAYS - 1) * 86400000));
+  const candidates = useMemo(
+    () =>
+      players
+        .filter((p) => !p.isDemo && !isGraduatedOut(p))
+        .flatMap((p) => p.reports.filter((r) => r.date && r.date >= since).map((r) => ({ player: p, report: r })))
+        .sort((a, b) => b.report.date.localeCompare(a.report.date) || Number(b.report.id) - Number(a.report.id)),
+    [players, since]
+  );
+  const ids = candidates.map((c) => c.report.id).join(",");
+  const [replied, setReplied] = useState(null); // 返事の付いた日報の ID。読めないとき（DB の更新前など）は null でカードを出さない
+  const [showAll, setShowAll] = useState(false);
+
+  useEffect(() => {
+    if (!ids) {
+      setReplied(new Set());
+      return undefined;
+    }
+    let active = true;
+    const load = () =>
+      Promise.all([
+        sbSelect("report_reactions", `?report_id=in.(${ids})&select=report_id`),
+        sbSelect("report_comments", `?report_id=in.(${ids})&sender=eq.staff&select=report_id,sender`),
+      ])
+        .then(([reactions, comments]) => {
+          if (!active) return;
+          const done = new Set((reactions || []).map((x) => String(x.report_id)));
+          (comments || []).filter((c) => c.sender === "staff").forEach((c) => done.add(String(c.report_id)));
+          setReplied(done);
+        })
+        .catch(() => active && setReplied(null));
+    load();
+    reportReplySubs.add(load);
+    const timer = setInterval(load, 60000);
+    return () => {
+      active = false;
+      reportReplySubs.delete(load);
+      clearInterval(timer);
+    };
+  }, [ids]);
+
+  if (!replied) return null;
+  const list = candidates.filter((c) => !replied.has(String(c.report.id)));
+  if (list.length === 0) return null;
+  const shown = showAll ? list : list.slice(0, 3);
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-4 print:hidden" data-testid="unreplied-reports">
+      <p className="text-sm font-bold text-slate-700 flex items-center gap-1.5 mb-2">
+        <MessageCircle size={16} className="text-blue-600" /> まだ返事していない日報
+        <span className="bg-blue-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">{list.length}</span>
+      </p>
+      <ul className="divide-y divide-slate-100">
+        {shown.map(({ player, report }) => (
+          <li key={report.id}>
+            <button
+              onClick={() => onOpen(player.id, report.id)}
+              className="w-full flex items-center justify-between gap-2 py-2.5 text-left hover:bg-slate-50"
+            >
+              <span className="min-w-0">
+                <span className="text-sm font-semibold text-slate-800">{player.name}</span>
+                <span className="text-xs text-slate-500 ml-2">{formatReportDate(report.date)}</span>
+                {(report.honne || "").trim() && (
+                  <span className="block text-xs text-slate-500 truncate mt-0.5">{report.honne.trim()}</span>
+                )}
+              </span>
+              <span className="flex items-center gap-1 shrink-0">
+                <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">痛み {report.vas}</span>
+                <ChevronRight size={16} className="text-slate-400" />
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {list.length > 3 && (
+        <button onClick={() => setShowAll((v) => !v)} className="w-full text-xs text-blue-600 font-bold pt-2">
+          {showAll ? "閉じる" : `すべて表示（${list.length}件）`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ReportThread({ player, viewer, focusReportId = null, focusAt = null }) {
   const staff = viewer === "staff";
   const [comments, setComments] = useState([]);
   const [reactions, setReactions] = useState([]);
@@ -9505,8 +9620,22 @@ function ReportThread({ player, viewer }) {
   const reactionsOf = (reportId) => reactions.filter((x) => String(x.report_id) === String(reportId));
   const all = player.reports.slice().reverse(); // 新しい順
   // 指導者：本音・コメント・リアクションのある日報（最新の日報は必ず）。選手：自分の日報すべて（返事がなくても見返せる）
-  const list = staff ? all.filter((r, i) => i === 0 || of(r.id).length > 0 || reactionsOf(r.id).length > 0 || (r.honne || "").trim()) : all;
+  const isFocus = (r) => focusReportId !== null && String(r.id) === String(focusReportId);
+  const list = staff
+    ? all.filter((r, i) => i === 0 || isFocus(r) || of(r.id).length > 0 || reactionsOf(r.id).length > 0 || (r.honne || "").trim())
+    : all;
   const shown = showAll ? list.slice(0, 30) : list.slice(0, 3);
+
+  // 「まだ返事していない日報」から開いたとき：その日報まで画面を送り、すぐ返事できるようにする
+  useEffect(() => {
+    if (focusReportId === null) return undefined;
+    const idx = list.findIndex(isFocus);
+    if (idx >= 3) setShowAll(true);
+    const timer = setTimeout(() => {
+      document.getElementById(`report-${focusReportId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 120);
+    return () => clearTimeout(timer);
+  }, [focusReportId, focusAt]);
 
   const toggleReaction = async (report, kind) => {
     const mine = reactions.find((x) => String(x.report_id) === String(report.id) && x.kind === kind && x.author_role === role);
@@ -9520,6 +9649,7 @@ function ReportThread({ player, viewer }) {
         const [row] = await sbInsert("report_reactions", { report_id: report.id, player_id: player.id, author_role: role, kind });
         setReactions((prev) => [...prev, row]);
       }
+      notifyReportReplied();
     } catch (err) {
       // 同じ立場のほかの人が先に付けていた場合など。最新の状態を読み直す
       if (err.status === 409) await loadReactions();
@@ -9546,6 +9676,7 @@ function ReportThread({ player, viewer }) {
       setComments((prev) => [...prev, row]);
       setText("");
       setOpenId(null);
+      if (staff) notifyReportReplied();
     } catch (err) {
       setError(errText(err));
     } finally {
@@ -9557,6 +9688,7 @@ function ReportThread({ player, viewer }) {
     try {
       await sbDelete("report_comments", id);
       setComments((prev) => prev.filter((c) => c.id !== id));
+      notifyReportReplied();
     } catch (err) {
       setError(errText(err));
     }
@@ -9574,7 +9706,7 @@ function ReportThread({ player, viewer }) {
       {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
       <ul className="space-y-2">
         {shown.map((r) => (
-          <li key={r.id} className="bg-slate-50 rounded-lg p-3">
+          <li key={r.id} id={`report-${r.id}`} className={`bg-slate-50 rounded-lg p-3 scroll-mt-24 ${isFocus(r) ? "ring-2 ring-blue-400" : ""}`}>
             <p className="text-[11px] font-bold text-slate-500">{r.date}</p>
             {!staff && <ReportSummaryLine r={r} />}
             {staff || (r.honne || "").trim() ? (
