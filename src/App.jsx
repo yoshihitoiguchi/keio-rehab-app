@@ -277,7 +277,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.28";
+const APP_BUILD = "v15.29";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -1002,23 +1002,47 @@ function isGraduatedOut(player) {
   if (!player.completedAt) return false;
   return daysSince(player.completedAt) > 14;
 }
-// 要件⑤：同じプロトコルを完遂した「過去の全選手」から、受傷日→完遂日の平均日数を
-// 実データ（injury_date, completed_at）のみを用いて厳密に計算する（モックなし）。
-// coachPlayersは指導者が既に読み込んでいる同一組織の全選手データなのでJS側で直接計算できる。
-function computeAvgRecoveryFromPlayers(players, protocolId) {
-  const completed = players.filter(
-    (p) => p.protocolId === protocolId && p.injuryDate && p.completedAt && !p.isDemo
-  );
-  if (completed.length === 0) return null;
-  const totalDays = completed.reduce((sum, p) => {
-    const injury = new Date(p.injuryDate);
-    const done = new Date(p.completedAt);
-    const days = Math.round((done - injury) / 86400000);
-    return sum + days;
-  }, 0);
+// 復帰の日数（v15.29〜。作者の指示）：最後の PHASE（ハムストリングは PHASE 10）に入った日を「復帰」として数える。
+//   受傷日から数える。その日より前に再受傷していれば再受傷日から。復帰者リストへの移動（手動）とは関係しない。
+function finalPhaseReachedAt(player, protocol) {
+  const last = phaseCountOf(protocol);
+  let at = null;
+  (player.phaseHistory || []).forEach((h) => {
+    if (h.phaseNumber === last && h.enteredAt && (!at || new Date(h.enteredAt) > new Date(at))) at = h.enteredAt;
+  });
+  return at;
+}
+function returnDaysOf(player, protocol) {
+  const at = finalPhaseReachedAt(player, protocol);
+  if (!at) return null;
+  const reached = toLocalDate(new Date(at));
+  const re = player.reinjuryDate ? String(player.reinjuryDate).slice(0, 10) : null;
+  const base = re && re <= reached ? re : player.injuryDate;
+  if (!base) return null;
+  const days = dayDiff(base, at);
+  return days >= 0 ? days : null;
+}
+// 同じ受傷（同じプロトコル・BAMIC分類・損傷筋・部位がすべて一致）のほかの選手の復帰日数の平均。
+// 本人・デモの選手は数えない（一覧から削除した選手は読み込まれない）。指導者が読み込んでいる同じ組織の選手から計算する。
+function computeAvgRecoveryFromPlayers(players, player, protocol) {
+  if (!protocol || !player) return null;
+  if (protocol.classificationScheme === "hamstring" && !classificationLabel(player)) return null;
+  const days = players
+    .filter(
+      (p) =>
+        p.id !== player.id &&
+        !p.isDemo &&
+        p.protocolId === player.protocolId &&
+        (p.bamicGrade || null) === (player.bamicGrade || null) &&
+        (p.hamstringMuscle || null) === (player.hamstringMuscle || null) &&
+        (p.hamstringLocation || null) === (player.hamstringLocation || null)
+    )
+    .map((p) => returnDaysOf(p, protocol))
+    .filter((d) => d !== null);
+  if (days.length === 0) return null;
   return {
-    avgDays: Math.round((totalDays / completed.length) * 10) / 10,
-    sampleSize: completed.length,
+    avgDays: Math.round((days.reduce((a, b) => a + b, 0) / days.length) * 10) / 10,
+    sampleSize: days.length,
   };
 }
 // 要件②：選手自身のフェーズ滞在履歴から、各Phaseに何日いたか（現在進行中のPhaseは今日まで）を算出
@@ -4856,7 +4880,7 @@ function PlayerDetailPanel({
 
   // 要件⑤：同一組織内の実データ（injury_date・completed_at）から直接JavaScriptで算出。
   // モックではなく、指導者が読み込んでいる実際の選手一覧が計算元になる。
-  const avg = protocol ? computeAvgRecoveryFromPlayers(allPlayers, protocol.id) : null;
+  const avg = protocol ? computeAvgRecoveryFromPlayers(allPlayers, player, protocol) : null;
 
   // 詳細の中のタブ。選手を切り替えたら「日報」に戻す
   const [dtab, setDtab] = useState("report");
@@ -4931,7 +4955,7 @@ function PlayerDetailPanel({
                   </span>
                 )}
                 {avg && (
-                  <span className="text-blue-500"> ・ 過去{avg.sampleSize}人の平均完遂日数：{avg.avgDays}日</span>
+                  <span className="text-blue-500"> ・ 同じ受傷{avg.sampleSize}人の平均復帰日数：{avg.avgDays}日</span>
                 )}
               </p>
             )}
@@ -6037,7 +6061,7 @@ function PrintSummary({ player, protocol, phaseInfo, avg, myMeetings }) {
           </p>
           {avg && (
             <p>
-              <span className="font-bold">過去の平均完遂日数：</span>
+              <span className="font-bold">同じ受傷の平均復帰日数：</span>
               {avg.avgDays}日（サンプル{avg.sampleSize}人）
             </p>
           )}
@@ -7025,7 +7049,7 @@ function UsageGuideTab({ onGoTab, protocol, onReachEnd }) {
           </div>
         }
       >
-        <p>「その他」で受傷日を登録すると、同じ怪我を完遂した先輩たちの平均期間が目安として表示されます。</p>
+        <p>「その他」で受傷日を登録すると、同じ受傷の先輩たちが最後の PHASE に入るまでの平均期間が表示されます。</p>
       </GuideCard>
 
       {/* ここまで読んだことを知るための目印。スマホのブラウザでは、ここで「ホーム画面に追加」の画面に切り替わる */}
@@ -7039,22 +7063,21 @@ function InjuryDateCard({ orgId, player, protocol, setMyPlayer }) {
   const [saving, setSaving] = useState(false);
   const [avg, setAvg] = useState(null);
 
+  // 同じ受傷（プロトコル・BAMIC分類・損傷筋・部位が一致）のほかの選手が、最後の PHASE に入るまでの日数（v41）
   useEffect(() => {
     let active = true;
+    setAvg(null);
     if (protocol) {
-      sbSelect(
-        "protocol_avg_recovery",
-        `?org_id=eq.${encodeURIComponent(orgId)}&protocol_id=eq.${encodeURIComponent(protocol.id)}&select=*`
-      )
+      sbRpc("same_injury_return_days", { p_player_id: player.id })
         .then((rows) => {
-          if (active) setAvg(rows[0] || null);
+          if (active) setAvg((Array.isArray(rows) ? rows[0] : rows) || null);
         })
         .catch(() => {});
     }
     return () => {
       active = false;
     };
-  }, [protocol?.id, orgId]);
+  }, [protocol?.id, orgId, player.id, player.bamicGrade, player.hamstringMuscle, player.hamstringLocation]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -7100,12 +7123,12 @@ function InjuryDateCard({ orgId, player, protocol, setMyPlayer }) {
         <p className="text-xs text-blue-600 mt-2 flex items-start gap-1">
           <TrendingUp size={14} className="shrink-0 mt-0.5" />
           {avg.sample_size < 3 && "（件数が少ないため参考値）"}
-          過去に同じ怪我を完遂した{avg.sample_size}人の平均は、受傷から約
-          {Math.round((avg.avg_days / 7) * 10) / 10}週間（{avg.avg_days}日）でした。目安にしてください。
+          同じ受傷{classificationLabel(player) ? `（${classificationLabel(player)}）` : ""}の{avg.sample_size}人が PHASE {phaseCountOf(protocol)} に入るまでの平均は、受傷から約
+          {Math.round((Number(avg.avg_days) / 7) * 10) / 10}週間（{Number(avg.avg_days)}日・{avg.min_days}〜{avg.max_days}日）でした。
         </p>
       ) : (
         <p className="text-xs text-slate-400 mt-2">
-          完遂した選手の平均は、まだありません。
+          同じ受傷の選手の記録は、まだありません。
         </p>
       )}
     </div>
@@ -8901,10 +8924,10 @@ function buildExports(players, protocols, anonymous) {
   return {
     players: {
       file: "選手一覧.csv",
-      header: ["選手", "プロトコル", "PHASE", "受傷日", "復帰日", "受傷から復帰までの日数", "BAMIC", "損傷筋", "部位"],
+      header: ["選手", "プロトコル", "PHASE", "受傷日", "復帰日", "受傷から最後の PHASE までの日数", "BAMIC", "損傷筋", "部位"],
       rows: players.map((p, i) => [
         nameOf(p, i), protoOf(p), p.currentPhase, p.injuryDate || "", dateOnly(p.completedAt),
-        daysBetween(p.injuryDate, p.completedAt), p.bamicGrade || "",
+        returnDaysOf(p, protocols.find((m) => m.id === p.protocolId)) ?? "", p.bamicGrade || "",
         MUSCLE_LABELS[p.hamstringMuscle] || p.hamstringMuscle || "", LOCATION_LABELS[p.hamstringLocation] || p.hamstringLocation || "",
       ]),
     },
@@ -8970,8 +8993,8 @@ function ExportCard({ players, protocols, loading }) {
 function RecoverySummary({ player, protocol }) {
   if (!player.completedAt) return null;
   const durations = computeOwnPhaseDurations(player.phaseHistory);
-  const total =
-    player.injuryDate ? Math.max(0, Math.round((new Date(player.completedAt) - new Date(player.injuryDate)) / 86400000)) : null;
+  // 受傷から最後の PHASE に入った日まで（復帰の日数の数え方。v15.29）
+  const total = returnDaysOf(player, protocol);
   const phases = phaseRange(protocol).filter((n) => durations[n] !== undefined);
   const max = Math.max(1, ...phases.map((n) => durations[n]));
   return (
@@ -9947,7 +9970,7 @@ function HamstringClassificationCard({ orgId, player, protocol, readOnly, onSave
         <div className="mt-3 pt-3 border-t border-slate-100">
           <p className="text-xs text-blue-600 flex items-start gap-1">
             <TrendingUp size={14} className="shrink-0 mt-0.5" />
-            同じ分類（{summary}）で完遂した過去{stats.sample_size}人の受傷〜完遂日数は
+            同じ分類（{summary}）で PHASE {phaseCountOf(protocol)} に入った{stats.sample_size}人の、受傷からの日数は
             平均 {stats.avg_days}日（最短 {stats.min_days}日 / 最長 {stats.max_days}日）でした。
             {stats.sample_size < 3 && "件数が少ないため参考値です。"}
           </p>
@@ -9955,7 +9978,7 @@ function HamstringClassificationCard({ orgId, player, protocol, readOnly, onSave
       )}
       {summary && (!stats || stats.sample_size === 0) && (
         <p className="text-[11px] text-slate-400 mt-3 pt-3 border-t border-slate-100">
-          この分類の完遂データは、まだありません。
+          この分類で PHASE {phaseCountOf(protocol)} に入った選手の記録は、まだありません。
         </p>
       )}
 
@@ -10012,7 +10035,7 @@ function HamstringClassificationCard({ orgId, player, protocol, readOnly, onSave
                 </tbody>
               </table>
               <p className="text-[10px] text-slate-400 mt-1">
-                完遂した選手のみ集計。青がこの選手の分類。
+                PHASE {phaseCountOf(protocol)} に入った選手のみ集計。青がこの選手の分類。
               </p>
             </div>
           )}
