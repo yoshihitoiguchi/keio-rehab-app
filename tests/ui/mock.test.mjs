@@ -70,6 +70,7 @@ function makeState({ phase = 5, injuryDaysAgo = 20, booked = false, checks = [],
   st.player = () => ({ id: "p-1", org_id: "default", name: "山田 太郎", pin: "1111", protocol_id: st.protocolId, current_phase: st.phase, checklist: [], sos: false,
     injury_date: st.injury, booked_slot_id: st.slots.find((s) => s.booked_by === "p-1")?.id ?? null,
     reinjury_date: st.reinjury || null,
+    bamic_grade: "1b", hamstring_muscle: "biceps_femoris", hamstring_location: "mid_distal", is_demo: Boolean(st.isDemo),
     completed_at: st.completedAt || null, moved_to_returned_at: st.movedAt || null, reports: st.reports || [], messages: st.messages, treatments: [], phase_history: st.phaseHistory || [], player_exercise_progress: [], report_comments: st.reportComments || [], consultation_requests: st.consult });
   return st;
 }
@@ -101,6 +102,7 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/player_directory") return [{ id: "p-1", name: "山田 太郎" }];
   if (p === "/rest/v1/exercises") return exercises.map((e) => ({ ...e, org_id: "default", protocol_id: st.protocolId }));
   if (p === "/rest/v1/exercise_videos") return Object.entries(st.videos || {}).map(([name, video_url]) => ({ name, video_url }));
+  if (p === "/rest/v1/rpc/same_injury_phase_compare") { st.compareArgs = json; return st.compare === undefined ? { __status: 404 } : st.compare; }
   if (p === "/rest/v1/rpc/exercise_video_set") { st.videoSets = [...(st.videoSets || []), json]; return true; }
   if (p === "/rest/v1/report_comments") {
     if (method === "POST") { const row = { id: 90 + (st.reportComments || []).length, created_at: iso(new Date()), ...json }; st.reportComments = [...(st.reportComments || []), row]; return [row]; }
@@ -160,6 +162,7 @@ function respond(st, url, method, body) {
     if (method === "PATCH" && json && "completed_at" in json) st.completedAt = json.completed_at;
     if (method === "PATCH" && json?.reinjury_date) st.reinjury = json.reinjury_date;
     if (method === "PATCH" && json && "moved_to_returned_at" in json) st.movedAt = json.moved_to_returned_at;
+    if (method === "PATCH" && json && "is_demo" in json) st.isDemo = json.is_demo;
     return [st.player()];
   }
   if (method !== "GET") return [Array.isArray(json) ? json[0] : json || {}];
@@ -913,6 +916,56 @@ try {
     t = await text(c2);
     ok(t.includes("リストから選ぶ") && !t.includes("個別に追加") && c2.errs.length === 0, "DB の更新（v38）前は「個別に追加」を出さず、リストからの選択はそのまま使える");
   });
+  await step("同じ受傷の選手と PHASE ごとの比較（v40）", async () => {
+    const st = makeState({ phase: 2, injuryDaysAgo: 10 });
+    st.phaseHistory = [
+      { id: 1, player_id: "p-1", protocol_id: "hs", phase_number: 1, entered_at: iso(new Date(now.getTime() - 9 * 86400000)), left_at: iso(new Date(now.getTime() - 4 * 86400000)) },
+      { id: 2, player_id: "p-1", protocol_id: "hs", phase_number: 2, entered_at: iso(new Date(now.getTime() - 4 * 86400000)), left_at: null },
+    ];
+    st.checks = [{ phase_number: 1, item_index: 0, created_at: iso(new Date(now.getTime() - 7 * 86400000)), result: true }];
+    st.compare = [
+      { phase_number: 1, item_index: null, sample_size: 3, avg_days: "4.0", min_days: 3, max_days: 5, injury_sample_size: 3, avg_from_injury: "7.3", min_from_injury: 6, max_from_injury: 9 },
+      { phase_number: 1, item_index: 0, sample_size: 3, avg_days: "2.0", min_days: 1, max_days: 3, injury_sample_size: 3, avg_from_injury: "5.0", min_from_injury: 4, max_from_injury: 6 },
+      { phase_number: 2, item_index: 0, sample_size: 1, avg_days: "1.0", min_days: 1, max_days: 1, injury_sample_size: 1, avg_from_injury: "9.0", min_from_injury: 9, max_from_injury: 9 },
+    ];
+    const p = await newPage(st);
+    await playerLogin(p);
+    await clickText(p, "その他", "nav button"); await sleep(900);
+    let t = await text(p);
+    ok(st.compareArgs?.p_player_id === "p-1", "選手の画面から、自分の選手IDで比較を読み込む");
+    ok(t.includes("同じ受傷の選手と PHASE ごとの比較") && t.includes("BAMIC 1b / 大腿二頭筋 / 中間位〜遠位"), "選手：同じ受傷（疾患名・BAMIC・損傷筋・部位）の比較カードが見える");
+    ok(t.includes("受傷6日目に通過（5日）") && t.includes("平均 受傷7.3日目に通過（6〜9・3人）"), "PHASE ごとに、自分と同じ受傷の選手の通過日が並ぶ");
+    ok(t.includes("いまの PHASE（4日目）") && t.includes("まだ通過した選手はいません"), "いまの PHASE と、まだ誰も通過していない PHASE");
+    ok(!t.includes("条件A-1"), "基準の一覧は最初は畳んである");
+    await clickText(p, "PHASE 1：段階1の名前"); await sleep(400);
+    t = await text(p);
+    ok(t.includes("条件A-1") && t.includes("あなた：受傷3日目") && t.includes("平均 受傷5日目（4〜6・3人）"), "PHASE を開くと、基準ごとに自分と同じ受傷の選手の日が並ぶ");
+    ok(t.includes("このアプリは診断を行いません"), "基準を出すカードには注記が付く");
+    for (const w of ["判定", "練習可", "問題ありません"]) ok(!t.includes(w), `使わない言葉「${w}」が出ない`);
+    if (process.env.SHOT_DIR) await p.screenshot({ path: process.env.SHOT_DIR + "/same-injury-player.png", fullPage: true });
+    ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
+
+    // DB の更新（v40）前・比べる記録がないときはカードを出さない
+    for (const [label, cmp] of [["v40 の前", undefined], ["記録なし", []]]) {
+      const s2 = makeState({ phase: 2 }); s2.compare = cmp;
+      const p2 = await newPage(s2);
+      await playerLogin(p2);
+      await clickText(p2, "その他", "nav button"); await sleep(800);
+      ok(!(await text(p2)).includes("同じ受傷の選手と") && p2.errs.length === 0, `${label}はカードを出さない`);
+    }
+
+    // 指導者：デモの選手を集計から外せる
+    const c = await newPage(st);
+    await coachLogin(c);
+    for (const e of await c.$$("button")) { const tt = await e.evaluate((x) => x.innerText.trim()); const inNav = await e.evaluate((x) => !!x.closest("nav")); if (tt === "記録" && !inNav) { await e.click(); break; } }
+    await sleep(900);
+    t = await text(c);
+    ok(t.includes("デモの選手") && t.includes("集計に含める") && t.includes("同じ受傷の選手と PHASE ごとの比較"), "指導者の記録タブに、デモの切り替えと比較カードが出る");
+    await c.$eval('button[aria-label="デモの選手"]', (n) => { n.scrollIntoView({ block: "center" }); n.click(); }); await sleep(800);
+    ok(st.patches.some((x) => x.p === "/rest/v1/players" && x.b?.is_demo === true) && (await text(c)).includes("集計に含めない"), "デモの選手にすると、集計に含めない");
+    ok(c.errs.length === 0, "例外なし " + c.errs.join("|"));
+  });
+
   await step("選手：面談の日が過ぎたら、別の日の面談を取り直せる", async () => {
     const st = makeState({ injuryDaysAgo: 30 });
     // 以前に予約して、もう日が過ぎた面談（players.booked_slot_id もこの枠を指したまま）

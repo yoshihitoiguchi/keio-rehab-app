@@ -771,6 +771,68 @@ await as(U1, "update players set moved_to_returned_at = now() where id = 'p-b1'"
 ok((await db.query("select moved_to_returned_at is null v from players where id = 'p-b1'")).rows[0].v === true,
    "[v37] ほかの組織からは書き換えられない");
 
+// ===== v40：同じ受傷の選手と PHASE ごとの基準を比べる =====
+// 本番に合わせて、この段階で使う列とビューを用意する（テストの土台は v13 時代の最小構成のため）
+await db.exec(`alter table players add column if not exists bamic_grade text, add column if not exists hamstring_muscle text,
+    add column if not exists hamstring_location text, add column if not exists injury_date date;
+  alter table protocols add column if not exists classification_scheme text;
+  alter table phase_history add column if not exists entered_at timestamptz, add column if not exists left_at timestamptz;
+  alter table gate_item_checks add column if not exists phase_number int, add column if not exists item_index int,
+    add column if not exists created_at timestamptz default now();
+  alter table gate_item_checks alter column result type boolean using (result = 'ok');
+  drop view if exists protocol_phase_avg_duration;
+  create view protocol_phase_avg_duration with (security_invoker = true) as
+    select p.name as protocol_name, ph.phase_number,
+           round(avg(extract(epoch from ph.left_at - ph.entered_at) / 86400::numeric), 1) as avg_days, count(*) as sample_size
+      from phase_history ph join protocols p on p.id = ph.protocol_id where ph.left_at is not null group by p.name, ph.phase_number;
+  grant select on protocol_phase_avg_duration to authenticated;
+  update protocols set classification_scheme = 'hamstring' where id = 'comm-b-proto-hamstring-10';
+  insert into players (id, org_id, name, pin, protocol_id, bamic_grade, hamstring_muscle, hamstring_location, injury_date) values
+    ('p40-me',   'comm-b', '本人',   '0000', 'comm-b-proto-hamstring-10', '1b', 'biceps_femoris', 'mid_distal', '2026-10-08'),
+    ('p40-a',    'comm-b', '先輩A',  '0000', 'comm-b-proto-hamstring-10', '1b', 'biceps_femoris', 'mid_distal', '2026-09-28'),
+    ('p40-b',    'comm-b', '先輩B',  '0000', 'comm-b-proto-hamstring-10', '1b', 'biceps_femoris', 'mid_distal', '2026-09-30'),
+    ('p40-demo', 'comm-b', ' デモ',  '0000', 'comm-b-proto-hamstring-10', '1b', 'biceps_femoris', 'mid_distal', '2026-09-30'),
+    ('p40-diff', 'comm-b', '別分類', '0000', 'comm-b-proto-hamstring-10', '2a', 'biceps_femoris', 'mid_distal', '2026-09-30');
+  insert into phase_history (player_id, protocol_id, phase_number, entered_at, left_at) values
+    ('p40-me',   'comm-b-proto-hamstring-10', 1, '2026-10-10', null),
+    ('p40-a',    'comm-b-proto-hamstring-10', 1, '2026-10-01', '2026-10-05'),
+    ('p40-a',    'comm-b-proto-hamstring-10', 2, '2026-10-05', null),
+    ('p40-b',    'comm-b-proto-hamstring-10', 1, '2026-10-02', '2026-10-08'),
+    ('p40-demo', 'comm-b-proto-hamstring-10', 1, '2026-10-01', '2026-10-02'),
+    ('p40-diff', 'comm-b-proto-hamstring-10', 1, '2026-10-01', '2026-10-20');
+  insert into gate_item_checks (player_id, checker_role, result, phase_number, item_index, created_at) values
+    ('p40-a',    'self', true,  1, 0, '2026-10-03'),
+    ('p40-b',    'self', false, 1, 0, '2026-10-03'),
+    ('p40-b',    'self', true,  1, 0, '2026-10-06'),
+    ('p40-b',    'self', true,  1, 0, '2026-10-07'),
+    ('p40-demo', 'self', true,  1, 0, '2026-10-01'),
+    ('p40-diff', 'self', true,  1, 0, '2026-10-02');`);
+ok(!(await run("supabase_migration_v40_same_injury_compare.sql")), "[v40] 適用 1 回目");
+ok(!(await run("supabase_migration_v40_same_injury_compare.sql")), "[v40] 適用 2 回目（冪等）");
+ok((await db.query("select string_agg(id, ',' order by id) s from players where is_demo")).rows[0].s === "p40-demo", "[v40] 名前が「デモ」で始まる選手だけがデモになる");
+const c40 = (await as(U6, "select * from public.same_injury_phase_compare('p40-me')")).rows || [];
+const ph40 = c40.find((r) => r.phase_number === 1 && r.item_index === null);
+const it40 = c40.find((r) => r.phase_number === 1 && r.item_index === 0);
+ok(ph40?.sample_size === 2 && Number(ph40.avg_days) === 5 && ph40.min_days === 4 && ph40.max_days === 6
+   && Number(ph40.avg_from_injury) === 7.5 && ph40.min_from_injury === 7 && ph40.max_from_injury === 8,
+   "[v40] PHASE の日数：同じ受傷のほかの選手だけ（本人・デモ・別分類は含めない） " + JSON.stringify(ph40));
+ok(it40?.sample_size === 2 && Number(it40.avg_days) === 3 && Number(it40.avg_from_injury) === 5.5,
+   "[v40] 基準ごと：最初に満たした日で数える " + JSON.stringify(it40));
+ok(!c40.some((r) => r.phase_number === 2 && r.item_index === null), "[v40] まだ終えていない PHASE は日数に入れない");
+await db.exec("delete from players where id = 'p40-b'");
+ok((await as(U6, "select * from public.same_injury_phase_compare('p40-me')")).rows?.find((r) => r.phase_number === 1 && r.item_index === null)?.sample_size === 1,
+   "[v40] 一覧から削除した選手は含まれない");
+await db.exec("update players set is_demo = true where id = 'p40-a'");
+ok((await as(U6, "select * from public.same_injury_phase_compare('p40-me')")).rows?.length === 0, "[v40] 指導者がデモにした選手も含まれない");
+await db.exec("update players set is_demo = false where id = 'p40-a'");
+ok((await as(U1, "select * from public.same_injury_phase_compare('p40-me')")).rows?.length === 0
+   && !!(await as(null, "select * from public.same_injury_phase_compare('p40-me')")).error, "[v40] ほかの組織からは0件・匿名キーでは呼べない");
+ok((await db.query("select sample_size::int n from protocol_phase_avg_duration where protocol_name = 'ハムストリング肉離れ' and phase_number = 1")).rows[0]?.n
+   === (await db.query("select count(*)::int n from phase_history h join players pl on pl.id = h.player_id join protocols p on p.id = h.protocol_id where p.name = 'ハムストリング肉離れ' and h.phase_number = 1 and h.left_at is not null and not pl.is_demo")).rows[0].n
+   && (await db.query("select reloptions::text o from pg_class where relname = 'protocol_phase_avg_duration'")).rows[0].o === "{security_invoker=true}",
+   "[v40] PHASE 別の平均日数のビューもデモを除く（見る人の権限で動くまま）");
+await db.exec("delete from players where id like 'p40-%'");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");
