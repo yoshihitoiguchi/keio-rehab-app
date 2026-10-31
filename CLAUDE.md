@@ -178,6 +178,7 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `exercise_logs` | 「今日やった種目」の記録（選手・種目・日付で1件）（v30） |
 | `exercise_videos` | 種目の動画の URL（種目名で1件。**全組織で共通**。読むのはログイン中の誰でも、書くのは `exercise_video_set()` だけ）（v33） |
 | `report_comments` | 日報の本音へのコメント・返信（日報1件ごと。`sender` が staff / player、指導者は `author_role` と `author_name` つき。書き換え不可・削除は可）（v35） |
+| `report_reactions` | 日報へのリアクション（日報1件ごと。指導者が立場 `author_role` ごとに `kind`＝seen 確認しました／good いいね／cheer がんばろう を付ける。同じ立場・種類は1件、もう一度押すと削除。表がない DB ではリアクションを出さない）（v39）。選手の日報タブ「これまでの日報」は、返事がなくても自分の日報をすべて見返せる（v15.26） |
 | `player_reinjuries` | 再受傷の記録（1回ごとに1行。再受傷日・記録時の PHASE・記録時の復帰日・再開した PHASE・メモ）。いちばん新しい再受傷日は `players.reinjury_date`。面談の目安（14日）はこの日から数え直す（`episodeStartDate`）（v36） |
 | `meeting_notes` | 面談メモ（面談の内容。指導者が書き、選手本人と指導者が読む。`held_on` が面談の日）（v32） |
 | `player_metric_history` / `player_exercise_progress` | 記録の推移 |
@@ -253,6 +254,7 @@ GitHub Actions の **「本番DBに反映」**（`.github/workflows/db-apply.yml
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
+| v39_report_reactions | **適用済み（2026-10-31）** | `report_reactions`（日報へのリアクション）と通知のトリガー。表の追加だけ。戻し方はファイルの冒頭 |
 | v38_offsite_custom_items | **適用済み（2026-10-31）** | `player_offsite_custom_items`（選手ごとに足した患部外トレーニング）。表の追加だけ。SQL Editor で作者が実行（コネクタの確認が届かなかったため）。戻し方はファイルの冒頭 |
 | v37_returned_list | **適用済み（2026-10-31）** | `players.moved_to_returned_at`（指導者が復帰者リストへ移した日時）。列の追加だけ。戻し方はファイルの冒頭 |
 | v36_reinjury | **適用済み（2026-10-25）** | `players.reinjury_date` と `player_reinjuries`（再受傷の記録）。列と表の追加だけ。公開中のアプリはそのまま動く。戻し方はファイルの冒頭 |
@@ -350,10 +352,10 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 公開の確認は、本番の JS に番号が入っているかで行う（`curl` で `/assets/index-*.js` を取り、`v15.14` を探す）。
 
 ```js
-const APP_BUILD = "v15.25";
+const APP_BUILD = "v15.26";
 ```
 
-本番に出ているのは `v15.25`（2026-10-31 公開）。
+本番に出ているのは `v15.26`（2026-10-31 公開）。
 
 過去に「全く改善されてない」が3回続き、原因が
 **App.jsx をリポジトリ直下に置いていて `src/` に入っていなかった**ことだった。
