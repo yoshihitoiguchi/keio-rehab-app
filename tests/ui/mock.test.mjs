@@ -216,10 +216,13 @@ async function playerLogin(p) {
   await clickText(p, "山田 太郎"); await sleep(400);
   await p.type('input[maxlength="4"]', "1111"); await p.keyboard.press("Enter"); await sleep(1500);
 }
-async function coachLogin(p) {
+async function coachLogin(p, role = "コーチ") {
   await orgLogin(p);
   await clickText(p, "指導者"); await sleep(500);
-  await p.type('input[type="password"]', "coach"); await p.keyboard.press("Enter"); await sleep(1500);
+  await p.type('input[type="password"]', "coach"); await p.keyboard.press("Enter"); await sleep(800);
+  // 続けて自分の立場を選ぶ（v15.30）
+  for (const e of await p.$$("button")) { if ((await e.evaluate((n) => n.innerText.trim())) === role) { await e.click(); break; } }
+  await sleep(1200);
 }
 const noOverflow = (p) => p.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
 async function step(name, fn) { try { await fn(); } catch (e) { ok(false, `${name}: ${e.message}`); } }
@@ -691,7 +694,7 @@ try {
     await clickText(c, "コメントする"); await sleep(300);
     await c.type('textarea[placeholder="コメント"]', "怖さがあるのは自然です。");
     ok(!(await c.$('input[aria-label="書く人の名前"]')), "名前の入力欄はない（チャットと同じく立場を選ぶ）");
-    await c.select('select[aria-label="書く人の立場"]', "doctor");
+    await c.select('select[aria-label="あなたの立場"]', "doctor");
     await clickText(c, "送る"); await sleep(800);
     const rc = st.reportComments?.[0];
     ok(rc?.report_id === 1 && rc.player_id === "p-1" && rc.sender === "staff" && rc.author_role === "doctor" && !rc.author_name && rc.body === "怖さがあるのは自然です。", "コメントが、立場つきで日報に残る");
@@ -741,6 +744,48 @@ try {
     await p00.close();
   });
 
+  await step("指導者ログインで立場を選ぶ（v15.30）", async () => {
+    const today = ((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`)(new Date());
+    const st = makeState({ injuryDaysAgo: 3, phase: 5 });
+    st.reports = [{ id: 1, player_id: "p-1", date: today, vas: 2, mental: 3, fatigue: 3, sleep_quality: 7, honne: "", created_at: iso(new Date()) }];
+    const c = await newPage(st);
+    await orgLogin(c);
+    await clickText(c, "指導者"); await sleep(500);
+    await c.type('input[type="password"]', "coach"); await c.keyboard.press("Enter"); await sleep(800);
+    let t = await text(c);
+    ok(t.includes("あなたの立場") && ["医師", "学生トレーナー", "トレーナー", "コーチ"].every((x) => t.includes(x)), "パスワードのあとに、立場を選ぶ画面が出る");
+    await c.screenshot({ path: "/tmp/shot-role.png" }).catch(() => {});
+    for (const e of await c.$$("button")) { if ((await e.evaluate((n) => n.innerText.trim())) === "医師") { await e.click(); break; } }
+    await sleep(1200);
+    ok((await c.$eval('select[aria-label="あなたの立場"]', (n) => n.value)) === "doctor", "画面の上に、選んだ立場が出る");
+    ok(!(await c.$('select[aria-label="書く人の立場"]')) && !(await c.$('select[aria-label="送信者の立場"]')), "画面ごとの立場の選択はない");
+    await clickText(c, "いいね", "button"); await sleep(600);
+    ok(st.reactions?.[0]?.author_role === "doctor", "リアクションは、ログインした立場で記録される");
+    await clickText(c, "チャット", "button"); await sleep(500);
+    await c.type('input[placeholder="メッセージを入力"]', "様子はどうですか");
+    await c.keyboard.press("Enter"); await sleep(800);
+    const msg = st.posts.find((x) => x.p === "/rest/v1/messages");
+    ok(msg?.b?.staff_role === "doctor", "チャットも、ログインした立場で送られる " + JSON.stringify(msg?.b?.staff_role));
+    await clickText(c, "日程調整", "nav button"); await sleep(800);
+    t = await text(c);
+    ok(t.includes("空いている日時（医師）") && !t.includes("だれの予定か"), "面談の空き日程は、立場を選ばずに登録する");
+    const y = new Date().getFullYear() + 1;
+    await c.type('textarea[placeholder^="11月5日"]', `${y}年2月3日 13時〜14時`); await sleep(300);
+    await clickText(c, "1件を登録する"); await sleep(800);
+    const av = st.posts.find((x) => x.p === "/rest/v1/staff_availability");
+    ok(av?.b?.[0]?.role === "doctor", "空き日程は、ログインした立場（医師）で登録される");
+    // 立場を変えると、その後の記録に使われる。学生トレーナーの空き日程はトレーナーとして数える
+    await c.select('select[aria-label="あなたの立場"]', "student_trainer"); await sleep(300);
+    t = await text(c);
+    ok(t.includes("空いている日時（学生トレーナー）"), "上の立場から変更できる");
+    await c.type('textarea[placeholder^="11月5日"]', `${y}年2月4日 13時〜14時`); await sleep(300);
+    await clickText(c, "1件を登録する"); await sleep(800);
+    const av2 = st.posts.filter((x) => x.p === "/rest/v1/staff_availability").pop();
+    ok(av2?.b?.[0]?.role === "trainer", "学生トレーナーの空き日程は、トレーナーの枠として登録される");
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+    await c.close();
+  });
+
   await step("日報へのリアクション（v15.26）", async () => {
     const today = ((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`)(new Date());
     const st = makeState({ injuryDaysAgo: 3, phase: 5 });
@@ -749,9 +794,9 @@ try {
     await coachLogin(c);
     let t = await text(c);
     ok(t.includes("確認しました") && t.includes("いいね") && t.includes("がんばろう"), "指導者の日報に、リアクションのボタンが出る");
-    await c.select('select[aria-label="書く人の立場"]', "doctor");
+    await c.select('select[aria-label="あなたの立場"]', "doctor");
     await clickText(c, "いいね", "button"); await sleep(600);
-    await c.select('select[aria-label="書く人の立場"]', "student_trainer");
+    await c.select('select[aria-label="あなたの立場"]', "student_trainer");
     await clickText(c, "いいね", "button"); await sleep(600);
     await clickText(c, "確認しました", "button"); await sleep(600);
     ok(st.reactions?.length === 3 && st.reactions.every((x) => x.report_id === 1 && x.player_id === "p-1")

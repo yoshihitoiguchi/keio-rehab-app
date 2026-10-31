@@ -277,7 +277,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.29";
+const APP_BUILD = "v15.30";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -866,6 +866,39 @@ const CHAT_STAFF_ROLE_LABELS = {
   doctor: "医師",
 };
 
+// 指導者モードの「自分の立場」（v15.30）。指導者ログインのときに選び、この端末に覚える。
+// リアクション・コメント・チャット・メモは、すべてこの立場で記録する（画面ごとに選ばない）。
+const STAFF_ROLE_KEY = "resprint.staffRole";
+let staffRoleValue = (() => {
+  try {
+    const v = localStorage.getItem(STAFF_ROLE_KEY);
+    return CHAT_STAFF_ROLE_LABELS[v] ? v : null;
+  } catch {
+    return null;
+  }
+})();
+const staffRoleSubs = new Set();
+function setStaffRole(v) {
+  if (!CHAT_STAFF_ROLE_LABELS[v]) return;
+  staffRoleValue = v;
+  try {
+    localStorage.setItem(STAFF_ROLE_KEY, v);
+  } catch {
+    // 保存できなくても、この画面を開いている間は使える
+  }
+  staffRoleSubs.forEach((f) => f(v));
+}
+// 立場が決まっていないとき（古い画面から続けて使っている場合など）はコーチとして扱う
+function useStaffRole() {
+  const [role, setRole] = useState(staffRoleValue);
+  useEffect(() => {
+    staffRoleSubs.add(setRole);
+    setRole(staffRoleValue);
+    return () => staffRoleSubs.delete(setRole);
+  }, []);
+  return role || CHAT_STAFF_ROLES[0].value;
+}
+
 // フェーズごとの色分け（赤→オレンジ→黄→黄緑→青→紫、最大10フェーズまで対応）
 const PHASE_TEXT_COLORS = {
   1: "text-red-600",
@@ -1428,6 +1461,7 @@ function RehabApp() {
           <PasswordGate orgId={org.id} onAuthed={handleCoachAuthed} onCancel={() => setMode("player")} />
         )}
 
+        {!loading && mode === "coach" && coachAuthed && <StaffRoleBar />}
         {!loading && mode === "coach" && coachAuthed && (
           <CoachDashboard
             orgId={org.id}
@@ -2642,6 +2676,30 @@ function OrgLogin({ onAuthed, invite }) {
   );
 }
 
+// 指導者モードの上部：いまの立場と、その変更
+function StaffRoleBar() {
+  const role = useStaffRole();
+  return (
+    <div className="bg-white border-b border-slate-200 print:hidden">
+      <div className="max-w-6xl mx-auto px-3 sm:px-4 py-1.5 flex items-center justify-end gap-2">
+        <span className="text-xs text-slate-500">立場</span>
+        <select
+          value={role}
+          onChange={(e) => setStaffRole(e.target.value)}
+          aria-label="あなたの立場"
+          className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm font-bold text-slate-700 bg-white"
+        >
+          {CHAT_STAFF_ROLES.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 // ==================================================================
 // パスワードゲート（指導者モード・組織スコープ）
 // ==================================================================
@@ -2683,7 +2741,7 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
       if (r?.ok) {
         coachSecret = pwInput;
         setPwInput("");
-        onAuthed();
+        setPhase("role"); // 続けて、自分の立場を選ぶ
       } else if (r && !r.set) {
         setPhase("unset");
       } else {
@@ -2701,6 +2759,35 @@ function PasswordGate({ orgId, onAuthed, onCancel }) {
       <div className="max-w-sm mx-auto mt-16 flex flex-col items-center gap-2 text-slate-400">
         <Loader2 className="animate-spin" size={22} />
         <p className="text-sm">確認中...</p>
+      </div>
+    );
+  }
+
+  if (phase === "role") {
+    return (
+      <div className="max-w-sm mx-auto mt-16 bg-white rounded-2xl shadow-lg p-8 border border-slate-200">
+        <div className="flex flex-col items-center gap-3 mb-6">
+          <div className="w-14 h-14 rounded-full bg-blue-50 flex items-center justify-center">
+            <UserRound className="text-blue-600" size={26} />
+          </div>
+          <h2 className="text-lg font-bold text-slate-800">あなたの立場</h2>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {CHAT_STAFF_ROLES.map((o) => (
+            <button
+              key={o.value}
+              onClick={() => {
+                setStaffRole(o.value);
+                onAuthed();
+              }}
+              className={`min-h-[52px] rounded-xl border-2 text-sm font-bold ${
+                staffRoleValue === o.value ? "border-blue-600 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-700"
+              }`}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
       </div>
     );
   }
@@ -2795,7 +2882,8 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, p
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length]);
   const [attachment, setAttachment] = useState(null); // { url, kind } 送信前の写真・動画
-  const [role, setRole] = useState(roleOptions?.[0]?.value ?? null);
+  const staffRole = useStaffRole();
+  const role = roleOptions ? staffRole : null;
   const [sending, setSending] = useState(false);
   const [showExtra, setShowExtra] = useState(false);
   const [painType, setPainType] = useState("");
@@ -2945,20 +3033,6 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, p
         </div>
       )}
       <div className="flex flex-wrap gap-2">
-        {roleOptions && (
-          <select
-            value={role}
-            onChange={(e) => setRole(e.target.value)}
-            aria-label="送信者の立場"
-            className="w-full sm:w-auto border border-slate-300 rounded-lg px-3 py-2.5 text-sm bg-white shrink-0"
-          >
-            {roleOptions.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        )}
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -3521,7 +3595,9 @@ function MeetingUrlField({ slot, onSave, defaultUrl }) {
 function CoachScheduling({ orgId, slots, setSlots }) {
   const [availability, setAvailability] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [role, setRole] = useState("coach");
+  // 空き日程は、ログインした立場で登録する（v15.30）。面談の枠はコーチ・トレーナー・ドクターで数えるので、学生トレーナーはトレーナーとして扱う
+  const staffRole = useStaffRole();
+  const role = staffRole === "student_trainer" ? "trainer" : staffRole;
   // 空き日程は自由に書く（例「11月5日 13時〜17時 OK」）。1時間ごとの枠に直して登録する
   const [freeText, setFreeText] = useState("");
   const [saving, setSaving] = useState(false);
@@ -3617,19 +3693,7 @@ function CoachScheduling({ orgId, slots, setSlots }) {
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <div className="bg-white rounded-xl border border-slate-200 p-5 h-fit">
         <h3 className="font-bold text-slate-700 text-sm mb-4">空いている日時を登録</h3>
-        <label className="text-xs text-slate-500">だれの予定か</label>
-        <select
-          value={role}
-          onChange={(e) => setRole(e.target.value)}
-          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 mb-3 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-        >
-          {SCHEDULING_ROLES.map((r) => (
-            <option key={r.value} value={r.value}>
-              {r.label}
-            </option>
-          ))}
-        </select>
-        <label className="text-xs text-slate-500">空いている日時</label>
+        <label className="text-xs text-slate-500">空いている日時（{CHAT_STAFF_ROLE_LABELS[staffRole]}）</label>
         <textarea
           value={freeText}
           onChange={(e) => {
@@ -8461,7 +8525,7 @@ function TermsEditor() {
 function BroadcastBox({ players, setCoachPlayers }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
-  const [role, setRole] = useState(CHAT_STAFF_ROLES[0].value);
+  const role = useStaffRole();
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
   const targets = players.filter((p) => !p.completedAt);
@@ -8506,13 +8570,6 @@ function BroadcastBox({ players, setCoachPlayers }) {
   return (
     <div className="border-t border-slate-200 p-3 space-y-2 bg-slate-50">
       <p className="text-xs font-bold text-slate-600">現役の選手 {targets.length}名のチャットに送ります</p>
-      <select value={role} onChange={(e) => setRole(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm bg-white">
-        {CHAT_STAFF_ROLES.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}として送る
-          </option>
-        ))}
-      </select>
       <textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -8585,7 +8642,7 @@ function ReinjuryCard({ player, protocol, setCoachPlayers }) {
   const [date, setDate] = useState(todayStr());
   const [phase, setPhase] = useState(1);
   const [note, setNote] = useState("");
-  const [role, setRole] = useState(CHAT_STAFF_ROLES[0].value);
+  const role = useStaffRole();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
@@ -8758,18 +8815,6 @@ function ReinjuryCard({ player, protocol, setCoachPlayers }) {
             />
           </label>
           <div className="flex gap-2">
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              aria-label="記録する人の立場"
-              className="border border-slate-300 rounded-lg px-2 py-2.5 text-sm bg-white shrink-0"
-            >
-              {CHAT_STAFF_ROLES.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
             <button
               onClick={() => setOpen(false)}
               disabled={saving}
@@ -8813,7 +8858,7 @@ function ReinjuryCard({ player, protocol, setCoachPlayers }) {
 function StaffNotes({ player }) {
   const [notes, setNotes] = useState([]);
   const [text, setText] = useState("");
-  const [role, setRole] = useState(CHAT_STAFF_ROLES[0].value);
+  const role = useStaffRole();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   useEffect(() => {
@@ -8857,13 +8902,6 @@ function StaffNotes({ player }) {
       </h4>
       <p className="text-xs text-slate-400 mb-3">指導者どうしの引き継ぎ用です。選手の画面には出ません。</p>
       <div className="flex gap-2 mb-2">
-        <select value={role} onChange={(e) => setRole(e.target.value)} aria-label="書く人の立場" className="border border-slate-300 rounded-lg px-2 py-2.5 text-sm bg-white shrink-0">
-          {CHAT_STAFF_ROLES.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
         <button
           onClick={add}
           disabled={saving || !text.trim()}
@@ -9105,7 +9143,7 @@ function MeetingNotes({ player, viewer }) {
   const [loaded, setLoaded] = useState(false);
   const [open, setOpen] = useState(false);
   const [date, setDate] = useState(todayStr());
-  const [role, setRole] = useState(CHAT_STAFF_ROLES[0].value);
+  const role = useStaffRole();
   const [text, setText] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -9176,13 +9214,6 @@ function MeetingNotes({ player, viewer }) {
           <div className="space-y-2 mb-3">
             <div className="flex gap-2">
               <input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="面談の日" className="flex-1 min-w-0 border border-slate-300 rounded-lg px-3 py-2.5 text-sm bg-white" />
-              <select value={role} onChange={(e) => setRole(e.target.value)} aria-label="書く人の立場" className="border border-slate-300 rounded-lg px-2 py-2.5 text-sm bg-white">
-                {CHAT_STAFF_ROLES.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
             </div>
             <textarea
               value={text}
@@ -9331,16 +9362,6 @@ function FaqEditor({ protocol, onSave }) {
 // ------------------------------------------------------------------
 // 日報の「本音」へのコメント・返信（v35）：チャットとは別に、日報1件ごとに残す
 // ------------------------------------------------------------------
-const COMMENT_AUTHOR_KEY = "resprint.commentAuthor"; // この端末で最後に使った立場と名前
-function readCommentAuthor() {
-  try {
-    const v = JSON.parse(localStorage.getItem(COMMENT_AUTHOR_KEY) || "null");
-    return v && typeof v === "object" ? v : {};
-  } catch {
-    return {};
-  }
-}
-
 // 日報へのリアクション（v39）：返事を書かなくても、立場ごとに反応を返せる
 const REPORT_REACTIONS = [
   { kind: "seen", label: "確認しました", icon: CheckCheck },
@@ -9407,25 +9428,16 @@ function ReportSummaryLine({ r }) {
 
 function ReportThread({ player, viewer }) {
   const staff = viewer === "staff";
-  const saved = staff ? readCommentAuthor() : {};
   const [comments, setComments] = useState([]);
   const [reactions, setReactions] = useState([]);
   const [reactionsReady, setReactionsReady] = useState(false); // DB の更新（v39）前は出さない
   const [openId, setOpenId] = useState(null); // 入力欄を開いている日報
   const [showAll, setShowAll] = useState(false);
   const [text, setText] = useState("");
-  const [role, setRoleState] = useState(CHAT_STAFF_ROLES.some((o) => o.value === saved.role) ? saved.role : CHAT_STAFF_ROLES[0].value);
+  const role = useStaffRole();
   const [saving, setSaving] = useState(false);
   const [reacting, setReacting] = useState(false);
   const [error, setError] = useState(null);
-  const setRole = (v) => {
-    setRoleState(v);
-    try {
-      localStorage.setItem(COMMENT_AUTHOR_KEY, JSON.stringify({ role: v }));
-    } catch {
-      // 保存できなくても、次回選び直すだけ
-    }
-  };
 
   const loadReactions = () =>
     sbSelect("report_reactions", `?player_id=eq.${encodeURIComponent(player.id)}&select=*&order=created_at.asc`)
@@ -9524,15 +9536,6 @@ function ReportThread({ player, viewer }) {
         <p className={`font-bold text-slate-700 flex items-center gap-1.5 ${staff ? "text-xs" : "text-sm"}`}>
           <MessageCircle size={staff ? 14 : 16} className="text-blue-600" /> {staff ? "本音とコメント" : "これまでの日報"}
         </p>
-        {staff && (
-          <select value={role} onChange={(e) => setRole(e.target.value)} aria-label="書く人の立場" className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white">
-            {CHAT_STAFF_ROLES.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        )}
       </div>
       {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
       <ul className="space-y-2">
