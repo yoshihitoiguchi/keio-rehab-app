@@ -1,0 +1,126 @@
+# 本番DBにマイグレーションを反映する（手動で起動したときだけ動く）
+#
+#   1. 控えを取る：resprint_backup.take_snapshot('vNN の前')
+#   2. supabase_migration_vNN_*.sql を本番に流す
+#   3. （任意）確認の SELECT を流して結果を出す
+#
+#   起動するのは、作者の指示を受けた Claude か作者本人だけ（リポジトリへの書き込み権限が必要）。
+#   push や PR では動かない。結果は実行ページの Summary に出る。
+#   必要な秘密キー：SUPABASE_ACCESS_TOKEN（Supabase の Access Token。Settings → Secrets → Actions に登録）
+name: 本番DBに反映
+
+on:
+  workflow_dispatch:
+    inputs:
+      file:
+        description: "流すファイル（例：supabase_migration_v37_returned_list.sql）"
+        required: true
+        type: string
+      branch:
+        description: "ファイルを読むブランチ（PR を合流する前に流すときは PR のブランチ）"
+        required: true
+        default: main
+        type: string
+      snapshot_label:
+        description: "控えの名前（空なら「vNN の前」）"
+        required: false
+        type: string
+      check_sql:
+        description: "反映後に流す確認の SELECT（任意。select / with で始まる1文だけ）"
+        required: false
+        type: string
+
+concurrency:
+  group: production-db
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PROJECT_REF: akvfrihatvfkrjzpxtcw
+      FILE: ${{ inputs.file }}
+      BRANCH: ${{ inputs.branch }}
+      LABEL_IN: ${{ inputs.snapshot_label }}
+      CHECK_SQL: ${{ inputs.check_sql }}
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - name: 入力の確認
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::このワークフローは main から起動してください（ファイルを読むブランチは branch で指定）"; exit 1
+          fi
+          if ! [[ "$FILE" =~ ^supabase_migration_v[0-9]+[a-z0-9_]*\.sql$ ]]; then
+            echo "::error::ファイル名は supabase_migration_vNN_xxx.sql の形にしてください：$FILE"; exit 1
+          fi
+          if ! [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "::error::ブランチ名が不正です：$BRANCH"; exit 1
+          fi
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+            echo "::error::秘密キー SUPABASE_ACCESS_TOKEN が登録されていません"; exit 1
+          fi
+          if [ -n "$CHECK_SQL" ]; then
+            body="$(printf '%s' "$CHECK_SQL" | sed -E 's/;[[:space:]]*$//')"
+            if ! printf '%s' "$body" | grep -qiE '^[[:space:]]*(select|with)[[:space:]]' || printf '%s' "$body" | grep -q ';'; then
+              echo "::error::確認の SQL は select / with で始まる1文だけにしてください"; exit 1
+            fi
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          persist-credentials: false
+
+      - name: 本番に反映
+        run: |
+          set -euo pipefail
+          test -f "$FILE" || { echo "::error::$BRANCH に $FILE がありません"; exit 1; }
+          ver="$(printf '%s' "$FILE" | sed -E 's/^supabase_migration_(v[0-9]+).*/\1/')"
+          label="${LABEL_IN:-$ver の前}"
+          label_sql="'$(printf '%s' "$label" | sed "s/'/''/g")'"
+
+          q() {  # $1 = SQL。結果の JSON を標準出力へ。失敗したら止める
+            local out code
+            out="$(mktemp)"
+            code="$(jq -n --arg q "$1" '{query: $q}' | curl -sS -o "$out" -w '%{http_code}' \
+              -X POST "https://api.supabase.com/v1/projects/$PROJECT_REF/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" \
+              --data-binary @-)"
+            if [ "${code:0:1}" != "2" ]; then
+              echo "::error::HTTP $code" >&2; cat "$out" >&2; echo >&2; return 1
+            fi
+            cat "$out"
+          }
+
+          {
+            echo "## 本番DBに反映"
+            echo "- ファイル：\`$FILE\`（ブランチ \`$BRANCH\`、$(git rev-parse --short HEAD)）"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "== 1. 控えを取る：$label"
+          snap="$(q "select count(*)::int as tables, coalesce(sum(row_count), 0)::int as rows from resprint_backup.take_snapshot($label_sql);")"
+          echo "$snap"
+          tables="$(echo "$snap" | jq -r '.[0].tables // 0')"
+          if [ "$tables" -lt 1 ]; then echo "::error::控えが取れませんでした"; exit 1; fi
+          echo "- 控え「$label」：$tables 表・$(echo "$snap" | jq -r '.[0].rows') 行" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "== 2. $FILE を流す"
+          q "$(cat "$FILE")" > /dev/null
+          echo "- 反映：成功" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$CHECK_SQL" ]; then
+            echo "== 3. 確認"
+            res="$(q "$CHECK_SQL")"
+            echo "$res" | jq .
+            {
+              echo "- 確認の結果："
+              echo '```json'
+              echo "$res" | jq .
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
