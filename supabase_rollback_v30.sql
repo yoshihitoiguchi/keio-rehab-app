@@ -18,6 +18,7 @@ drop function if exists public.terms_status(text);
 drop function if exists public.terms_accept(text, integer);
 drop function if exists resprint_private.run_report_reminders();
 drop function if exists resprint_private.run_meeting_reminders();
+drop function if exists resprint_private.meeting_reminders_at(timestamptz);
 drop function if exists resprint_backup.daily();
 drop table if exists resprint_private.terms_acceptances;
 drop table if exists resprint_private.terms;

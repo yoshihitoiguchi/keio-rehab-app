@@ -903,6 +903,34 @@ ok((await as(U1, "select * from public.same_injury_remaining_days('p43-me')")).r
    && !!(await as(null, "select * from public.same_injury_remaining_days('p43-me')")).error, "[v43] ほかの組織からは0件・匿名キーでは呼べない");
 await db.exec("delete from players where id like 'p43-%'");
 
+// ===== v44：面談の前日のお知らせ =====
+ok(!(await run("supabase_migration_v44_meeting_eve_notice.sql")), "[v44] 適用 1 回目");
+ok(!(await run("supabase_migration_v44_meeting_eve_notice.sql")), "[v44] 適用 2 回目（冪等）");
+await db.exec(`delete from net.calls; delete from resprint_private.reminder_log; delete from slots where org_id = 'comm-b';
+  insert into slots (org_id, datetime, booked_by) values
+    ('comm-b', '2026-11-06 08:00', 'p-b1'), ('comm-b', '2026-11-06 18:00', 'p-b1'), ('comm-b', '2026-11-06 12:00', 'p-b1'),
+    ('comm-b', '2026-11-06 09:00', null), ('comm-b', '2026-11-07 10:00', 'p-b1'), ('comm-b', '2026-11-05 19:30', 'p-b1');
+  insert into resprint_private.reminder_log (kind, ref)
+    select 'meeting-day', s.id::text || ':p-b1:' || s.datetime from slots s where s.org_id = 'comm-b' and s.datetime = '2026-11-06 12:00';`);
+const at44 = (t) => db.query(`select resprint_private.meeting_reminders_at('${t}'::timestamptz) n`).then((r) => r.rows[0].n);
+ok(await at44("2026-11-05 18:20+09") === 0 && (await calls()).length === 0, "[v44] 前日の19時より前は、前日のお知らせを送らない");
+ok(await at44("2026-11-05 19:00+09") === 3, "[v44] 前日の19時：翌日の予約済みの面談2件＋1時間前の1件（予約なし・翌々日・前に送った面談は対象外）");
+const c44 = (await calls()).map((c) => ({ b: c.body.body, ep: c.body.subscriptions[0].endpoint, tag: c.body.tag }));
+ok(c44.filter((c) => c.b === "明日 08:00 から面談があります" && c.ep === EP("player2")).length === 1
+   && c44.filter((c) => c.b === "明日 18:00 から選手との面談があります" && c.ep === EP("coach2")).length === 1
+   && c44.filter((c) => c.b === "まもなく面談の時間です").length === 2,
+   "[v44] 選手には「明日 08:00 から面談があります」、指導者には「明日 18:00 から選手との面談があります」 " + JSON.stringify(c44.map((c) => c.b)));
+ok(new Set(c44.filter((c) => c.b.startsWith("明日") && c.ep === EP("coach2")).map((c) => c.tag)).size === 2, "[v44] 2件の面談の通知は、指導者の端末で上書きされない（tag が別）");
+ok(await at44("2026-11-05 22:00+09") === 0, "[v44] 同じ面談に前日のお知らせを二度は送らない");
+await db.exec("insert into slots (org_id, datetime, booked_by) values ('comm-b', '2026-11-06 07:00', 'p-b1')");
+ok(await at44("2026-11-05 23:50+09") === 1, "[v44] 前日の夜に予約された翌日の面談にも、その日のうちに送る");
+await db.exec("insert into slots (org_id, datetime, booked_by) values ('comm-b', '2026-11-06 20:00', 'p-b1')");
+ok(await at44("2026-11-06 00:10+09") === 0, "[v44] 当日に予約された面談には、前日のお知らせは送らない");
+ok(typeof (await db.query("select resprint_private.run_meeting_reminders() n")).rows[0].n === "number"
+   && (await db.query("select count(*)::int n from pg_proc where proname = 'run_meeting_reminders'")).rows[0].n === 1, "[v44] 定期実行の入口はそのまま1つ");
+ok(!!(await as(U4, "select resprint_private.meeting_reminders_at(now())")).error && !!(await as(U4, "select resprint_private.run_meeting_reminders()")).error, "[v44] アプリからは呼べない");
+await db.exec("delete from slots where org_id = 'comm-b'; delete from resprint_private.reminder_log; delete from net.calls");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");
