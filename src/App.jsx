@@ -278,7 +278,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.33";
+const APP_BUILD = "v15.34";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -668,6 +668,7 @@ function normalizePlayer(row) {
       .map((r) => ({
         id: r.id,
         date: r.date,
+        createdAt: r.created_at || null,
         vas: r.vas,
         mental: r.mental,
         honne: r.honne,
@@ -9483,8 +9484,14 @@ const reportReplySubs = new Set();
 function notifyReportReplied() {
   reportReplySubs.forEach((f) => f());
 }
-// 指導者トップ：リアクションも指導者のコメントもまだ付いていない日報（直近7日・デモの選手と復帰者リストの選手は除く）
-const UNREPLIED_DAYS = 7;
+// 指導者トップ：リアクションも指導者のコメントもまだ付いていない日報（送信から24時間以内・デモの選手と復帰者リストの選手は除く。作者の指示 2026-10-31）
+const UNREPLIED_HOURS = 24;
+function isRecentReport(r, nowMs) {
+  const t = r.createdAt ? Date.parse(r.createdAt) : NaN;
+  if (!Number.isNaN(t)) return nowMs - t <= UNREPLIED_HOURS * 3600000;
+  // 送信時刻がないときは日付で（今日と昨日）
+  return Boolean(r.date) && r.date >= localDateStr(new Date(nowMs - 86400000));
+}
 function formatReportDate(date) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date || "");
   if (!m) return date || "";
@@ -9492,14 +9499,14 @@ function formatReportDate(date) {
   return `${d.getMonth() + 1}月${d.getDate()}日（${WEEKDAYS[d.getDay()]}）`;
 }
 function UnrepliedReports({ players, onOpen }) {
-  const since = localDateStr(new Date(Date.now() - (UNREPLIED_DAYS - 1) * 86400000));
+  const nowMin = Math.floor(Date.now() / 60000); // 1分ごとに対象を見直す
   const candidates = useMemo(
     () =>
       players
         .filter((p) => !p.isDemo && !isGraduatedOut(p))
-        .flatMap((p) => p.reports.filter((r) => r.date && r.date >= since).map((r) => ({ player: p, report: r })))
+        .flatMap((p) => p.reports.filter((r) => isRecentReport(r, nowMin * 60000)).map((r) => ({ player: p, report: r })))
         .sort((a, b) => b.report.date.localeCompare(a.report.date) || Number(b.report.id) - Number(a.report.id)),
-    [players, since]
+    [players, nowMin]
   );
   const ids = candidates.map((c) => c.report.id).join(",");
   const [replied, setReplied] = useState(null); // 返事の付いた日報の ID。読めないとき（DB の更新前など）は null でカードを出さない
