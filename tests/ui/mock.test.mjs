@@ -877,6 +877,35 @@ try {
     await c2.close();
   });
 
+  await step("痛みが急に上がった日報の目印（v15.35）", async () => {
+    const ld = (off) => ((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`)(new Date(Date.now() + off * 86400000));
+    const rep = (id, hoursAgo, vas, honne = "") => { const d = new Date(Date.now() - hoursAgo * 3600000); return { id, player_id: "p-1", date: ld(-hoursAgo / 24), vas, mental: 3, fatigue: 3, sleep_quality: 7, honne, created_at: iso(d) }; };
+    const st = makeState({ injuryDaysAgo: 20, phase: 5 });
+    st.reports = [rep(1, 50, 2, "いつもどおり"), rep(2, 26, 3, "少し張る"), rep(3, 2, 6, "急に痛い")];
+    const c = await newPage(st);
+    await coachLogin(c);
+    const k = await c.evaluate(() => document.querySelector('[data-testid="unreplied-reports"]')?.innerText || "");
+    ok(/痛み 6（\+3）/.test(k), "まだ返事していない日報に、前回からの上がり幅の印が出る " + JSON.stringify(k));
+    const tile = await c.evaluate(() => document.querySelector('[data-testid="pain-jump-tile"]')?.innerText || "");
+    ok(tile.includes("前回 3 から +3"), "本日の日報の痛みに、前回の値と上がり幅が出る " + JSON.stringify(tile));
+    const marks = await c.$$eval('[data-testid="pain-jump"]', (n) => n.map((x) => x.textContent));
+    ok(marks.length >= 3 && marks.every((m) => m.includes("+3")), "選手一覧・日報一覧にも印が出る（+2 の日報には出ない） " + JSON.stringify(marks));
+    if (process.env.SHOT_DIR) await c.screenshot({ path: process.env.SHOT_DIR + "/pain-jump-coach.png" });
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+    await c.close();
+    const p = await newPage(st);
+    await playerLogin(p);
+    await clickText(p, "日報", "nav button"); await sleep(800);
+    ok(!(await p.$('[data-testid="pain-jump"]')), "選手の画面には印を出さない");
+    await p.close();
+    const st2 = makeState({ injuryDaysAgo: 20, phase: 5 });
+    st2.reports = [rep(1, 26, 3), rep(2, 2, 5)];
+    const c2 = await newPage(st2);
+    await coachLogin(c2);
+    ok(!(await c2.$('[data-testid="pain-jump"]')) && !(await c2.$('[data-testid="pain-jump-tile"]')), "上がり幅が2までなら印は出ない");
+    await c2.close();
+  });
+
   await step("表記の統一", async () => {
     const bad = /Phase |フェーズ|スタッフ|Supabase|おかえりなさい|🏃|📋|📎|⚠️|v15\./;
     const p = await newPage(makeState({ injuryDaysAgo: 20 }));
