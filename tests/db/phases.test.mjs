@@ -719,6 +719,29 @@ ok(!!(await as(U4, "insert into player_offsite_custom_items (player_id, name) va
 ok(!(await as(U4, `delete from player_offsite_custom_items where id = ${c38}`)).error
    && (await db.query("select count(*)::int n from player_offsite_custom_items")).rows[0].n === 0, "[v38] 消せる");
 
+// ===== v39：日報へのリアクション =====
+ok(!(await run("supabase_migration_v39_report_reactions.sql")), "[v39] 適用 1 回目");
+ok(!(await run("supabase_migration_v39_report_reactions.sql")), "[v39] 適用 2 回目（冪等）");
+const rep39 = (await db.query("insert into reports (player_id, vas) values ('p-b1', 2) returning id")).rows[0].id;
+const repA39 = (await db.query("insert into reports (player_id, vas) select id, 1 from players where org_id <> 'comm-b' limit 1 returning id")).rows[0];
+await db.exec("delete from net.calls");
+ok(!(await as(U4, `insert into report_reactions (report_id, player_id, author_role, kind) values (${rep39}, 'p-b1', 'doctor', 'good')`)).error
+   && !(await as(U4, `insert into report_reactions (report_id, player_id, author_role, kind) values (${rep39}, 'p-b1', 'coach', 'good')`)).error
+   && (await as(U6, "select author_role from report_reactions where player_id = 'p-b1'")).rows?.length === 2, "[v39] 同じ組織の人は、立場つきでリアクションを付けられる・読める");
+const calls39 = (await db.query("select body->>'body' b from net.calls order by id")).rows.map((r) => r.b);
+ok(calls39.length === 0 || !calls39.some((b) => /doctor|good|医師/.test(b || "")), "[v39] 通知に、立場・種類は入らない " + JSON.stringify(calls39));
+ok(!!(await as(U4, `insert into report_reactions (report_id, player_id, author_role, kind) values (${rep39}, 'p-b1', 'doctor', 'good')`)).error, "[v39] 同じ立場・同じ種類は1件だけ");
+ok(!!(await as(U4, `insert into report_reactions (report_id, player_id, author_role, kind) values (${rep39}, 'p-b1', 'admin', 'good')`)).error
+   && !!(await as(U4, `insert into report_reactions (report_id, player_id, author_role, kind) values (${rep39}, 'p-b1', 'coach', 'bad')`)).error, "[v39] 決まった立場・種類だけ");
+ok((await as(U1, "select * from report_reactions")).rows?.length === 0
+   && !!(await as(U1, `insert into report_reactions (report_id, player_id, author_role, kind) values (${rep39}, 'p-b1', 'coach', 'seen')`)).error
+   && !!(await as(null, "select * from report_reactions")).error, "[v39] ほかの組織・匿名キーからは読めない・書けない");
+ok(!!(await as(U4, `insert into report_reactions (report_id, player_id, author_role, kind) values (${repA39.id}, 'p-b1', 'coach', 'seen')`)).error, "[v39] ほかの選手の日報には付けられない");
+ok(!(await as(U4, `delete from report_reactions where player_id = 'p-b1' and author_role = 'coach'`)).error
+   && (await db.query("select count(*)::int n from report_reactions where player_id = 'p-b1'")).rows[0].n === 1, "[v39] 取り消せる");
+await db.exec(`delete from reports where id = ${rep39}`);
+ok((await db.query("select count(*)::int n from report_reactions where player_id = 'p-b1'")).rows[0].n === 0, "[v39] 日報を消すと、リアクションも消える");
+
 // ===== v36：再受傷の記録 =====
 ok(!(await run("supabase_migration_v36_reinjury.sql")), "[v36] 適用 1 回目");
 ok(!(await run("supabase_migration_v36_reinjury.sql")), "[v36] 適用 2 回目（冪等）");

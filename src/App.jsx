@@ -54,6 +54,8 @@ import {
   Download,
   Pencil,
   Save,
+  CheckCheck,
+  ThumbsUp,
 } from "lucide-react";
 import {
   SUPABASE_URL,
@@ -274,7 +276,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.25";
+const APP_BUILD = "v15.26";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -9055,37 +9057,147 @@ function readCommentAuthor() {
   }
 }
 
+// 日報へのリアクション（v39）：返事を書かなくても、立場ごとに反応を返せる
+const REPORT_REACTIONS = [
+  { kind: "seen", label: "確認しました", icon: CheckCheck },
+  { kind: "good", label: "いいね", icon: ThumbsUp },
+  { kind: "cheer", label: "がんばろう", icon: Flame },
+];
+const roleOrder = (role) => CHAT_STAFF_ROLES.findIndex((o) => o.value === role);
+
+function ReportReactions({ reactions, staff, role, busy, onToggle }) {
+  const kinds = staff ? REPORT_REACTIONS : REPORT_REACTIONS.filter((k) => reactions.some((x) => x.kind === k.kind));
+  if (kinds.length === 0) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {kinds.map((k) => {
+        const Icon = k.icon;
+        const rows = reactions.filter((x) => x.kind === k.kind).sort((a, b) => roleOrder(a.author_role) - roleOrder(b.author_role));
+        const roles = rows.map((x) => CHAT_STAFF_ROLE_LABELS[x.author_role] || "指導者").join("・");
+        const mine = staff && rows.some((x) => x.author_role === role);
+        const cls = `inline-flex items-center gap-1 min-h-[32px] px-2.5 rounded-full border text-[11px] font-bold ${
+          mine ? "bg-blue-600 border-blue-600 text-white" : rows.length ? "bg-blue-50 border-blue-200 text-blue-700" : "bg-white border-slate-300 text-slate-500"
+        }`;
+        const inner = (
+          <>
+            <Icon size={13} />
+            {k.label}
+            {roles && <span className={`font-normal ${mine ? "text-blue-100" : "text-slate-500"}`}>{roles}</span>}
+          </>
+        );
+        return staff ? (
+          <button key={k.kind} onClick={() => onToggle(k.kind)} disabled={busy} aria-pressed={mine} className={`${cls} disabled:opacity-60`}>
+            {inner}
+          </button>
+        ) : (
+          <span key={k.kind} className={cls}>
+            {inner}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+// 選手が見返すときの、その日の記録（数字だけ並べる）
+function ReportSummaryLine({ r }) {
+  const items = [
+    ["痛み", r.vas],
+    ["疲労", r.fatigue],
+    ["睡眠", r.sleepQuality],
+    ["RPE", r.rpe],
+    ["恐怖心", r.fear],
+  ].filter(([, v]) => v !== null && v !== undefined);
+  return (
+    <p className="text-xs text-slate-600 mt-0.5 flex flex-wrap gap-x-2.5 gap-y-0.5 items-center">
+      {items.map(([k, v]) => (
+        <span key={k}>
+          {k} <span className="font-bold text-slate-800">{v}</span>
+        </span>
+      ))}
+      {r.mental ? <span className="text-base leading-none">{MENTAL_FACES[r.mental - 1]}</span> : null}
+      {r.slippingContact ? <span>抜ける接地あり</span> : null}
+    </p>
+  );
+}
+
 function ReportThread({ player, viewer }) {
   const staff = viewer === "staff";
   const saved = staff ? readCommentAuthor() : {};
   const [comments, setComments] = useState([]);
-  const [loaded, setLoaded] = useState(false);
+  const [reactions, setReactions] = useState([]);
+  const [reactionsReady, setReactionsReady] = useState(false); // DB の更新（v39）前は出さない
   const [openId, setOpenId] = useState(null); // 入力欄を開いている日報
   const [showAll, setShowAll] = useState(false);
   const [text, setText] = useState("");
-  const [role, setRole] = useState(CHAT_STAFF_ROLES.some((o) => o.value === saved.role) ? saved.role : CHAT_STAFF_ROLES[0].value);
+  const [role, setRoleState] = useState(CHAT_STAFF_ROLES.some((o) => o.value === saved.role) ? saved.role : CHAT_STAFF_ROLES[0].value);
   const [saving, setSaving] = useState(false);
+  const [reacting, setReacting] = useState(false);
   const [error, setError] = useState(null);
+  const setRole = (v) => {
+    setRoleState(v);
+    try {
+      localStorage.setItem(COMMENT_AUTHOR_KEY, JSON.stringify({ role: v }));
+    } catch {
+      // 保存できなくても、次回選び直すだけ
+    }
+  };
+
+  const loadReactions = () =>
+    sbSelect("report_reactions", `?player_id=eq.${encodeURIComponent(player.id)}&select=*&order=created_at.asc`)
+      .then((rows) => {
+        setReactions(rows || []);
+        setReactionsReady(true);
+      })
+      .catch(() => setReactionsReady(false));
 
   useEffect(() => {
     let active = true;
     setComments([]);
-    setLoaded(false);
+    setReactions([]);
     setOpenId(null);
     sbSelect("report_comments", `?player_id=eq.${encodeURIComponent(player.id)}&select=*&order=created_at.asc`)
       .then((rows) => active && setComments(rows || []))
-      .catch((err) => active && staff && setError(errText(err)))
-      .finally(() => active && setLoaded(true));
+      .catch((err) => active && staff && setError(errText(err)));
+    sbSelect("report_reactions", `?player_id=eq.${encodeURIComponent(player.id)}&select=*&order=created_at.asc`)
+      .then((rows) => {
+        if (!active) return;
+        setReactions(rows || []);
+        setReactionsReady(true);
+      })
+      .catch(() => active && setReactionsReady(false));
     return () => {
       active = false;
     };
   }, [player.id]);
 
   const of = (reportId) => comments.filter((c) => String(c.report_id) === String(reportId));
+  const reactionsOf = (reportId) => reactions.filter((x) => String(x.report_id) === String(reportId));
   const all = player.reports.slice().reverse(); // 新しい順
-  // 指導者：本音かコメントのある日報（最新の日報は必ず）。選手：コメントのある日報だけ
-  const list = all.filter((r, i) => of(r.id).length > 0 || (staff && (i === 0 || (r.honne || "").trim())));
+  // 指導者：本音・コメント・リアクションのある日報（最新の日報は必ず）。選手：自分の日報すべて（返事がなくても見返せる）
+  const list = staff ? all.filter((r, i) => i === 0 || of(r.id).length > 0 || reactionsOf(r.id).length > 0 || (r.honne || "").trim()) : all;
   const shown = showAll ? list.slice(0, 30) : list.slice(0, 3);
+
+  const toggleReaction = async (report, kind) => {
+    const mine = reactions.find((x) => String(x.report_id) === String(report.id) && x.kind === kind && x.author_role === role);
+    setReacting(true);
+    setError(null);
+    try {
+      if (mine) {
+        await sbDelete("report_reactions", mine.id);
+        setReactions((prev) => prev.filter((x) => x.id !== mine.id));
+      } else {
+        const [row] = await sbInsert("report_reactions", { report_id: report.id, player_id: player.id, author_role: role, kind });
+        setReactions((prev) => [...prev, row]);
+      }
+    } catch (err) {
+      // 同じ立場のほかの人が先に付けていた場合など。最新の状態を読み直す
+      if (err.status === 409) await loadReactions();
+      else setError(errText(err));
+    } finally {
+      setReacting(false);
+    }
+  };
 
   const send = async (report) => {
     const body = text.trim();
@@ -9104,13 +9216,6 @@ function ReportThread({ player, viewer }) {
       setComments((prev) => [...prev, row]);
       setText("");
       setOpenId(null);
-      if (staff) {
-        try {
-          localStorage.setItem(COMMENT_AUTHOR_KEY, JSON.stringify({ role }));
-        } catch {
-          // 保存できなくても、次回入力し直すだけ
-        }
-      }
     } catch (err) {
       setError(errText(err));
     } finally {
@@ -9127,22 +9232,38 @@ function ReportThread({ player, viewer }) {
     }
   };
 
-  if (!staff && (!loaded || list.length === 0)) return null;
-  if (staff && list.length === 0) return null;
+  if (list.length === 0) return null;
 
   return (
     <div className={staff ? "mt-3" : "bg-white rounded-2xl border border-slate-200 p-5 shadow-sm"}>
-      <p className={`font-bold text-slate-700 mb-2 flex items-center gap-1.5 ${staff ? "text-xs" : "text-sm"}`}>
-        <MessageCircle size={staff ? 14 : 16} className="text-blue-600" /> {staff ? "本音とコメント" : "日報へのコメント"}
-      </p>
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <p className={`font-bold text-slate-700 flex items-center gap-1.5 ${staff ? "text-xs" : "text-sm"}`}>
+          <MessageCircle size={staff ? 14 : 16} className="text-blue-600" /> {staff ? "本音とコメント" : "これまでの日報"}
+        </p>
+        {staff && (
+          <select value={role} onChange={(e) => setRole(e.target.value)} aria-label="書く人の立場" className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white">
+            {CHAT_STAFF_ROLES.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
       {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
       <ul className="space-y-2">
         {shown.map((r) => (
           <li key={r.id} className="bg-slate-50 rounded-lg p-3">
             <p className="text-[11px] font-bold text-slate-500">{r.date}</p>
-            <p className={`text-sm whitespace-pre-wrap leading-relaxed mt-0.5 ${(r.honne || "").trim() ? "text-slate-800" : "text-slate-400"}`}>
-              {(r.honne || "").trim() || "本音の記入なし"}
-            </p>
+            {!staff && <ReportSummaryLine r={r} />}
+            {staff || (r.honne || "").trim() ? (
+              <p className={`text-sm whitespace-pre-wrap leading-relaxed mt-0.5 ${(r.honne || "").trim() ? "text-slate-800" : "text-slate-400"}`}>
+                {(r.honne || "").trim() || "本音の記入なし"}
+              </p>
+            ) : null}
+            {reactionsReady && (
+              <ReportReactions reactions={reactionsOf(r.id)} staff={staff} role={role} busy={reacting} onToggle={(kind) => toggleReaction(r, kind)} />
+            )}
             {of(r.id).map((c) => (
               <div key={c.id} className={`mt-2 rounded-lg px-3 py-2 border ${c.sender === "player" ? "bg-white border-slate-200 ml-6" : "bg-blue-50 border-blue-100 mr-6"}`}>
                 <div className="flex items-center justify-between gap-2">
@@ -9164,15 +9285,6 @@ function ReportThread({ player, viewer }) {
             ))}
             {openId === r.id ? (
               <div className="mt-2 space-y-2">
-                {staff && (
-                  <select value={role} onChange={(e) => setRole(e.target.value)} aria-label="書く人の立場" className="border border-slate-300 rounded-lg px-2 py-2.5 text-sm bg-white">
-                    {CHAT_STAFF_ROLES.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label}
-                      </option>
-                    ))}
-                  </select>
-                )}
                 <textarea
                   value={text}
                   onChange={(e) => setText(e.target.value)}
@@ -9191,12 +9303,14 @@ function ReportThread({ player, viewer }) {
                 </div>
               </div>
             ) : (
-              <button
-                onClick={() => { setOpenId(r.id); setText(""); setError(null); }}
-                className="mt-2 min-h-[36px] px-3 rounded-full border border-slate-300 bg-white text-xs font-bold text-slate-600"
-              >
-                {staff ? "コメントする" : "返信する"}
-              </button>
+              (staff || of(r.id).length > 0) && (
+                <button
+                  onClick={() => { setOpenId(r.id); setText(""); setError(null); }}
+                  className="mt-2 min-h-[36px] px-3 rounded-full border border-slate-300 bg-white text-xs font-bold text-slate-600"
+                >
+                  {staff ? "コメントする" : "返信する"}
+                </button>
+              )
             )}
           </li>
         ))}

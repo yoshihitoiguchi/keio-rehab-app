@@ -106,6 +106,12 @@ function respond(st, url, method, body) {
     if (method === "POST") { const row = { id: 90 + (st.reportComments || []).length, created_at: iso(new Date()), ...json }; st.reportComments = [...(st.reportComments || []), row]; return [row]; }
     return st.reportComments || [];
   }
+  if (p === "/rest/v1/report_reactions") {
+    if (st.noReactionTable) return { __status: 404 };
+    if (method === "POST") { const row = { id: 60 + (st.rid = (st.rid || 0) + 1), created_at: iso(new Date()), ...json }; st.reactions = [...(st.reactions || []), row]; return [row]; }
+    if (method === "DELETE") { const id = Number(/id=eq\.(\d+)/.exec(u.search)?.[1]); st.reactions = (st.reactions || []).filter((x) => x.id !== id); return null; }
+    return st.reactions || [];
+  }
   if (p === "/rest/v1/meeting_notes") {
     if (method === "POST") { const row = { id: 70 + (st.meetingNotes || []).length, created_at: iso(new Date()), ...json }; st.meetingNotes = [row, ...(st.meetingNotes || [])]; return [row]; }
     return st.meetingNotes || [];
@@ -211,7 +217,8 @@ const noOverflow = (p) => p.evaluate(() => document.documentElement.scrollWidth 
 async function step(name, fn) { try { await fn(); } catch (e) { ok(false, `${name}: ${e.message}`); } }
 
 try {
-  browser = await puppeteer.launch({ executablePath: CHROME, headless: true, userDataDir: profile, timeout: 180000, protocolTimeout: 180000 });
+  browser = await puppeteer.launch({ executablePath: CHROME, headless: true, userDataDir: profile, timeout: 180000, protocolTimeout: 180000,
+    args: process.getuid?.() === 0 ? ["--no-sandbox"] : [] });  // クラウドの環境（root）でも動かすため
 
   await step("ログイン画面", async () => {
     const p = await newPage(makeState());
@@ -680,7 +687,7 @@ try {
     ok((await badge()) === "", "日報タブを開くと、未読の数が消える");
     await clickText(p, "日報", "nav button"); await sleep(800);
     t = await text(p);
-    ok(t.includes("日報へのコメント") && /医師\s*\d+\/\d+/.test(t) && t.includes("怖さがあるのは自然です。") && t.includes("正直、走るのが少し怖いです"), "選手は日報タブで、誰からのコメントかと内容を読める");
+    ok(t.includes("これまでの日報") && /医師\s*\d+\/\d+/.test(t) && t.includes("怖さがあるのは自然です。") && t.includes("正直、走るのが少し怖いです"), "選手は日報タブで、誰からのコメントかと内容を読める");
     await clickText(p, "返信する"); await sleep(300);
     await p.type('textarea[placeholder="返信"]', "ありがとうございます。");
     await clickText(p, "送る"); await sleep(800);
@@ -689,14 +696,68 @@ try {
     ok(!(await p.$('button[aria-label="このコメントを削除"]')), "選手には削除のボタンは出ない");
     ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
     await p.close();
-    // コメントのない選手には、カードを出さない
+    // 返事がまだない日報も、選手は見返せる
     const st0 = makeState({ injuryDaysAgo: 3, phase: 5 });
-    st0.reports = st.reports;
+    st0.reports = [
+      { id: 2, player_id: "p-1", date: "2026-10-01", vas: 4, mental: 2, fatigue: 5, sleep_quality: 6, honne: "", created_at: iso(new Date(Date.now() - 86400000)) },
+      ...st.reports,
+    ];
     const p0 = await newPage(st0);
     await playerLogin(p0);
     await clickText(p0, "日報", "nav button"); await sleep(800);
-    ok(!(await text(p0)).includes("日報へのコメント"), "コメントがまだない選手には、カードを出さない");
+    t = await text(p0);
+    ok(t.includes("これまでの日報") && t.includes("2026-10-01") && t.includes("正直、走るのが少し怖いです") && /痛み\s*4/.test(t) && /睡眠\s*6/.test(t),
+       "返事がない日報も、選手は日付・数字・本音を見返せる");
+    ok(!t.includes("返信する") && !t.includes("確認しました"), "返事・リアクションのない日報には、返信ボタンもリアクションも出ない");
+    ok(await noOverflow(p0) && p0.errs.length === 0, "横にはみ出さない・例外なし " + p0.errs.join("|"));
     await p0.close();
+    // 日報がない選手には、カードを出さない
+    const p00 = await newPage(makeState({ injuryDaysAgo: 3, phase: 5 }));
+    await playerLogin(p00);
+    await clickText(p00, "日報", "nav button"); await sleep(800);
+    ok(!(await text(p00)).includes("これまでの日報"), "日報がまだない選手には、カードを出さない");
+    await p00.close();
+  });
+
+  await step("日報へのリアクション（v15.26）", async () => {
+    const today = ((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`)(new Date());
+    const st = makeState({ injuryDaysAgo: 3, phase: 5 });
+    st.reports = [{ id: 1, player_id: "p-1", date: today, vas: 2, mental: 3, fatigue: 3, sleep_quality: 7, honne: "", created_at: iso(new Date()) }];
+    const c = await newPage(st);
+    await coachLogin(c);
+    let t = await text(c);
+    ok(t.includes("確認しました") && t.includes("いいね") && t.includes("がんばろう"), "指導者の日報に、リアクションのボタンが出る");
+    await c.select('select[aria-label="書く人の立場"]', "doctor");
+    await clickText(c, "いいね", "button"); await sleep(600);
+    await c.select('select[aria-label="書く人の立場"]', "student_trainer");
+    await clickText(c, "いいね", "button"); await sleep(600);
+    await clickText(c, "確認しました", "button"); await sleep(600);
+    ok(st.reactions?.length === 3 && st.reactions.every((x) => x.report_id === 1 && x.player_id === "p-1")
+       && st.reactions.filter((x) => x.kind === "good").map((x) => x.author_role).sort().join(",") === "doctor,student_trainer",
+       "リアクションが、立場つきで日報に残る");
+    t = await text(c);
+    ok(/いいね\s*学生トレーナー・医師/.test(t), "誰がリアクションしたかが出る " + (/いいね[^\n]*/.exec(t) || [""])[0]);
+    await clickText(c, "確認しました", "button"); await sleep(600);
+    ok(st.reactions.length === 2 && !st.reactions.some((x) => x.kind === "seen"), "もう一度押すと取り消せる");
+    ok(!st.posts.some((x) => x.p === "/rest/v1/report_comments" || x.p === "/rest/v1/messages"), "コメントやチャットは送られない");
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+    await c.close();
+    const p = await newPage(st);
+    await playerLogin(p);
+    await clickText(p, "日報", "nav button"); await sleep(800);
+    t = await text(p);
+    ok(/いいね\s*学生トレーナー・医師/.test(t) && !t.includes("確認しました") && !t.includes("がんばろう"), "選手には、付いたリアクションと誰からかだけが出る");
+    ok(!(await p.$('button[aria-pressed]')), "選手はリアクションを押せない");
+    ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
+    await p.close();
+    // DB の更新（v39）前は、リアクションを出さない（コメントはそのまま）
+    const st2 = makeState({ injuryDaysAgo: 3, phase: 5 });
+    st2.reports = st.reports; st2.noReactionTable = true;
+    const c2 = await newPage(st2);
+    await coachLogin(c2);
+    t = await text(c2);
+    ok(!t.includes("がんばろう") && t.includes("コメントする") && c2.errs.length === 0, "DB の更新（v39）前は、リアクションを出さない");
+    await c2.close();
   });
 
   await step("表記の統一", async () => {
