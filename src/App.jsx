@@ -276,7 +276,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.26";
+const APP_BUILD = "v15.27";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -649,6 +649,8 @@ function normalizePlayer(row) {
     reinjuryDate: row.reinjury_date || null,
     completedAt: row.completed_at,
     movedToReturnedAt: row.moved_to_returned_at || null,
+    // デモの選手（v40。集計に含めない）。列がない DB では null＝切り替えを出さない
+    isDemo: row.is_demo === undefined ? null : Boolean(row.is_demo),
     imagingFindings: row.imaging_findings || "",
     bamicGrade: row.bamic_grade || null,
     hamstringMuscle: row.hamstring_muscle || null,
@@ -1004,7 +1006,7 @@ function isGraduatedOut(player) {
 // coachPlayersは指導者が既に読み込んでいる同一組織の全選手データなのでJS側で直接計算できる。
 function computeAvgRecoveryFromPlayers(players, protocolId) {
   const completed = players.filter(
-    (p) => p.protocolId === protocolId && p.injuryDate && p.completedAt
+    (p) => p.protocolId === protocolId && p.injuryDate && p.completedAt && !p.isDemo
   );
   if (completed.length === 0) return null;
   const totalDays = completed.reduce((sum, p) => {
@@ -5093,6 +5095,8 @@ function PlayerDetailPanel({
           <>
           <ReinjuryCard player={player} protocol={protocol} setCoachPlayers={setCoachPlayers} />
 
+          <DemoPlayerToggle player={player} setCoachPlayers={setCoachPlayers} />
+
           <MeetingNotes player={player} viewer="staff" />
 
           <StaffNotes player={player} />
@@ -5107,6 +5111,8 @@ function PlayerDetailPanel({
               setCoachPlayers((prev) => prev.map((p) => (p.id === player.id ? { ...p, ...patch } : p)))
             }
           />
+
+          <SameInjuryPhaseComparison player={player} protocol={protocol} />
 
           <TreatmentCard player={player} onAddTreatments={onAddTreatments} onDeleteTreatment={onDeleteTreatment} />
 
@@ -6983,101 +6989,195 @@ function InjuryDateCard({ orgId, player, protocol, setMyPlayer }) {
   );
 }
 
-// ---------- 要件②：Phase別タイムライン比較（v19 から自分の組織の中だけの集計） ----------
-function PhaseTimelineComparison({ player, protocol }) {
-  const [globalAvg, setGlobalAvg] = useState([]);
-  const [loading, setLoading] = useState(true);
+// ---------- 同じ受傷の選手と PHASE ごとの比較（v40） ----------
+//   同じ受傷＝同じプロトコル（疾患名）・BAMIC分類・損傷筋・部位。本人・デモの選手は数えない（DB の関数 same_injury_phase_compare）。
+//   PHASE ごとの日数と、各基準を最初に満たした日（受傷から何日目か）を、事実として並べるだけ。
+//   関数がない DB・比べる記録がないときはカードを出さない。
+function latestStaysByPhase(phaseHistory) {
+  const map = {};
+  (phaseHistory || []).forEach((h) => {
+    if (!h.enteredAt) return;
+    const cur = map[h.phaseNumber];
+    if (!cur || new Date(h.enteredAt) > new Date(cur.enteredAt)) map[h.phaseNumber] = h;
+  });
+  return map;
+}
+function dayDiff(fromDate, toDate) {
+  // 日付どうしの差（日）。時刻は見ない
+  const a = new Date(`${String(fromDate).slice(0, 10)}T00:00:00`);
+  const b = new Date(toDate);
+  const bd = new Date(b.getFullYear(), b.getMonth(), b.getDate());
+  return Math.round((bd - a) / 86400000);
+}
+function stayBaseDate(player, stay) {
+  const re = player.reinjuryDate;
+  if (re && stay?.enteredAt && String(re).slice(0, 10) <= toLocalDate(new Date(stay.enteredAt))) return re;
+  return player.injuryDate || null;
+}
+function toLocalDate(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function peerText(s, verb = "") {
+  if (!s) return null;
+  const few = s.sample_size < 3 ? "・参考値" : "";
+  if (s.injury_sample_size > 0 && s.avg_from_injury !== null) {
+    return `平均 受傷${Number(s.avg_from_injury)}日目${verb}（${s.min_from_injury}〜${s.max_from_injury}・${s.injury_sample_size}人${few}）`;
+  }
+  return `平均 PHASE開始から${Number(s.avg_days)}日（${s.min_days}〜${s.max_days}・${s.sample_size}人${few}）`;
+}
+
+function SameInjuryPhaseComparison({ player, protocol }) {
+  const [rows, setRows] = useState(null); // null＝読み込み中または使えない
+  const [ownChecks, setOwnChecks] = useState([]);
+  const [open, setOpen] = useState(null); // 開いている PHASE
+
+  const isHamstring = protocol?.classificationScheme === "hamstring";
+  const classLabel = classificationLabel(player);
+  const ready = Boolean(protocol) && (!isHamstring || Boolean(classLabel));
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    if (protocol?.name) {
-      sbSelect(
-        "protocol_phase_avg_duration",
-        `?protocol_name=eq.${encodeURIComponent(protocol.name)}&select=*&order=phase_number.asc`
-      )
-        .then((rows) => {
-          if (active) setGlobalAvg(rows);
-        })
-        .catch(() => {})
-        .finally(() => {
-          if (active) setLoading(false);
-        });
-    } else {
-      setLoading(false);
-    }
+    setRows(null);
+    if (!ready) return;
+    sbRpc("same_injury_phase_compare", { p_player_id: player.id })
+      .then((r) => {
+        if (active) setRows(Array.isArray(r) ? r : []);
+      })
+      .catch(() => {
+        if (active) setRows([]);
+      });
+    sbSelect(
+      "gate_item_checks",
+      `?player_id=eq.${encodeURIComponent(player.id)}&result=eq.true&select=phase_number,item_index,created_at&order=created_at.asc`
+    )
+      .then((r) => {
+        if (active) setOwnChecks(r || []);
+      })
+      .catch(() => {});
     return () => {
       active = false;
     };
-  }, [protocol?.name]);
+  }, [player.id, ready, player.bamicGrade, player.hamstringMuscle, player.hamstringLocation, player.protocolId]);
 
-  const ownDurations = computeOwnPhaseDurations(player.phaseHistory);
+  if (!ready || !rows || rows.length === 0) return null;
+
+  const stays = latestStaysByPhase(player.phaseHistory);
+  const phaseStat = (n) => rows.find((r) => r.phase_number === n && r.item_index === null);
+  const itemStat = (n, i) => rows.find((r) => r.phase_number === n && r.item_index === i);
+  const shownPhases = phaseRange(protocol).filter((n) => rows.some((r) => r.phase_number === n));
   const maxDays = Math.max(
     1,
-    ...phaseRange(protocol).map((n) => Math.max(ownDurations[n] || 0, globalAvg.find((g) => g.phase_number === n)?.avg_days || 0))
+    ...shownPhases.map((n) => {
+      const st = stays[n];
+      const own = st ? Math.max(0, Math.round(((st.leftAt ? new Date(st.leftAt) : new Date()) - new Date(st.enteredAt)) / 86400000)) : 0;
+      return Math.max(own, Number(phaseStat(n)?.avg_days || 0));
+    })
   );
-  const hasAnyGlobal = globalAvg.some((g) => g.sample_size > 0);
-  // 自分か先輩の記録がある PHASE だけ並べる（空の棒を並べない）
-  const shownPhases = phaseRange(protocol).filter(
-    (n) => ownDurations[n] !== undefined || globalAvg.some((g) => g.phase_number === n && g.sample_size > 0)
-  );
+
+  // 自分がその滞在の中で最初に満たした日（受傷から何日目か）
+  const ownItemDay = (n, i) => {
+    const st = stays[n];
+    if (!st) return null;
+    const hit = ownChecks.find(
+      (c) =>
+        c.phase_number === n &&
+        c.item_index === i &&
+        new Date(c.created_at) >= new Date(st.enteredAt) &&
+        (!st.leftAt || new Date(c.created_at) <= new Date(st.leftAt))
+    );
+    if (!hit) return null;
+    const base = stayBaseDate(player, st);
+    return base ? `受傷${dayDiff(base, hit.created_at)}日目` : "記録あり";
+  };
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-      <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
-        <Layers size={16} className="text-blue-600" /> 先輩との PHASE 別の日数
+      <p className="text-sm font-bold text-slate-700 flex items-center gap-1.5">
+        <Layers size={16} className="text-blue-600" /> 同じ受傷の選手と PHASE ごとの比較
       </p>
-      {loading ? (
-        <p className="text-xs text-slate-400">読み込み中...</p>
-      ) : (
-        <>
-
-          {shownPhases.length === 0 && <p className="text-sm text-slate-400">まだ記録がありません。</p>}
-          <div className="space-y-3">
-            {shownPhases.map((n) => {
-              const own = ownDurations[n];
-              const g = globalAvg.find((x) => x.phase_number === n);
-              return (
-                <div key={n}>
-                  <div className="flex items-center justify-between text-[10px] mb-1">
-                    <span className={`font-bold ${PHASE_TEXT_COLORS[n]}`}>PHASE {n}</span>
-                    <span className="text-slate-400">
-                      {own !== undefined ? `あなた: ${own}日` : ""}
-                      {g && g.sample_size > 0
-                        ? ` ／ 平均: ${g.avg_days}日（${g.sample_size}件${
-                            g.sample_size < 3 ? "・件数が少ないため参考値" : ""
-                          }）`
-                        : ""}
-                    </span>
+      <p className="text-[11px] text-slate-500 mt-0.5 mb-3">
+        {protocol.name}
+        {classLabel ? `／${classLabel}` : ""}
+      </p>
+      <div className="space-y-2">
+        {shownPhases.map((n) => {
+          const st = stays[n];
+          const s = phaseStat(n);
+          const ownDays = st
+            ? Math.max(0, Math.round(((st.leftAt ? new Date(st.leftAt) : new Date()) - new Date(st.enteredAt)) / 86400000))
+            : null;
+          const base = st ? stayBaseDate(player, st) : null;
+          const ownText = !st
+            ? "まだ"
+            : st.leftAt
+            ? `${base ? `受傷${dayDiff(base, st.leftAt)}日目に通過` : "通過"}（${ownDays}日）`
+            : `いまの PHASE（${ownDays}日目）`;
+          const conditions = protocol.phases?.[n - 1]?.conditions || [];
+          const isOpen = open === n;
+          return (
+            <div key={n} className="border border-slate-100 rounded-xl">
+              <button
+                onClick={() => setOpen(isOpen ? null : n)}
+                className="w-full text-left px-3 py-2"
+                aria-expanded={isOpen}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className={`text-xs font-bold ${PHASE_TEXT_COLORS[n]}`}>
+                    PHASE {n}
+                    {protocol.phases?.[n - 1]?.title ? `：${protocol.phases[n - 1].title}` : ""}
+                  </span>
+                  {isOpen ? (
+                    <ChevronUp size={14} className="text-slate-400 shrink-0" />
+                  ) : (
+                    <ChevronDown size={14} className="text-slate-400 shrink-0" />
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-600 mt-1">あなた：{ownText}</p>
+                <p className="text-[11px] text-slate-500">同じ受傷：{s ? peerText(s, "に通過") : "まだ通過した選手はいません"}</p>
+                <div className="space-y-1 mt-1.5">
+                  <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full ${PHASE_BG_COLORS[n]}`}
+                      style={{ width: `${ownDays !== null ? Math.min(100, (ownDays / maxDays) * 100) : 0}%` }}
+                    />
                   </div>
-                  <div className="space-y-1">
-                    <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full ${PHASE_BG_COLORS[n]}`}
-                        style={{ width: `${own !== undefined ? Math.min(100, (own / maxDays) * 100) : 0}%` }}
-                      />
-                    </div>
-                    <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-slate-400"
-                        style={{ width: `${g && g.sample_size > 0 ? Math.min(100, (g.avg_days / maxDays) * 100) : 0}%` }}
-                      />
-                    </div>
+                  <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-slate-400"
+                      style={{ width: `${s ? Math.min(100, (Number(s.avg_days) / maxDays) * 100) : 0}%` }}
+                    />
                   </div>
                 </div>
-              );
-            })}
-          </div>
-          <div className={`flex gap-4 mt-3 text-[10px] text-slate-400 ${shownPhases.length === 0 ? "hidden" : ""}`}>
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> あなた（上段）
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-slate-400 inline-block" /> 先輩の平均（下段）
-            </span>
-          </div>
-        </>
-      )}
+              </button>
+              {isOpen && conditions.length > 0 && (
+                <ul className="px-3 pb-3 space-y-2 border-t border-slate-100 pt-2">
+                  {conditions.map((c, i) => {
+                    const is = itemStat(n, i);
+                    const mine = ownItemDay(n, i);
+                    return (
+                      <li key={i} className="text-[11px]">
+                        <p className="text-slate-700">{c}</p>
+                        <p className="text-slate-600">あなた：{mine ?? "まだ"}</p>
+                        <p className="text-slate-500">同じ受傷：{is ? peerText(is) : "記録なし"}</p>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex gap-4 mt-3 text-[10px] text-slate-400">
+        <span className="flex items-center gap-1">
+          <span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> あなたの日数（上段）
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="w-2 h-2 rounded-full bg-slate-400 inline-block" /> 同じ受傷の平均（下段）
+        </span>
+      </div>
+      <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">{DISCLAIMER_MAIN}</p>
     </div>
   );
 }
@@ -7860,7 +7960,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
 
           <InjuryDateCard orgId={orgId} player={player} protocol={protocol} setMyPlayer={setMyPlayer} />
 
-          <PhaseTimelineComparison player={player} protocol={protocol} />
+          <SameInjuryPhaseComparison player={player} protocol={protocol} />
 
           <HamstringClassificationCard orgId={orgId} player={player} protocol={protocol} readOnly />
 
@@ -8295,6 +8395,44 @@ function BroadcastBox({ players, setCoachPlayers }) {
 // 再受傷の記録（指導者）。同じ選手のカルテ（日報・チャット・治療の記録など）はそのまま残し、
 // 指定した PHASE から伴走し直す。復帰を記録したあとでも、復帰の途中でも使える。
 // 面談の目安（14日）は再受傷日から数え直す（episodeStartDate）。
+// デモの選手（v40）：集計（同じ受傷の比較・平均日数）に含めない
+function DemoPlayerToggle({ player, setCoachPlayers }) {
+  const [saving, setSaving] = useState(false);
+  if (player.isDemo === null || player.isDemo === undefined) return null;
+  const toggle = async () => {
+    const next = !player.isDemo;
+    setSaving(true);
+    try {
+      await sbUpdate("players", player.id, { is_demo: next });
+      setCoachPlayers((prev) => prev.map((p) => (p.id === player.id ? { ...p, isDemo: next } : p)));
+    } catch (err) {
+      showMessage("保存できませんでした", { body: errText(err) });
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-4 flex items-center justify-between gap-3">
+      <div>
+        <p className="text-sm font-bold text-slate-700">デモの選手</p>
+        <p className="text-[11px] text-slate-500">{player.isDemo ? "集計に含めない" : "集計に含める"}</p>
+      </div>
+      <button
+        onClick={toggle}
+        disabled={saving}
+        role="switch"
+        aria-checked={player.isDemo}
+        aria-label="デモの選手"
+        className={`relative w-11 h-6 rounded-full transition-colors ${player.isDemo ? "bg-blue-600" : "bg-slate-300"} disabled:opacity-50`}
+      >
+        <span
+          className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${player.isDemo ? "translate-x-5" : ""}`}
+        />
+      </button>
+    </div>
+  );
+}
+
 function ReinjuryCard({ player, protocol, setCoachPlayers }) {
   const [history, setHistory] = useState([]);
   const [open, setOpen] = useState(false);

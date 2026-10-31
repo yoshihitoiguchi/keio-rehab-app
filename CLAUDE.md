@@ -161,7 +161,7 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `org_login_failures` | 組織ログインの失敗記録（利用者ごと15分に10回、組織ごと15分に100回の制限。1日で消える）（v15） |
 | `resprint_migration_backup` | ③の直前のポリシー・権限・設定の退避と、③を戻した記録（v16。アプリからは読めない） |
 | `app_settings` | 組織ごとの設定（指導者パスワードなど） |
-| `players` | 選手。`pin`（4桁）、`bamic_grade`、`hamstring_muscle`、`hamstring_location` ほか。`moved_to_returned_at` は指導者が復帰者リストへ移した日時（v37。null なら従来どおり、復帰の記録から15日目に自動で復帰者リスト） |
+| `players` | 選手。`pin`（4桁）、`bamic_grade`、`hamstring_muscle`、`hamstring_location` ほか。`moved_to_returned_at` は指導者が復帰者リストへ移した日時（v37。null なら従来どおり、復帰の記録から15日目に自動で復帰者リスト）。`is_demo` はデモの選手（v40。集計・比較に含めない。指導者が「記録」タブで切り替える。名前が「デモ」で始まる選手は v40 で true にした） |
 | `protocols` | プロトコル本体。`phases` はJSON配列。**PHASE数は可変**（ハムストリングは10） |
 | `phase_menus` / `exercises` / `exercise_steps` | フェーズ別メニューと種目内ステップ |
 | `offsite_domains` / `offsite_items` / `player_offsite_selections` | オフサイトメニュー（A〜Kの11ドメイン）と選手ごとの選択 |
@@ -191,6 +191,15 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `protocol_avg_recovery` | プロトコル別の平均復帰期間 |
 | `protocol_phase_avg_duration` | フェーズ別の平均所要日数 |
 | `hamstring_recovery_by_classification` | BAMIC分類 × 損傷筋 × 部位での復帰期間の比較 |
+
+v40 から、上の3つの集計ビューはデモの選手（`players.is_demo`）を除く。
+
+### 関数 `same_injury_phase_compare(選手ID)`（v40）
+
+選手の「その他」と指導者の「記録」に出す「同じ受傷の選手と PHASE ごとの比較」（`SameInjuryPhaseComparison`）の元。
+同じ受傷＝同じプロトコル（疾患名）・BAMIC分類・損傷筋・部位。本人・デモの選手は数えない（一覧から削除した選手は記録ごと消える）。
+PHASE ごとの日数（`item_index` が null の行）と、各基準を最初に満たした日を、平均・最短・最長・人数、受傷（再受傷）から何日目かで返す。
+名前・ID は返さない。見る人の権限で動く（自分の組織だけ）。関数がない DB・記録がないときはカードを出さない。
 | ~~`gate_check_agreement`~~ | **④ v17 で削除する**（v13 が使っているため、それまでは残す）。本人とスタッフの一致率は使わない方針。チェック記録 `gate_item_checks` は残す |
 
 ③ v16 以降、ビューは `security_invoker = true`（見る人の権限＝自分の組織だけで動く）。
@@ -254,6 +263,7 @@ GitHub Actions の **「本番DBに反映」**（`.github/workflows/db-apply.yml
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
+| v40_same_injury_compare | **適用済み（2026-10-31）** | `players.is_demo`（デモの選手）・`same_injury_phase_compare()`（同じ受傷の選手との PHASE ごとの比較）。集計の3ビューもデモを除く。戻し方はファイルの冒頭 |
 | v39_report_reactions | **適用済み（2026-10-31）** | `report_reactions`（日報へのリアクション）と通知のトリガー。表の追加だけ。戻し方はファイルの冒頭 |
 | v38_offsite_custom_items | **適用済み（2026-10-31）** | `player_offsite_custom_items`（選手ごとに足した患部外トレーニング）。表の追加だけ。SQL Editor で作者が実行（コネクタの確認が届かなかったため）。戻し方はファイルの冒頭 |
 | v37_returned_list | **適用済み（2026-10-31）** | `players.moved_to_returned_at`（指導者が復帰者リストへ移した日時）。列の追加だけ。戻し方はファイルの冒頭 |
@@ -352,10 +362,10 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 公開の確認は、本番の JS に番号が入っているかで行う（`curl` で `/assets/index-*.js` を取り、`v15.14` を探す）。
 
 ```js
-const APP_BUILD = "v15.26";
+const APP_BUILD = "v15.27";
 ```
 
-本番に出ているのは `v15.26`（2026-10-31 公開）。
+本番に出ているのは `v15.27`（2026-10-31 公開）。
 
 過去に「全く改善されてない」が3回続き、原因が
 **App.jsx をリポジトリ直下に置いていて `src/` に入っていなかった**ことだった。
