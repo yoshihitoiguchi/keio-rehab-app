@@ -274,7 +274,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.24";
+const APP_BUILD = "v15.25";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -9649,15 +9649,23 @@ function HamstringClassificationCard({ orgId, player, protocol, readOnly, onSave
 
 // ============================================================
 // 患部外トレーニング（11領域）
-//   coach: 領域・項目を選手ごとに処方 / player: 処方されたものを閲覧
+//   coach: 共通リストから選ぶ＋リストにない種目を個別に追加（v38） / player: 選ばれたものを閲覧
 // ============================================================
 function OffsiteTrainingPanel({ orgId, player, readOnly, onChanged }) {
   const [domains, setDomains] = useState([]);
   const [items, setItems] = useState([]);
   const [selected, setSelected] = useState([]); // item_id の配列
+  // 個別に足した種目（v38 の表）。表がまだない DB では null のまま＝欄を出さない
+  const [custom, setCustom] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadFilter, setLoadFilter] = useState("all");
   const [regionFilter, setRegionFilter] = useState("all");
+  const [showList, setShowList] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newLoad, setNewLoad] = useState("full");
+  const [newNote, setNewNote] = useState("");
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
@@ -9673,12 +9681,17 @@ function OffsiteTrainingPanel({ orgId, player, readOnly, onChanged }) {
         "player_offsite_selections",
         `?player_id=eq.${encodeURIComponent(player.id)}&select=item_id`
       ),
+      sbSelect(
+        "player_offsite_custom_items",
+        `?player_id=eq.${encodeURIComponent(player.id)}&select=*&order=created_at.asc`
+      ).catch(() => null),
     ])
-      .then(([d, i, s]) => {
+      .then(([d, i, s, c]) => {
         if (!active) return;
         setDomains(d || []);
         setItems(i || []);
         setSelected((s || []).map((r) => r.item_id));
+        setCustom(Array.isArray(c) ? c : null);
       })
       .catch((err) => active && setError(errText(err)))
       .finally(() => active && setLoading(false));
@@ -9707,10 +9720,49 @@ function OffsiteTrainingPanel({ orgId, player, readOnly, onChanged }) {
     }
   };
 
+  const addCustom = async () => {
+    const name = newName.trim();
+    if (!name) {
+      setError("種目名を入れてください。");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const [row] = await sbInsert("player_offsite_custom_items", {
+        player_id: player.id,
+        name,
+        load_type: newLoad,
+        note: newNote.trim() || null,
+      });
+      setCustom((prev) => [...(prev || []), row]);
+      setNewName("");
+      setNewNote("");
+      setNewLoad("full");
+      setShowAdd(false);
+      onChanged?.();
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeCustom = async (row) => {
+    const sure = await askConfirm(`「${row.name}」を外しますか？`, { okLabel: "外す", danger: true });
+    if (!sure) return;
+    try {
+      await sbDelete("player_offsite_custom_items", row.id);
+      setCustom((prev) => (prev || []).filter((x) => x.id !== row.id));
+      onChanged?.();
+    } catch (err) {
+      setError(errText(err));
+    }
+  };
+
   const visibleItems = (domainId) =>
     items.filter((it) => {
       if (it.domain_id !== domainId) return false;
-      if (readOnly && !selected.includes(it.id)) return false;
       if (loadFilter === "unloaded" && it.load_type !== "unloaded") return false;
       if (loadFilter === "unloaded_partial" && it.load_type === "full") return false;
       if (regionFilter !== "all" && it.region !== regionFilter) return false;
@@ -9718,6 +9770,9 @@ function OffsiteTrainingPanel({ orgId, player, readOnly, onChanged }) {
     });
 
   const regionsInUse = Array.from(new Set(items.map((i) => i.region).filter(Boolean)));
+  const selectedItems = items.filter((it) => selected.includes(it.id));
+  const customList = custom || [];
+  const total = selectedItems.length + customList.length;
 
   if (loading) {
     if (readOnly) return null;
@@ -9729,131 +9784,250 @@ function OffsiteTrainingPanel({ orgId, player, readOnly, onChanged }) {
   }
 
   // 選手側：まだ何も選ばれていなければ、カードごと出さない
-  if (readOnly && selected.length === 0) return null;
+  if (readOnly && total === 0) return null;
+
+  const loadBadge = (loadType) =>
+    LOAD_LABELS[loadType] ? (
+      <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${LOAD_BADGE[loadType]}`}>
+        {LOAD_LABELS[loadType]}
+      </span>
+    ) : null;
+
+  const itemText = (it) => (
+    <span className="flex-1 text-left">
+      <span className="text-xs text-slate-700">
+        {it.category ? `${it.category} ` : ""}
+        {it.name}
+      </span>
+      {it.examples && <span className="block text-[10px] text-slate-400">{it.examples}</span>}
+      {it.notes && <span className="block text-[10px] text-amber-600">※{it.notes}</span>}
+    </span>
+  );
+
+  // この選手に出しているもの（選手側はこれだけ。指導者側は一番上にまとめて出す）
+  const chosen = (
+    <div className="space-y-3">
+      {domains.map((d) => {
+        const list = selectedItems.filter((it) => it.domain_id === d.id);
+        if (list.length === 0) return null;
+        return (
+          <div key={d.id} className="border border-slate-200 rounded-lg p-3">
+            <p className="text-xs font-bold text-slate-700">
+              {d.code}｜{d.title}
+            </p>
+            {d.purpose && <p className="text-[10px] text-slate-400 mt-0.5">{d.purpose}</p>}
+            <div className="mt-2 space-y-1">
+              {list.map((it) => (
+                <div key={it.id} className="flex items-start gap-2 px-2 py-1.5 rounded bg-slate-50">
+                  {itemText(it)}
+                  {loadBadge(it.load_type)}
+                  {!readOnly && (
+                    <button
+                      onClick={() => toggle(it.id)}
+                      className="text-slate-400 hover:text-red-500 p-1 -m-1 shrink-0"
+                      aria-label={`${it.name}を外す`}
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      {customList.length > 0 && (
+        <div className="border border-slate-200 rounded-lg p-3" data-testid="offsite-custom">
+          <p className="text-xs font-bold text-slate-700">個別のメニュー</p>
+          <div className="mt-2 space-y-1">
+            {customList.map((row) => (
+              <div key={row.id} className="flex items-start gap-2 px-2 py-1.5 rounded bg-slate-50">
+                <span className="flex-1 text-left">
+                  <span className="text-xs text-slate-700">{row.name}</span>
+                  {row.note && <span className="block text-[10px] text-slate-500">{row.note}</span>}
+                </span>
+                {loadBadge(row.load_type)}
+                {!readOnly && (
+                  <button
+                    onClick={() => removeCustom(row)}
+                    className="text-slate-400 hover:text-red-500 p-1 -m-1 shrink-0"
+                    aria-label={`${row.name}を外す`}
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
       <p className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-1.5">
         <Dumbbell size={16} className="text-blue-600" /> 患部外トレーニング
+        {!readOnly && total > 0 && (
+          <span className="ml-auto text-[11px] font-normal text-slate-400">{total}項目</span>
+        )}
       </p>
 
       {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
 
-      {!readOnly && (
+      {readOnly ? (
+        chosen
+      ) : (
         <>
-          <div className="flex flex-wrap gap-1.5 mb-3">
-            {OFFSITE_PRESETS.map((p) => (
+          {total > 0 ? chosen : <p className="text-xs text-slate-400">まだ選んでいません。</p>}
+
+          <div className="grid grid-cols-2 gap-2 mt-3">
+            <button
+              onClick={() => setShowList((v) => !v)}
+              className={`py-2 rounded-lg border text-xs font-bold flex items-center justify-center gap-1 ${
+                showList ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600"
+              }`}
+            >
+              {showList ? <ChevronUp size={14} /> : <ChevronDown size={14} />} リストから選ぶ
+            </button>
+            {custom !== null && (
               <button
-                key={p.key}
-                onClick={() => applyPreset(p)}
-                className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
-                  loadFilter === p.load && regionFilter === p.region
-                    ? "border-blue-500 bg-blue-50 text-blue-700 font-bold"
-                    : "border-slate-200 text-slate-500 hover:bg-slate-50"
+                onClick={() => setShowAdd((v) => !v)}
+                className={`py-2 rounded-lg border text-xs font-bold flex items-center justify-center gap-1 ${
+                  showAdd ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600"
                 }`}
               >
-                {p.label}
+                <PlusCircle size={14} /> 個別に追加
               </button>
-            ))}
+            )}
           </div>
-          <div className="grid grid-cols-2 gap-2 mb-4">
-            <select
-              value={loadFilter}
-              onChange={(e) => setLoadFilter(e.target.value)}
-              className="border border-slate-300 rounded-lg px-2 py-1.5 text-xs bg-white"
-            >
-              <option value="all">荷重：すべて</option>
-              <option value="unloaded">免荷で可能なものだけ</option>
-              <option value="unloaded_partial">免荷＋部分荷重まで</option>
-            </select>
-            <select
-              value={regionFilter}
-              onChange={(e) => setRegionFilter(e.target.value)}
-              className="border border-slate-300 rounded-lg px-2 py-1.5 text-xs bg-white"
-            >
-              <option value="all">部位：すべて</option>
-              {regionsInUse.map((r) => (
-                <option key={r} value={r}>
-                  {REGION_LABELS[r] ?? r}
-                </option>
-              ))}
-            </select>
-          </div>
-        </>
-      )}
 
-      <div className="space-y-3">
-        {domains.map((d) => {
-          const list = visibleItems(d.id);
-          if (list.length === 0) return null;
-          return (
-            <div key={d.id} className="border border-slate-200 rounded-lg p-3">
-              <p className="text-xs font-bold text-slate-700">
-                {d.code}｜{d.title}
-              </p>
-              {d.purpose && <p className="text-[10px] text-slate-400 mt-0.5">{d.purpose}</p>}
-              <div className="mt-2 space-y-1">
-                {list.map((it) => {
-                  const isOn = selected.includes(it.id);
-                  const row = (
-                    <>
-                      <span className="flex-1 text-left">
-                        <span className="text-xs text-slate-700">
-                          {it.category ? `${it.category} ` : ""}
-                          {it.name}
-                        </span>
-                        {it.examples && (
-                          <span className="block text-[10px] text-slate-400">{it.examples}</span>
-                        )}
-                        {it.notes && (
-                          <span className="block text-[10px] text-amber-600">※{it.notes}</span>
-                        )}
-                      </span>
-                      <span
-                        className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${
-                          LOAD_BADGE[it.load_type]
-                        }`}
-                      >
-                        {LOAD_LABELS[it.load_type]}
-                      </span>
-                    </>
-                  );
-                  return readOnly ? (
-                    <div key={it.id} className="flex items-start gap-2 px-2 py-1.5 rounded bg-slate-50">
-                      {row}
+          {showAdd && custom !== null && (
+            <div className="mt-3 border border-slate-200 rounded-lg p-3 space-y-2">
+              <div>
+                <label className="text-xs text-slate-500">種目名</label>
+                <input
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  maxLength={100}
+                  placeholder="例：チューブ外旋"
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-slate-500">荷重</label>
+                <select
+                  value={newLoad}
+                  onChange={(e) => setNewLoad(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 bg-white"
+                >
+                  <option value="unloaded">{LOAD_LABELS.unloaded}</option>
+                  <option value="partial">{LOAD_LABELS.partial}</option>
+                  <option value="full">{LOAD_LABELS.full}</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-slate-500">回数・メモ</label>
+                <input
+                  value={newNote}
+                  onChange={(e) => setNewNote(e.target.value)}
+                  maxLength={500}
+                  placeholder="例：15回×3set"
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <button
+                onClick={addCustom}
+                disabled={saving}
+                className="w-full py-2 rounded-lg bg-blue-600 text-white text-sm font-bold disabled:opacity-50"
+              >
+                {saving ? "追加中" : "この選手に追加する"}
+              </button>
+            </div>
+          )}
+
+          {showList && (
+            <div className="mt-3">
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {OFFSITE_PRESETS.map((p) => (
+                  <button
+                    key={p.key}
+                    onClick={() => applyPreset(p)}
+                    className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
+                      loadFilter === p.load && regionFilter === p.region
+                        ? "border-blue-500 bg-blue-50 text-blue-700 font-bold"
+                        : "border-slate-200 text-slate-500 hover:bg-slate-50"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <div className="grid grid-cols-2 gap-2 mb-4">
+                <select
+                  value={loadFilter}
+                  onChange={(e) => setLoadFilter(e.target.value)}
+                  className="border border-slate-300 rounded-lg px-2 py-1.5 text-xs bg-white"
+                >
+                  <option value="all">荷重：すべて</option>
+                  <option value="unloaded">免荷で可能なものだけ</option>
+                  <option value="unloaded_partial">免荷＋部分荷重まで</option>
+                </select>
+                <select
+                  value={regionFilter}
+                  onChange={(e) => setRegionFilter(e.target.value)}
+                  className="border border-slate-300 rounded-lg px-2 py-1.5 text-xs bg-white"
+                >
+                  <option value="all">部位：すべて</option>
+                  {regionsInUse.map((r) => (
+                    <option key={r} value={r}>
+                      {REGION_LABELS[r] ?? r}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-3">
+                {domains.map((d) => {
+                  const list = visibleItems(d.id);
+                  if (list.length === 0) return null;
+                  return (
+                    <div key={d.id} className="border border-slate-200 rounded-lg p-3">
+                      <p className="text-xs font-bold text-slate-700">
+                        {d.code}｜{d.title}
+                      </p>
+                      <div className="mt-2 space-y-1">
+                        {list.map((it) => {
+                          const isOn = selected.includes(it.id);
+                          return (
+                            <button
+                              key={it.id}
+                              onClick={() => toggle(it.id)}
+                              className={`w-full flex items-start gap-2 px-2 py-1.5 rounded border transition-colors ${
+                                isOn ? "border-blue-400 bg-blue-50" : "border-transparent hover:bg-slate-50"
+                              }`}
+                            >
+                              {isOn ? (
+                                <CheckCircle2 size={14} className="text-blue-600 shrink-0 mt-0.5" />
+                              ) : (
+                                <Circle size={14} className="text-slate-300 shrink-0 mt-0.5" />
+                              )}
+                              {itemText(it)}
+                              {loadBadge(it.load_type)}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
-                  ) : (
-                    <button
-                      key={it.id}
-                      onClick={() => toggle(it.id)}
-                      className={`w-full flex items-start gap-2 px-2 py-1.5 rounded border transition-colors ${
-                        isOn ? "border-blue-400 bg-blue-50" : "border-transparent hover:bg-slate-50"
-                      }`}
-                    >
-                      {isOn ? (
-                        <CheckCircle2 size={14} className="text-blue-600 shrink-0 mt-0.5" />
-                      ) : (
-                        <Circle size={14} className="text-slate-300 shrink-0 mt-0.5" />
-                      )}
-                      {row}
-                    </button>
                   );
                 })}
+                {domains.every((d) => visibleItems(d.id).length === 0) && (
+                  <p className="text-xs text-slate-400">この条件に合う項目はありません。</p>
+                )}
               </div>
             </div>
-          );
-        })}
-        {domains.every((d) => visibleItems(d.id).length === 0) && (
-          <p className="text-xs text-slate-400">
-            {readOnly
-              ? "まだ選ばれていません。"
-              : "この条件に合う項目はありません。"}
-          </p>
-        )}
-      </div>
-
-      {!readOnly && (
-        <p className="text-[10px] text-slate-400 mt-3">選択中：{selected.length}項目</p>
+          )}
+        </>
       )}
     </div>
   );

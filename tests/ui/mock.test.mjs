@@ -110,6 +110,22 @@ function respond(st, url, method, body) {
     if (method === "POST") { const row = { id: 70 + (st.meetingNotes || []).length, created_at: iso(new Date()), ...json }; st.meetingNotes = [row, ...(st.meetingNotes || [])]; return [row]; }
     return st.meetingNotes || [];
   }
+  if (p === "/rest/v1/offsite_domains") return [{ id: "A", code: "A", title: "上半身", purpose: null, sort_order: 1 }];
+  if (p === "/rest/v1/offsite_items") return [
+    { id: 1, domain_id: "A", name: "ベンチプレス", load_type: "unloaded", region: "upper_body", sort_order: 1 },
+    { id: 2, domain_id: "A", name: "懸垂", load_type: "partial", region: "upper_body", sort_order: 2 },
+  ];
+  if (p === "/rest/v1/player_offsite_selections") {
+    if (method === "POST") { st.offsiteSel = [...(st.offsiteSel || []), json.item_id]; return [json]; }
+    if (method === "DELETE") { const id = Number(/item_id=eq\.(\d+)/.exec(u.search)?.[1]); st.offsiteSel = (st.offsiteSel || []).filter((x) => x !== id); return null; }
+    return (st.offsiteSel || []).map((item_id) => ({ item_id }));
+  }
+  if (p === "/rest/v1/player_offsite_custom_items") {
+    if (st.noCustomTable) return { __status: 404 };
+    if (method === "POST") { const row = { id: 40 + (st.offsiteCustom || []).length, created_at: iso(new Date()), ...json }; st.offsiteCustom = [...(st.offsiteCustom || []), row]; return [row]; }
+    if (method === "DELETE") { const id = Number(/id=eq\.(\d+)/.exec(u.search)?.[1]); st.offsiteCustom = (st.offsiteCustom || []).filter((x) => x.id !== id); return null; }
+    return st.offsiteCustom || [];
+  }
   if (p === "/rest/v1/player_reinjuries") {
     if (method === "POST") { const row = { id: 40 + (st.reinjuries || []).length, created_at: iso(new Date()), ...json }; st.reinjuries = [row, ...(st.reinjuries || [])]; return [row]; }
     return st.reinjuries || [];
@@ -156,7 +172,9 @@ async function newPage(st, { seenGuide = true, skipInstall = true, skipNotify = 
     if (!r.url().startsWith(API)) return r.continue();
     const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*", "Access-Control-Allow-Methods": "*" };
     if (r.method() === "OPTIONS") return r.respond({ status: 204, headers: cors });
-    r.respond({ status: 200, contentType: "application/json", headers: cors, body: JSON.stringify(respond(st, r.url(), r.method(), r.postData())) });
+    const out = respond(st, r.url(), r.method(), r.postData());
+    if (out && out.__status) return r.respond({ status: out.__status, contentType: "application/json", headers: cors, body: JSON.stringify({ message: "relation does not exist" }) });
+    r.respond({ status: 200, contentType: "application/json", headers: cors, body: JSON.stringify(out) });
   });
   await p.evaluateOnNewDocument((seen, skip, skipN) => { try {
     if (seen) localStorage.setItem("resprint.guideSeen.p-1", "1");
@@ -792,6 +810,47 @@ try {
     await clickText(p, "公開をやめる", '[role="dialog"] button'); await sleep(800);
     ok((await text(p)).includes("公開中の枠（まだ予約なし）0件"), "予約のない枠は、公開をやめられる");
     ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
+  });
+  await step("患部外トレーニング：選手ごとに個別に追加", async () => {
+    const st = makeState({ injuryDaysAgo: 3 });
+    const c = await newPage(st);
+    await coachLogin(c);
+    for (const e of await c.$$("button")) if ((await e.evaluate((n) => n.innerText.trim())) === "メニュー" && !(await e.evaluate((n) => !!n.closest("nav")))) { await e.click(); break; }
+    await sleep(900);
+    let t = await text(c);
+    ok(t.includes("患部外トレーニング") && t.includes("まだ選んでいません") && !t.includes("ベンチプレス"), "指導者：リストは最初は畳んである");
+    await clickText(c, "リストから選ぶ"); await sleep(300);
+    await clickText(c, "ベンチプレス"); await sleep(500);
+    ok((st.offsiteSel || []).includes(1), "リストから選ぶと、その選手に追加される");
+    await clickText(c, "リストから選ぶ"); await sleep(300);
+    await clickText(c, "個別に追加"); await sleep(300);
+    await c.type('input[placeholder="例：チューブ外旋"]', "チューブ外旋");
+    await c.select("select", "unloaded").catch(() => {});
+    for (const s of await c.$$("select")) { const opts = await s.evaluate((n) => [...n.options].map((o) => o.value)); if (opts.join() === "unloaded,partial,full") { await s.select("unloaded"); break; } }
+    await c.type('input[placeholder="例：15回×3set"]', "15回×3set");
+    await clickText(c, "この選手に追加する"); await sleep(700);
+    const posted = st.posts.find((x) => x.p === "/rest/v1/player_offsite_custom_items");
+    ok(posted?.b?.player_id === "p-1" && posted.b.name === "チューブ外旋" && posted.b.load_type === "unloaded" && posted.b.note === "15回×3set", "リストにない種目を、荷重・回数つきで個別に追加できる");
+    t = await text(c);
+    ok(t.includes("個別のメニュー") && t.includes("チューブ外旋") && t.includes("15回×3set") && t.includes("2項目"), "追加した種目が、選んだ項目と一緒に上に並ぶ");
+    if (process.env.SHOT_DIR) await c.screenshot({ path: process.env.SHOT_DIR + "/offsite-coach.png", fullPage: true });
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+
+    const p = await newPage(st);
+    await playerLogin(p);
+    await clickText(p, "メニュー", "nav button"); await sleep(900);
+    t = await text(p);
+    ok(t.includes("患部外トレーニング") && t.includes("ベンチプレス") && t.includes("チューブ外旋") && t.includes("15回×3set") && !t.includes("懸垂") && !t.includes("個別に追加"),
+       "選手：選ばれた項目と個別に足した種目だけが見える（追加のボタンはない）");
+    if (process.env.SHOT_DIR) await p.screenshot({ path: process.env.SHOT_DIR + "/offsite-player.png", fullPage: true });
+
+    const st2 = makeState({ injuryDaysAgo: 3 }); st2.noCustomTable = true;
+    const c2 = await newPage(st2);
+    await coachLogin(c2);
+    for (const e of await c2.$$("button")) if ((await e.evaluate((n) => n.innerText.trim())) === "メニュー" && !(await e.evaluate((n) => !!n.closest("nav")))) { await e.click(); break; }
+    await sleep(900);
+    t = await text(c2);
+    ok(t.includes("リストから選ぶ") && !t.includes("個別に追加") && c2.errs.length === 0, "DB の更新（v38）前は「個別に追加」を出さず、リストからの選択はそのまま使える");
   });
   await step("選手：面談の日が過ぎたら、別の日の面談を取り直せる", async () => {
     const st = makeState({ injuryDaysAgo: 30 });

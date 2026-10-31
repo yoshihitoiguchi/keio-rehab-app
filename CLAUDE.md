@@ -165,6 +165,7 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `protocols` | プロトコル本体。`phases` はJSON配列。**PHASE数は可変**（ハムストリングは10） |
 | `phase_menus` / `exercises` / `exercise_steps` | フェーズ別メニューと種目内ステップ |
 | `offsite_domains` / `offsite_items` / `player_offsite_selections` | オフサイトメニュー（A〜Kの11ドメイン）と選手ごとの選択 |
+| `player_offsite_custom_items` | 共通リストにない患部外トレーニングを選手ごとに足したもの（種目名・荷重・回数メモ）。v38。表がない DB では「個別に追加」を出さない |
 | `reports` | 日報。VAS・メンタル・疲労・睡眠・恐怖心・抜ける接地・RPE ほか |
 | `gate_item_checks` | GATE項目のチェック記録 |
 | `phase_history` / `phase_advances` | フェーズ遷移の履歴 |
@@ -252,7 +253,8 @@ GitHub Actions の **「本番DBに反映」**（`.github/workflows/db-apply.yml
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
-| v37_returned_list | **未適用（ステージのみ）** | `players.moved_to_returned_at`（指導者が復帰者リストへ移した日時）。列の追加だけ。戻し方はファイルの冒頭 |
+| v38_offsite_custom_items | **適用済み（2026-10-31）** | `player_offsite_custom_items`（選手ごとに足した患部外トレーニング）。表の追加だけ。SQL Editor で作者が実行（コネクタの確認が届かなかったため）。戻し方はファイルの冒頭 |
+| v37_returned_list | **適用済み（2026-10-31）** | `players.moved_to_returned_at`（指導者が復帰者リストへ移した日時）。列の追加だけ。戻し方はファイルの冒頭 |
 | v36_reinjury | **適用済み（2026-10-25）** | `players.reinjury_date` と `player_reinjuries`（再受傷の記録）。列と表の追加だけ。公開中のアプリはそのまま動く。戻し方はファイルの冒頭 |
 | v35_report_comments | **適用済み（2026-10-07）** | `report_comments`（日報の本音へのコメント・返信。日報1件ごと）と通知のトリガー。表の追加だけ。戻し方はファイルの冒頭 |
 | v34_phase8_gate_rdl_note | **適用済み（2026-10-06）** | データだけ。PHASE 8 の Tantrums の条件を「50回×3set を違和感なく」の1項目に（15秒…の項目は外す）。ウエイト解禁は PHASE 3 の名称から外し、条件の Bilateral RDL の項目に併記。戻すときは控え「v34 の前」から |
@@ -348,10 +350,10 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 公開の確認は、本番の JS に番号が入っているかで行う（`curl` で `/assets/index-*.js` を取り、`v15.14` を探す）。
 
 ```js
-const APP_BUILD = "v15.24";
+const APP_BUILD = "v15.25";
 ```
 
-本番に出ているのは `v15.24`（2026-10-25 公開）。
+本番に出ているのは `v15.25`（2026-10-31 公開）。
 
 過去に「全く改善されてない」が3回続き、原因が
 **App.jsx をリポジトリ直下に置いていて `src/` に入っていなかった**ことだった。
@@ -630,6 +632,10 @@ v16 後も残る穴（優先順。2026-09-27 のレビューで確認したも�
 ---
 
 ## 変更履歴
+
+### 2026-10-31（v15.25：Claude Code）
+- 患部外トレーニングを選手ごとに個別に追加できる（作者の依頼）。指導者は共通リストから選ぶほか、リストにない種目を荷重・回数メモつきで「個別に追加」できる。
+  v38 `player_offsite_custom_items`（2026-10-31 本番に適用）。表がない DB では「個別に追加」を出さない。
 
 ### 2026-10-25（v15.24：Claude Code）
 - 指導者が、最後の PHASE まで来た選手を選んで復帰者リストへ移せる（作者の依頼）。選手詳細の上部の「復帰者リストへ移す」（最後の PHASE の選手だけ）と、
