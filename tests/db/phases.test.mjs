@@ -718,6 +718,19 @@ ok(!(await as(U4, "delete from player_reinjuries where player_id = 'p-b1'")).err
    && (await db.query("select count(*)::int n from player_reinjuries where player_id = 'p-b1'")).rows[0].n === 0, "[v36] 間違えた記録は削除できる");
 await db.exec("update players set reinjury_date = null where id = 'p-b1'");
 
+// ===== v37：指導者が選手を復帰者リストへ移す =====
+ok(!(await run("supabase_migration_v37_returned_list.sql")), "[v37] 適用 1 回目");
+ok(!(await run("supabase_migration_v37_returned_list.sql")), "[v37] 適用 2 回目（冪等）");
+ok(!(await as(U4, "update players set moved_to_returned_at = now() where id = 'p-b1'")).error
+   && (await db.query("select moved_to_returned_at is not null v from players where id = 'p-b1'")).rows[0].v === true,
+   "[v37] 同じ組織の人は、復帰者リストへ移せる");
+ok(!(await as(U4, "update players set moved_to_returned_at = null where id = 'p-b1'")).error
+   && (await db.query("select moved_to_returned_at is null v from players where id = 'p-b1'")).rows[0].v === true,
+   "[v37] 現役選手に戻せる");
+await as(U1, "update players set moved_to_returned_at = now() where id = 'p-b1'");
+ok((await db.query("select moved_to_returned_at is null v from players where id = 'p-b1'")).rows[0].v === true,
+   "[v37] ほかの組織からは書き換えられない");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

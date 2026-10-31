@@ -161,7 +161,7 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `org_login_failures` | 組織ログインの失敗記録（利用者ごと15分に10回、組織ごと15分に100回の制限。1日で消える）（v15） |
 | `resprint_migration_backup` | ③の直前のポリシー・権限・設定の退避と、③を戻した記録（v16。アプリからは読めない） |
 | `app_settings` | 組織ごとの設定（指導者パスワードなど） |
-| `players` | 選手。`pin`（4桁）、`bamic_grade`、`hamstring_muscle`、`hamstring_location` ほか |
+| `players` | 選手。`pin`（4桁）、`bamic_grade`、`hamstring_muscle`、`hamstring_location` ほか。`moved_to_returned_at` は指導者が復帰者リストへ移した日時（v37。null なら従来どおり、復帰の記録から15日目に自動で復帰者リスト） |
 | `protocols` | プロトコル本体。`phases` はJSON配列。**PHASE数は可変**（ハムストリングは10） |
 | `phase_menus` / `exercises` / `exercise_steps` | フェーズ別メニューと種目内ステップ |
 | `offsite_domains` / `offsite_items` / `player_offsite_selections` | オフサイトメニュー（A〜Kの11ドメイン）と選手ごとの選択 |
@@ -252,6 +252,7 @@ GitHub Actions の **「本番DBに反映」**（`.github/workflows/db-apply.yml
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
+| v37_returned_list | **未適用（ステージのみ）** | `players.moved_to_returned_at`（指導者が復帰者リストへ移した日時）。列の追加だけ。戻し方はファイルの冒頭 |
 | v36_reinjury | **適用済み（2026-10-25）** | `players.reinjury_date` と `player_reinjuries`（再受傷の記録）。列と表の追加だけ。公開中のアプリはそのまま動く。戻し方はファイルの冒頭 |
 | v35_report_comments | **適用済み（2026-10-07）** | `report_comments`（日報の本音へのコメント・返信。日報1件ごと）と通知のトリガー。表の追加だけ。戻し方はファイルの冒頭 |
 | v34_phase8_gate_rdl_note | **適用済み（2026-10-06）** | データだけ。PHASE 8 の Tantrums の条件を「50回×3set を違和感なく」の1項目に（15秒…の項目は外す）。ウエイト解禁は PHASE 3 の名称から外し、条件の Bilateral RDL の項目に併記。戻すときは控え「v34 の前」から |
@@ -347,10 +348,10 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 公開の確認は、本番の JS に番号が入っているかで行う（`curl` で `/assets/index-*.js` を取り、`v15.14` を探す）。
 
 ```js
-const APP_BUILD = "v15.23";
+const APP_BUILD = "v15.24";
 ```
 
-本番に出ているのは `v15.23`（2026-10-25 公開）。
+本番に出ているのは `v15.24`（2026-10-25 公開）。
 
 過去に「全く改善されてない」が3回続き、原因が
 **App.jsx をリポジトリ直下に置いていて `src/` に入っていなかった**ことだった。
@@ -629,6 +630,12 @@ v16 後も残る穴（優先順。2026-09-27 のレビューで確認したも�
 ---
 
 ## 変更履歴
+
+### 2026-10-25（v15.24：Claude Code）
+- 指導者が、最後の PHASE まで来た選手を選んで復帰者リストへ移せる（作者の依頼）。選手詳細の上部の「復帰者リストへ移す」（最後の PHASE の選手だけ）と、
+  移した選手の「現役選手に戻す」。v37 `players.moved_to_returned_at`。復帰の記録から15日目に自動で移る仕組みはそのまま。平均復帰日数の集計は `completed_at` のままなので変わらない。
+  再受傷を記録すると、この印も外す（v15.23 の再受傷の記録が外す）。復帰者リストでは「日報なし」を出さない。
+- 検証：SQL 278、画面 187。
 
 ### 2026-10-25（v15.23：Claude Code）
 - **不具合の修正**：面談を予約して、その日が過ぎると、選手が別の日の面談を予約できなかった（`players.booked_slot_id` が指す枠を、日付に関係なく「予約済み」と出していた）。
