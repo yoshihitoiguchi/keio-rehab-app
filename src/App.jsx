@@ -278,7 +278,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.34";
+const APP_BUILD = "v15.35";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -792,6 +792,30 @@ const REDUCE_CRITERIA = [
     fact: () => "代償動作 あり",
   },
 ];
+// 痛みが前の日報から急に上がった日報の目印（指導者の画面だけ）。
+// 幅は上の基準「前日から3以上」と同じ。印は「前回 → 今回」の事実を示すだけで、行動は決めない。
+const PAIN_JUMP_MIN = 3;
+function painJumpOf(player, report) {
+  const list = player?.reports || [];
+  const i = list.findIndex((x) => String(x.id) === String(report?.id));
+  if (i <= 0) return null;
+  const prev = list[i - 1].vas;
+  if (prev == null || report.vas == null) return null;
+  const diff = report.vas - prev;
+  return diff >= PAIN_JUMP_MIN ? { prev, now: report.vas, diff } : null;
+}
+function PainJumpBadge({ jump }) {
+  return (
+    <span
+      className="inline-flex items-center gap-0.5 text-xs font-bold px-2 py-0.5 rounded-full bg-red-600 text-white"
+      title={`前回 ${jump.prev} → 今回 ${jump.now}`}
+      data-testid="pain-jump"
+    >
+      <TrendingUp size={12} /> 痛み {jump.now}（+{jump.diff}）
+    </span>
+  );
+}
+
 // 中止の基準を先に置く
 function matchedCriteria(r) {
   return [...STOP_CRITERIA, ...REDUCE_CRITERIA]
@@ -4834,11 +4858,14 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
                         日報なし
                       </span>
                     )}
-                    {r && (
-                      <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
-                        痛み {r.vas}
-                      </span>
-                    )}
+                    {r &&
+                      (painJumpOf(p, r) ? (
+                        <PainJumpBadge jump={painJumpOf(p, r)} />
+                      ) : (
+                        <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+                          痛み {r.vas}
+                        </span>
+                      ))}
                   </div>
                 </button>
               </li>
@@ -5116,10 +5143,20 @@ function PlayerDetailPanel({
             {!report && <p className="text-sm text-slate-400">まだ報告がありません。</p>}
             {report && (
               <div className="grid grid-cols-3 gap-3">
-                <div className="bg-slate-50 rounded-lg p-3 text-center">
-                  <p className="text-xs text-slate-400 mb-1">痛み(VAS)</p>
-                  <p className="text-2xl font-bold text-slate-800">{report.vas}</p>
-                </div>
+                {painJumpOf(player, report) ? (
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-center" data-testid="pain-jump-tile">
+                    <p className="text-xs text-red-600 mb-1">痛み(VAS)</p>
+                    <p className="text-2xl font-bold text-red-600">{report.vas}</p>
+                    <p className="text-[11px] font-bold text-red-600 mt-0.5">
+                      前回 {painJumpOf(player, report).prev} から +{painJumpOf(player, report).diff}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="bg-slate-50 rounded-lg p-3 text-center">
+                    <p className="text-xs text-slate-400 mb-1">痛み(VAS)</p>
+                    <p className="text-2xl font-bold text-slate-800">{report.vas}</p>
+                  </div>
+                )}
                 <div className="bg-slate-50 rounded-lg p-3 text-center">
                   <p className="text-xs text-slate-400 mb-1">メンタル</p>
                   <p className="text-2xl">{MENTAL_FACES[report.mental - 1]}</p>
@@ -9566,7 +9603,11 @@ function UnrepliedReports({ players, onOpen }) {
                 )}
               </span>
               <span className="flex items-center gap-1 shrink-0">
-                <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">痛み {report.vas}</span>
+                {painJumpOf(player, report) ? (
+                  <PainJumpBadge jump={painJumpOf(player, report)} />
+                ) : (
+                  <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">痛み {report.vas}</span>
+                )}
                 <ChevronRight size={16} className="text-slate-400" />
               </span>
             </button>
@@ -9714,7 +9755,10 @@ function ReportThread({ player, viewer, focusReportId = null, focusAt = null }) 
       <ul className="space-y-2">
         {shown.map((r) => (
           <li key={r.id} id={`report-${r.id}`} className={`bg-slate-50 rounded-lg p-3 scroll-mt-24 ${isFocus(r) ? "ring-2 ring-blue-400" : ""}`}>
-            <p className="text-[11px] font-bold text-slate-500">{r.date}</p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] font-bold text-slate-500">{r.date}</p>
+              {staff && painJumpOf(player, r) && <PainJumpBadge jump={painJumpOf(player, r)} />}
+            </div>
             {!staff && <ReportSummaryLine r={r} />}
             {staff || (r.honne || "").trim() ? (
               <p className={`text-sm whitespace-pre-wrap leading-relaxed mt-0.5 ${(r.honne || "").trim() ? "text-slate-800" : "text-slate-400"}`}>
