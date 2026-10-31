@@ -719,6 +719,35 @@ ok(!!(await as(U4, "insert into player_offsite_custom_items (player_id, name) va
 ok(!(await as(U4, `delete from player_offsite_custom_items where id = ${c38}`)).error
    && (await db.query("select count(*)::int n from player_offsite_custom_items")).rows[0].n === 0, "[v38] 消せる");
 
+// ===== v36：再受傷の記録 =====
+ok(!(await run("supabase_migration_v36_reinjury.sql")), "[v36] 適用 1 回目");
+ok(!(await run("supabase_migration_v36_reinjury.sql")), "[v36] 適用 2 回目（冪等）");
+ok(!(await as(U4, "insert into player_reinjuries (player_id, reinjured_on, phase_before, completed_before, restart_phase, note) values ('p-b1', '2026-10-20', 10, now(), 1, '練習中に再受傷')")).error
+   && !(await as(U4, "update players set reinjury_date = '2026-10-20' where id = 'p-b1'")).error
+   && (await as(U6, "select reinjured_on from player_reinjuries where player_id = 'p-b1'")).rows?.length === 1
+   && (await as(U6, "select reinjury_date::text d from players where id = 'p-b1'")).rows?.[0]?.d === "2026-10-20", "[v36] 同じ組織の人は、再受傷を記録できる・読める（再受傷日は players に入る）");
+ok((await as(U1, "select * from player_reinjuries")).rows?.length === 0
+   && !!(await as(U1, "insert into player_reinjuries (player_id, reinjured_on) values ('p-b1', '2026-10-21')")).error
+   && !!(await as(null, "select * from player_reinjuries")).error, "[v36] ほかの組織・匿名キーからは読めない・書けない");
+ok(!!(await as(U4, "update player_reinjuries set note = '書き換え' where player_id = 'p-b1'")).error
+   && !!(await as(U4, "insert into player_reinjuries (player_id, reinjured_on, restart_phase) values ('p-b1', '2026-10-21', 0)")).error, "[v36] 書き換えはできない・PHASE 0 からは再開できない");
+ok(!(await as(U4, "delete from player_reinjuries where player_id = 'p-b1'")).error
+   && (await db.query("select count(*)::int n from player_reinjuries where player_id = 'p-b1'")).rows[0].n === 0, "[v36] 間違えた記録は削除できる");
+await db.exec("update players set reinjury_date = null where id = 'p-b1'");
+
+// ===== v37：指導者が選手を復帰者リストへ移す =====
+ok(!(await run("supabase_migration_v37_returned_list.sql")), "[v37] 適用 1 回目");
+ok(!(await run("supabase_migration_v37_returned_list.sql")), "[v37] 適用 2 回目（冪等）");
+ok(!(await as(U4, "update players set moved_to_returned_at = now() where id = 'p-b1'")).error
+   && (await db.query("select moved_to_returned_at is not null v from players where id = 'p-b1'")).rows[0].v === true,
+   "[v37] 同じ組織の人は、復帰者リストへ移せる");
+ok(!(await as(U4, "update players set moved_to_returned_at = null where id = 'p-b1'")).error
+   && (await db.query("select moved_to_returned_at is null v from players where id = 'p-b1'")).rows[0].v === true,
+   "[v37] 現役選手に戻せる");
+await as(U1, "update players set moved_to_returned_at = now() where id = 'p-b1'");
+ok((await db.query("select moved_to_returned_at is null v from players where id = 'p-b1'")).rows[0].v === true,
+   "[v37] ほかの組織からは書き換えられない");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

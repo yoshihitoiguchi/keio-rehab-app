@@ -161,7 +161,7 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `org_login_failures` | 組織ログインの失敗記録（利用者ごと15分に10回、組織ごと15分に100回の制限。1日で消える）（v15） |
 | `resprint_migration_backup` | ③の直前のポリシー・権限・設定の退避と、③を戻した記録（v16。アプリからは読めない） |
 | `app_settings` | 組織ごとの設定（指導者パスワードなど） |
-| `players` | 選手。`pin`（4桁）、`bamic_grade`、`hamstring_muscle`、`hamstring_location` ほか |
+| `players` | 選手。`pin`（4桁）、`bamic_grade`、`hamstring_muscle`、`hamstring_location` ほか。`moved_to_returned_at` は指導者が復帰者リストへ移した日時（v37。null なら従来どおり、復帰の記録から15日目に自動で復帰者リスト） |
 | `protocols` | プロトコル本体。`phases` はJSON配列。**PHASE数は可変**（ハムストリングは10） |
 | `phase_menus` / `exercises` / `exercise_steps` | フェーズ別メニューと種目内ステップ |
 | `offsite_domains` / `offsite_items` / `player_offsite_selections` | オフサイトメニュー（A〜Kの11ドメイン）と選手ごとの選択 |
@@ -178,6 +178,7 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `exercise_logs` | 「今日やった種目」の記録（選手・種目・日付で1件）（v30） |
 | `exercise_videos` | 種目の動画の URL（種目名で1件。**全組織で共通**。読むのはログイン中の誰でも、書くのは `exercise_video_set()` だけ）（v33） |
 | `report_comments` | 日報の本音へのコメント・返信（日報1件ごと。`sender` が staff / player、指導者は `author_role` と `author_name` つき。書き換え不可・削除は可）（v35） |
+| `player_reinjuries` | 再受傷の記録（1回ごとに1行。再受傷日・記録時の PHASE・記録時の復帰日・再開した PHASE・メモ）。いちばん新しい再受傷日は `players.reinjury_date`。面談の目安（14日）はこの日から数え直す（`episodeStartDate`）（v36） |
 | `meeting_notes` | 面談メモ（面談の内容。指導者が書き、選手本人と指導者が読む。`held_on` が面談の日）（v32） |
 | `player_metric_history` / `player_exercise_progress` | 記録の推移 |
 
@@ -226,6 +227,19 @@ normalizePlayer / normalizeSlot
 v2〜v17 まであり、**v8 は破棄済み**（v8 でしか定義していなかった3カラムが抜けて
 PGRST204 エラーになった経緯がある。v12 で復旧済み）。
 
+### クラウドの Claude から本番DBに反映する（2026-10-25 から）
+
+GitHub Actions の **「本番DBに反映」**（`.github/workflows/db-apply.yml`）を使う。
+手動で起動したときだけ動き、**控えを取る → SQL を流す → 確認の SELECT** を順に行う。結果は実行ページの Summary に出る。
+
+- **作者が「反映して」と指示したときだけ起動する。** 指示なしに流さない。
+- 起動は main から。入力は `file`（例 `supabase_migration_v37_returned_list.sql`）・`branch`（ファイルを読むブランチ。
+  画面より先に DB を変えるときは PR のブランチを指定し、反映を確かめてから PR を合流する）・`check_sql`（任意の SELECT 1文）。
+- 控えの名前は空なら「vNN の前」。
+- 秘密キー `SUPABASE_ACCESS_TOKEN`（Supabase の Access Token）を作者がリポジトリの Secrets に登録している前提。
+- Supabase の Management API（`/v1/projects/{ref}/database/query`）で流すので、`supabase_migrations.schema_migrations` には記録されない。
+  適用状況は下の表に書く。
+
 ### 本番DBへの適用状況（2026-09-27 に読み取りのみで確認）
 
 | ファイル | 状態 | 根拠 |
@@ -239,6 +253,8 @@ PGRST204 エラーになった経緯がある。v12 で復旧済み）。
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
+| v37_returned_list | **未適用（ステージのみ）** | `players.moved_to_returned_at`（指導者が復帰者リストへ移した日時）。列の追加だけ。戻し方はファイルの冒頭 |
+| v36_reinjury | **適用済み（2026-10-25）** | `players.reinjury_date` と `player_reinjuries`（再受傷の記録）。列と表の追加だけ。公開中のアプリはそのまま動く。戻し方はファイルの冒頭 |
 | v35_report_comments | **適用済み（2026-10-07）** | `report_comments`（日報の本音へのコメント・返信。日報1件ごと）と通知のトリガー。表の追加だけ。戻し方はファイルの冒頭 |
 | v34_phase8_gate_rdl_note | **適用済み（2026-10-06）** | データだけ。PHASE 8 の Tantrums の条件を「50回×3set を違和感なく」の1項目に（15秒…の項目は外す）。ウエイト解禁は PHASE 3 の名称から外し、条件の Bilateral RDL の項目に併記。戻すときは控え「v34 の前」から |
 | v33_shared_videos_protocol_fix | **適用済み（2026-10-06）** | `exercise_videos`（種目名ごとの動画。全組織で共通）と `exercise_video_set()`（指導者パスワードをサーバーで確かめて登録）。PHASE 8 の Tantrums の条件を2つに（15秒…／50回×3set）、Mini Hurdle「狭め」→「身長幅」、PHASE 3 の名称に「両脚RDLができたらウエイト解禁」、よくある質問の2件を外す。戻すときは控え「v33 の前」から |
@@ -333,10 +349,10 @@ grep -c "ConsultationRequestCard" src/App.jsx   # 2（定義＋使用）なら�
 公開の確認は、本番の JS に番号が入っているかで行う（`curl` で `/assets/index-*.js` を取り、`v15.14` を探す）。
 
 ```js
-const APP_BUILD = "v15.22";
+const APP_BUILD = "v15.25";
 ```
 
-本番に出ているのは `v15.22`（2026-10-07 公開）。
+本番に出ているのは `v15.25`（2026-10-31 公開）。
 
 過去に「全く改善されてない」が3回続き、原因が
 **App.jsx をリポジトリ直下に置いていて `src/` に入っていなかった**ことだった。
@@ -615,6 +631,27 @@ v16 後も残る穴（優先順。2026-09-27 のレビューで確認したも�
 ---
 
 ## 変更履歴
+
+### 2026-10-31（v15.25：Claude Code）
+- 患部外トレーニングを選手ごとに個別に追加できる（作者の依頼）。指導者は共通リストから選ぶほか、リストにない種目を荷重・回数メモつきで「個別に追加」できる。
+  v38 `player_offsite_custom_items`（2026-10-31 本番に適用）。表がない DB では「個別に追加」を出さない。
+
+### 2026-10-25（v15.24：Claude Code）
+- 指導者が、最後の PHASE まで来た選手を選んで復帰者リストへ移せる（作者の依頼）。選手詳細の上部の「復帰者リストへ移す」（最後の PHASE の選手だけ）と、
+  移した選手の「現役選手に戻す」。v37 `players.moved_to_returned_at`。復帰の記録から15日目に自動で移る仕組みはそのまま。平均復帰日数の集計は `completed_at` のままなので変わらない。
+  再受傷を記録すると、この印も外す（v15.23 の再受傷の記録が外す）。復帰者リストでは「日報なし」を出さない。
+- 検証：SQL 278、画面 187。
+
+### 2026-10-25（v15.23：Claude Code）
+- **不具合の修正**：面談を予約して、その日が過ぎると、選手が別の日の面談を予約できなかった（`players.booked_slot_id` が指す枠を、日付に関係なく「予約済み」と出していた）。
+  「予約済み」として出すのはこれからの面談だけ（`upcomingMeeting`）。日が過ぎた空き枠も選択肢に出さない。
+- 再受傷の記録（`ReinjuryCard`・v36 `player_reinjuries`・`players.reinjury_date`）：指導者が選手詳細の「記録」タブで、再受傷日・再開する PHASE・メモを入れて記録する。
+  復帰後でも復帰の途中でも使える。カルテ（日報・チャット・治療など）はそのまま、`completed_at` を外して現役に戻し、指定の PHASE に戻す（PHASE の履歴にも行を足す）。
+  復帰者リストへ移した印（v37 の `moved_to_returned_at`）があれば外す。選手にはチャット「【再受傷の記録】…」で知らせる。
+- 面談の目安（14日）は再受傷日から数え直す（`episodeStartDate`）。再受傷の前の面談は数えない。案内は「再受傷から◯日」。
+  「2週間の面談」は、受傷から14日目の1回を再受傷日からもう一度動かす、という意味で実装した（2週間ごとの繰り返しではない）。
+- 平均完遂日数は、これまでどおり最初の受傷日から復帰日まで。
+- 検証：画面 181、SQL 273＋26、送信役 8。
 
 ### 2026-10-07（v15.22：Claude Code）
 - 日報へのコメントの書き手を、チャットと同じ「立場を選ぶ」だけに（作者の指示。名前の入力欄を削除）。表示は「医師 10/7 13:02」。
