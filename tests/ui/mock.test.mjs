@@ -180,7 +180,7 @@ function respond(st, url, method, body) {
     if (method === "PATCH" && json?.reinjury_date) st.reinjury = json.reinjury_date;
     if (method === "PATCH" && json && "moved_to_returned_at" in json) st.movedAt = json.moved_to_returned_at;
     if (method === "PATCH" && json && "is_demo" in json) st.isDemo = json.is_demo;
-    return [st.player()];
+    return [st.player(), ...(st.extraPlayers || [])];
   }
   if (method !== "GET") return [Array.isArray(json) ? json[0] : json || {}];
   return [];
@@ -885,6 +885,60 @@ try {
     await coachLogin(c2);
     ok(!(await text(c2)).includes("まだ返事していない日報"), "デモの選手の日報は出さない");
     await c2.close();
+  });
+
+  await step("今週のふり返り・選手一覧の検索と並び替え（v15.37）", async () => {
+    const ld = (off) => ((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`)(new Date(Date.now() + off * 86400000));
+    const st = makeState({ injuryDaysAgo: 20 });
+    st.reports = [
+      { id: 1, player_id: "p-1", date: ld(-10), vas: 6, mental: 3, fatigue: 5, sleep_quality: 6, created_at: iso(new Date(Date.now() - 10 * 86400000)) },
+      { id: 2, player_id: "p-1", date: ld(-8), vas: 4, mental: 3, fatigue: 3, sleep_quality: 8, created_at: iso(new Date(Date.now() - 8 * 86400000)) },
+      { id: 3, player_id: "p-1", date: ld(-2), vas: 3, mental: 3, fatigue: 2, sleep_quality: 7, created_at: iso(new Date(Date.now() - 2 * 86400000)) },
+      { id: 4, player_id: "p-1", date: ld(-1), vas: 2, mental: 3, fatigue: 4, sleep_quality: 8, created_at: iso(new Date(Date.now() - 1 * 86400000)) },
+    ];
+    st.logs = [{ exercise_id: 1, done_on: ld(-1) }, { exercise_id: 2, done_on: ld(-1) }, { exercise_id: 1, done_on: ld(-2) }, { exercise_id: 1, done_on: ld(-9) }];
+    const p = await newPage(st);
+    await playerLogin(p);
+    await sleep(500);
+    const card = await p.evaluate(() => document.querySelector('[data-testid="weekly-review"]')?.innerText || "");
+    const row = (label) => card.split("\n").find((l) => l.startsWith(label)) || "";
+    ok(card.includes("今週のふり返り") && card.includes("この7日") && card.includes("その前の7日"), "選手ホームに「今週のふり返り」が出る");
+    ok(/2日\s+2日/.test(row("日報を送った日")) && /3回\s+1回/.test(row("メニューの「やった」")), "日報の日数と「やった」の回数を2週で並べる " + JSON.stringify(card));
+    ok(/2\.5\s+5/.test(row("痛みの平均")) && /3\s+4/.test(row("疲労度の平均")) && /7\.5\s+7/.test(row("睡眠の質の平均")), "痛み・疲労度・睡眠の質の平均を並べる");
+    ok(!/良く|悪く|改善|悪化/.test(card), "良い・悪いは書かない");
+    if (process.env.SHOT_DIR) await p.screenshot({ path: process.env.SHOT_DIR + "/weekly-review.png", fullPage: true });
+    ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
+    await p.close();
+
+    const st0 = makeState({ injuryDaysAgo: 3 });
+    const p0 = await newPage(st0);
+    await playerLogin(p0); await sleep(400);
+    ok(!(await p0.$('[data-testid="weekly-review"]')), "記録がまだない選手には出さない");
+    await p0.close();
+
+    // 指導者：名前で探す・並び替え
+    const st2 = makeState({ injuryDaysAgo: 20, phase: 5 });
+    st2.reports = [{ id: 1, player_id: "p-1", date: ld(0), vas: 2, mental: 3, fatigue: 3, sleep_quality: 7, created_at: iso(now) }];
+    const base = st2.player();
+    const other = (id, name, phase, vas, today) => ({ ...base, id, name, current_phase: phase, booked_slot_id: null, messages: [], report_comments: [],
+      reports: vas === null ? [] : [{ id: Number(id.slice(2)) * 10, player_id: id, date: today ? ld(0) : ld(-1), vas, mental: 3, fatigue: 3, sleep_quality: 7, created_at: iso(now) }] });
+    st2.extraPlayers = [other("p-2", "佐藤 花子", 2, 6, true), other("p-3", "鈴木 一郎", 8, 4, false)];
+    const c = await newPage(st2);
+    await coachLogin(c); await sleep(500);
+    const names = () => c.$$eval("ul li button p.text-sm.font-semibold", (ns) => ns.map((n) => n.innerText).filter((n) => ["山田 太郎", "佐藤 花子", "鈴木 一郎"].includes(n)));
+    ok((await names()).join() === "佐藤 花子,山田 太郎,鈴木 一郎", "最初は PHASE 順 " + (await names()).join());
+    await c.select('select[aria-label="並び順"]', "pain"); await sleep(200);
+    ok((await names()).join() === "佐藤 花子,鈴木 一郎,山田 太郎", "痛みが高い順に並べ替えられる " + (await names()).join());
+    await c.select('select[aria-label="並び順"]', "noReport"); await sleep(200);
+    ok((await names())[0] === "鈴木 一郎", "日報なしの選手を上に出せる " + (await names()).join());
+    ok((await c.evaluate(() => localStorage.getItem("resprint.playerSort"))) === '"noReport"', "並び順はこの端末に覚えておく");
+    await c.type('input[aria-label="名前で探す"]', "佐藤"); await sleep(200);
+    ok((await names()).join() === "佐藤 花子", "名前で探せる");
+    await c.click('input[aria-label="名前で探す"]', { clickCount: 3 }); await c.type('input[aria-label="名前で探す"]', "高橋"); await sleep(200);
+    ok((await text(c)).includes("「高橋」に当てはまる選手はいません"), "見つからないときは案内が出る");
+    if (process.env.SHOT_DIR) { await c.click('input[aria-label="名前で探す"]', { clickCount: 3 }); await c.keyboard.press("Backspace"); await sleep(200); await c.screenshot({ path: process.env.SHOT_DIR + "/player-sort.png" }); }
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+    await c.close();
   });
 
   await step("痛みが急に上がった日報の目印（v15.35）", async () => {

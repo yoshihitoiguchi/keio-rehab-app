@@ -278,7 +278,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.36";
+const APP_BUILD = "v15.37";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -4479,6 +4479,43 @@ function ProtocolCard({ protocol, onDelete, onSaveVideo, onSaveScheme, onSaveCon
 }
 
 // ---------- 選手管理（2ペイン） ----------
+// v15.37：指導者の選手一覧の並び順。どれも同じ順位のときは PHASE 順→名前順
+const PLAYER_SORTS = [
+  { key: "phase", label: "PHASE順" },
+  { key: "pain", label: "痛みが高い順" },
+  { key: "noReport", label: "日報なしを上に" },
+  { key: "attention", label: "新着・未対応を上に" },
+  { key: "name", label: "名前順" },
+];
+function playerNeedsAttention(p) {
+  const unread = (p.messages || []).filter((m) => m.sender === "player" && !m.isRead).length;
+  return Boolean(p.sos || (unread > 0 && p.supportStatus !== "in_progress" && p.supportStatus !== "resolved"));
+}
+function sortPlayersBy(players, key) {
+  const byName = (a, b) => (a.name || "").localeCompare(b.name || "", "ja");
+  const base = (a, b) => a.currentPhase - b.currentPhase || byName(a, b);
+  const vasOf = (p) => {
+    const r = latestReport(p);
+    return r && r.vas !== null && r.vas !== undefined ? Number(r.vas) : -1;
+  };
+  const cmp = {
+    phase: base,
+    name: byName,
+    pain: (a, b) => vasOf(b) - vasOf(a) || base(a, b),
+    noReport: (a, b) => {
+      const na = !a.completedAt && !reportedToday(a) ? 1 : 0;
+      const nb = !b.completedAt && !reportedToday(b) ? 1 : 0;
+      return nb - na || base(a, b);
+    },
+    attention: (a, b) => {
+      const sa = (playerNeedsAttention(a) ? 2 : 0) + (pendingConsultations(a).length ? 1 : 0);
+      const sb = (playerNeedsAttention(b) ? 2 : 0) + (pendingConsultations(b).length ? 1 : 0);
+      return sb - sa || base(a, b);
+    },
+  }[key] || base;
+  return [...players].sort(cmp);
+}
+
 function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayers, slots, setSlots, phaseMenus }) {
   const [selectedId, setSelectedId] = useState(null);
   const [focus, setFocus] = useState(null); // 「まだ返事していない日報」から開いた日報
@@ -4496,7 +4533,16 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
     }
   }, [visiblePlayers, selectedId]);
 
-  const sortedPlayers = [...visiblePlayers].sort((a, b) => a.currentPhase - b.currentPhase);
+  // v15.37：名前で探す・並び替える（並び順はこの端末に覚えておく）
+  const [query, setQuery] = useState("");
+  const [sortKey, setSortKeyState] = useState(() => readDraft("resprint.playerSort") || "phase");
+  const setSortKey = (k) => {
+    setSortKeyState(k);
+    writeDraft("resprint.playerSort", k);
+  };
+  const q = query.trim().toLowerCase();
+  const filteredPlayers = q ? visiblePlayers.filter((p) => (p.name || "").toLowerCase().includes(q)) : visiblePlayers;
+  const sortedPlayers = sortPlayersBy(filteredPlayers, sortKey);
   const selectedPlayer = coachPlayers.find((p) => p.id === selectedId) || null;
   const protocolOf = (p) => masterProtocols.find((mp) => mp.id === p.protocolId);
 
@@ -4772,6 +4818,33 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
             )}
           </p>
         </div>
+        {visiblePlayers.length > 0 && (
+          <div className="px-4 py-2 border-b border-slate-200 flex gap-2">
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="名前で探す"
+              aria-label="名前で探す"
+              className="flex-1 min-w-0 border border-slate-300 rounded-lg px-3 py-1.5 text-sm"
+            />
+            <select
+              value={sortKey}
+              onChange={(e) => setSortKey(e.target.value)}
+              aria-label="並び順"
+              className="shrink-0 border border-slate-300 rounded-lg px-2 py-1.5 text-sm bg-white"
+            >
+              {PLAYER_SORTS.map((o) => (
+                <option key={o.key} value={o.key}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {q && sortedPlayers.length === 0 && (
+          <p className="px-4 py-3 text-sm text-slate-400">「{query.trim()}」に当てはまる選手はいません。</p>
+        )}
         <ul className="divide-y divide-slate-100 max-h-[70vh] overflow-y-auto">
           {sortedPlayers.map((p) => {
             const alert = isAlert(p);
@@ -5610,6 +5683,97 @@ function TodayCard({ player, onReport, onMenu }) {
       <button onClick={onMenu} className="mt-3 w-full py-2.5 rounded-xl border border-slate-600 text-sm text-slate-200 flex items-center justify-center gap-1">
         今日のメニュー <ArrowRight size={14} />
       </button>
+    </div>
+  );
+}
+
+// v15.37：選手ホームの「今週のふり返り」。直近7日とその前の7日の数字を並べるだけ（良い・悪いは書かない）。
+//   日報を送った日数・メニューで「やった」を押した回数・痛み/疲労度/睡眠の質の平均。
+function weekWindow(offsetDays) {
+  // offsetDays=0 → 今日を含む直近7日、7 → その前の7日
+  const end = new Date();
+  end.setDate(end.getDate() - offsetDays);
+  const start = new Date(end);
+  start.setDate(start.getDate() - 6);
+  return { from: localDateStr(start), to: localDateStr(end) };
+}
+function weekStats(reports, logs, { from, to }) {
+  const inRange = (d) => d && d >= from && d <= to;
+  const rs = (reports || []).filter((r) => inRange(r.date));
+  const avg = (key) => {
+    const vals = rs.map((r) => r[key]).filter((v) => v !== null && v !== undefined && v !== "" && !Number.isNaN(Number(v)));
+    if (!vals.length) return null;
+    return Math.round((vals.reduce((a, b) => a + Number(b), 0) / vals.length) * 10) / 10;
+  };
+  return {
+    reportDays: new Set(rs.map((r) => r.date)).size,
+    doneCount: (logs || []).filter((l) => inRange(l.done_on)).length,
+    vas: avg("vas"),
+    fatigue: avg("fatigue"),
+    sleepQuality: avg("sleepQuality"),
+  };
+}
+function WeeklyReview({ player }) {
+  const [logs, setLogs] = useState([]);
+  useEffect(() => {
+    let active = true;
+    sbSelect(
+      "exercise_logs",
+      `?player_id=eq.${encodeURIComponent(player.id)}&done_on=gte.${weekWindow(7).from}&select=exercise_id,done_on`
+    )
+      .then((l) => active && setLogs(l || []))
+      .catch(() => {}); // 読めなくても日報の数字は出す
+    return () => {
+      active = false;
+    };
+  }, [player.id]);
+
+  const thisW = weekWindow(0);
+  const lastW = weekWindow(7);
+  const cur = weekStats(player.reports, logs, thisW);
+  const prev = weekStats(player.reports, logs, lastW);
+  if (!cur.reportDays && !prev.reportDays && !cur.doneCount && !prev.doneCount) return null;
+
+  const md = (s) => `${Number(s.slice(5, 7))}/${Number(s.slice(8, 10))}`;
+  const fmt = (v, unit = "") => (v === null || v === undefined ? "—" : `${v}${unit}`);
+  const rows = [
+    { label: "日報を送った日", c: fmt(cur.reportDays, "日"), p: fmt(prev.reportDays, "日") },
+    { label: "メニューの「やった」", c: fmt(cur.doneCount, "回"), p: fmt(prev.doneCount, "回") },
+    { label: "痛みの平均", c: fmt(cur.vas), p: fmt(prev.vas) },
+    { label: "疲労度の平均", c: fmt(cur.fatigue), p: fmt(prev.fatigue) },
+    { label: "睡眠の質の平均", c: fmt(cur.sleepQuality), p: fmt(prev.sleepQuality) },
+  ];
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-4" data-testid="weekly-review">
+      <p className="text-sm font-bold text-slate-800">今週のふり返り</p>
+      <p className="text-[11px] text-slate-400 mt-0.5">直近7日と、その前の7日の記録を並べています。</p>
+      <table className="w-full mt-3 text-sm">
+        <thead>
+          <tr className="text-[11px] text-slate-400">
+            <th className="text-left font-normal pb-1"></th>
+            <th className="text-right font-normal pb-1">
+              この7日
+              <br />
+              {md(thisW.from)}〜{md(thisW.to)}
+            </th>
+            <th className="text-right font-normal pb-1">
+              その前の7日
+              <br />
+              {md(lastW.from)}〜{md(lastW.to)}
+            </th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {rows.map((r) => (
+            <tr key={r.label}>
+              <td className="py-1.5 text-slate-600">{r.label}</td>
+              <td className="py-1.5 text-right font-bold text-slate-800">{r.c}</td>
+              <td className="py-1.5 text-right text-slate-500">{r.p}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="text-[11px] text-slate-400 mt-2">痛み・疲労度・睡眠の質は 0〜10 です。</p>
     </div>
   );
 }
@@ -7876,6 +8040,8 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
       {tab === "home" && (
         <>
           <TodayCard player={player} onReport={() => changeTab("report")} onMenu={() => changeTab("menu")} />
+
+          <WeeklyReview player={player} />
 
           {bookedNotice && (
             <div className="bg-green-50 border border-green-200 rounded-2xl p-4 flex items-start gap-2">
