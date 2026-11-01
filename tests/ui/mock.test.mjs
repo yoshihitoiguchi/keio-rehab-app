@@ -483,6 +483,16 @@ try {
     await clickText(p, "今日の日報を送る"); await sleep(500);
     t = await text(p);
     ok(t.includes("今日のコンディション報告") && t.includes("これまでの記録") && (await p.$$("svg polyline, svg path")).length > 0, "日報タブに移動し、これまでの記録のグラフがある");
+    {
+      const svgText = await p.$eval('svg[aria-label="コンディションの推移"]', (s) => s.textContent);
+      ok(["0", "5", "10"].every((v) => svgText.includes(v)) && svgText.includes(`${Number(day(-3).slice(5, 7))}/${Number(day(-3).slice(8, 10))}`), "グラフに目盛り（0・5・10）と日付が出る");
+      const lines = async () => p.$$eval('svg[aria-label="コンディションの推移"] path', (ps) => ps.length);
+      ok((await lines()) === 1, "最初は痛みの線だけを出す");
+      await clickText(p, "疲労度", "button"); await sleep(200);
+      ok((await lines()) === 2, "ボタンで疲労度の線を足せる");
+      if (process.env.SHOT_DIR) await p.screenshot({ path: process.env.SHOT_DIR + "/trend-player.png", fullPage: true });
+      await clickText(p, "疲労度", "button"); await sleep(200);
+    }
     await clickText(p, "指導者に送信する"); await sleep(1200);
     await clickText(p, "ホーム", "nav button"); await sleep(500);
     t = await text(p);
