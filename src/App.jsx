@@ -278,7 +278,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.35";
+const APP_BUILD = "v15.36";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -5355,50 +5355,117 @@ function PlayerDetailPanel({
   );
 }
 
-// ---------- コンディション推移の簡易折れ線グラフ（外部ライブラリ不使用） ----------
+// ---------- コンディション推移の折れ線グラフ（外部ライブラリ不使用） ----------
+// v15.36：スマホで読みやすいように、目盛り（0・5・10）と日付を入れ、線ごとに表示を切り替えられるようにした。
+//   最初は痛みだけを出す（3本重なると読みにくいため）。いちばん新しい値は線の右端に数字で出す。
+const TREND_SERIES = [
+  { key: "vas", color: "#ef4444", label: "痛み" },
+  { key: "fatigue", color: "#f97316", label: "疲労度" },
+  { key: "sleepQuality", color: "#3b82f6", label: "睡眠の質" },
+];
+
+function shortDateJa(d) {
+  if (!d) return "";
+  const m = String(d).match(/^\d{4}-(\d{2})-(\d{2})/);
+  return m ? `${Number(m[1])}/${Number(m[2])}` : String(d);
+}
+
 function SimpleTrendChart({ reports, limit = 14 }) {
-  const width = 320;
-  const height = 110;
-  const padding = 8;
+  const [shown, setShown] = useState({ vas: true, fatigue: false, sleepQuality: false });
   const recent = limit ? reports.slice(-limit) : reports;
   if (recent.length < 2) return <p className="text-xs text-slate-400">記録が2件になるとグラフが出ます。</p>;
 
-  const xStep = (width - padding * 2) / (recent.length - 1);
-  const toX = (i) => padding + i * xStep;
-  const toY = (v) => height - padding - (v / 10) * (height - padding * 2);
+  const width = 340;
+  const height = 190;
+  const left = 26;
+  const right = 22;
+  const top = 12;
+  const bottom = 26;
+  const plotW = width - left - right;
+  const plotH = height - top - bottom;
+  const toX = (i) => left + (recent.length === 1 ? plotW / 2 : (i * plotW) / (recent.length - 1));
+  const toY = (v) => top + plotH - (Math.max(0, Math.min(10, v)) / 10) * plotH;
+  const has = (v) => v !== null && v !== undefined && v !== "" && !Number.isNaN(Number(v));
 
-  const series = [
-    { key: "vas", color: "#ef4444", label: "痛み(VAS)" },
-    { key: "fatigue", color: "#f97316", label: "疲労度" },
-    { key: "sleepQuality", color: "#3b82f6", label: "睡眠の質" },
-  ];
-
-  const buildPath = (key) => {
-    const points = recent
-      .map((r, i) => ({ x: toX(i), y: r[key] === null || r[key] === undefined ? null : toY(r[key]) }))
-      .filter((p) => p.y !== null);
-    if (points.length === 0) return null;
-    return points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
-  };
+  // 日付のラベルは多くても5つ（重ならないように）
+  const labelCount = Math.min(5, recent.length);
+  const labelIdx = new Set(
+    Array.from({ length: labelCount }, (_, k) => Math.round((k * (recent.length - 1)) / Math.max(1, labelCount - 1)))
+  );
+  const showDots = recent.length <= 31;
+  const active = TREND_SERIES.filter((s) => shown[s.key]);
 
   return (
     <div>
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-28">
-        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke="#e2e8f0" strokeWidth="1" />
-        <line x1={padding} y1={padding} x2={width - padding} y2={padding} stroke="#e2e8f0" strokeWidth="1" strokeDasharray="2,2" />
-        {series.map((s) => {
-          const d = buildPath(s.key);
-          return d ? <path key={s.key} d={d} fill="none" stroke={s.color} strokeWidth="2" /> : null;
+      <div className="flex gap-2 mb-2 flex-wrap">
+        {TREND_SERIES.map((s) => {
+          const on = shown[s.key];
+          return (
+            <button
+              key={s.key}
+              type="button"
+              onClick={() => setShown((prev) => ({ ...prev, [s.key]: !prev[s.key] }))}
+              aria-pressed={on}
+              className={`flex items-center gap-1.5 text-xs font-bold rounded-full px-3 py-1.5 border ${
+                on ? "bg-white border-slate-300 text-slate-700" : "bg-slate-50 border-slate-200 text-slate-400"
+              }`}
+            >
+              <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: on ? s.color : "#cbd5e1" }} />
+              {s.label}
+            </button>
+          );
+        })}
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto" role="img" aria-label="コンディションの推移">
+        {[0, 5, 10].map((v) => (
+          <g key={v}>
+            <line
+              x1={left}
+              y1={toY(v)}
+              x2={width - right}
+              y2={toY(v)}
+              stroke={v === 0 ? "#cbd5e1" : "#e2e8f0"}
+              strokeWidth="1"
+              strokeDasharray={v === 0 ? undefined : "3,3"}
+            />
+            <text x={left - 6} y={toY(v) + 4} textAnchor="end" fontSize="11" fill="#64748b">
+              {v}
+            </text>
+          </g>
+        ))}
+        {recent.map((r, i) =>
+          labelIdx.has(i) ? (
+            <text
+              key={`d${i}`}
+              x={toX(i)}
+              y={height - 8}
+              textAnchor={i === 0 ? "start" : i === recent.length - 1 ? "end" : "middle"}
+              fontSize="11"
+              fill="#64748b"
+            >
+              {shortDateJa(r.date)}
+            </text>
+          ) : null
+        )}
+        {active.map((s) => {
+          const pts = recent
+            .map((r, i) => (has(r[s.key]) ? { x: toX(i), y: toY(Number(r[s.key])), v: Number(r[s.key]) } : null))
+            .filter(Boolean);
+          if (pts.length === 0) return null;
+          const d = pts.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
+          const last = pts[pts.length - 1];
+          return (
+            <g key={s.key}>
+              <path d={d} fill="none" stroke={s.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+              {showDots && pts.map((p, i) => <circle key={i} cx={p.x} cy={p.y} r="3" fill="#fff" stroke={s.color} strokeWidth="2" />)}
+              <text x={last.x + 5} y={last.y + 4} fontSize="12" fontWeight="bold" fill={s.color}>
+                {last.v}
+              </text>
+            </g>
+          );
         })}
       </svg>
-      <div className="flex gap-3 mt-1 flex-wrap">
-        {series.map((s) => (
-          <span key={s.key} className="flex items-center gap-1 text-[10px] text-slate-500">
-            <span className="w-2 h-2 rounded-full inline-block" style={{ background: s.color }} />
-            {s.label}
-          </span>
-        ))}
-      </div>
+      {active.length === 0 && <p className="text-xs text-slate-400 mt-1">上のボタンで表示する項目を選んでください。</p>}
     </div>
   );
 }
