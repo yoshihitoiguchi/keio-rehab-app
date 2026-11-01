@@ -278,7 +278,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.37";
+const APP_BUILD = "v15.38";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -4787,6 +4787,19 @@ function PlayerManagement({ orgId, masterProtocols, coachPlayers, setCoachPlayer
 
   return (
     <div className="space-y-4 print:block">
+    <TodayMeetings
+      slots={slots}
+      players={coachPlayers}
+      onOpen={(playerId) => {
+        const target = coachPlayers.find((x) => x.id === playerId);
+        setListView(target && isGraduatedOut(target) ? "graduated" : "active");
+        setSelectedId(playerId);
+        setFocus(null);
+        if (window.matchMedia("(max-width: 1023px)").matches) {
+          setTimeout(() => detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+        }
+      }}
+    />
     <UnrepliedReports players={coachPlayers} onOpen={openUnreplied} />
     <div className="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6 print:block">
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden h-fit print:hidden">
@@ -7791,19 +7804,27 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
     const d = readDraft(reportDraftKey);
     return d && d.date === todayStr() ? d : {};
   });
-  const [vas, setVas] = useState(draft0.vas ?? 3);
-  const [fatigue, setFatigue] = useState(draft0.fatigue ?? 3);
-  const [sleepQuality, setSleepQuality] = useState(draft0.sleepQuality ?? 7);
-  const [mental, setMental] = useState(draft0.mental ?? 3);
+  // v15.38：書きかけがなければ、スライダーは前回送った日報の値から始める（毎日の入力を少なくする）
+  const [prev0] = useState(() => {
+    const r = latestReport(player);
+    if (!r || draft0.date) return null;
+    const num = (v) => (v === null || v === undefined || v === "" || Number.isNaN(Number(v)) ? undefined : Number(v));
+    return { date: r.date, vas: num(r.vas), fatigue: num(r.fatigue), sleepQuality: num(r.sleepQuality), mental: num(r.mental), fearLevel: num(r.fear), rpe: num(r.rpe) };
+  });
+  const start = { ...(prev0 || {}), ...draft0 };
+  const [vas, setVas] = useState(start.vas ?? 3);
+  const [fatigue, setFatigue] = useState(start.fatigue ?? 3);
+  const [sleepQuality, setSleepQuality] = useState(start.sleepQuality ?? 7);
+  const [mental, setMental] = useState(start.mental ?? 3);
   const [honne, setHonne] = useState(draft0.honne ?? "");
   const [sos, setSos] = useState(draft0.sos ?? false);
   // 本人の申告（スタッフがいない選手でも基準を出せるように）
   const [selfCompensation, setSelfCompensation] = useState(draft0.selfCompensation ?? false);
   const [selfSevereSymptom, setSelfSevereSymptom] = useState(draft0.selfSevereSymptom ?? false);
   // PHASEで出し分ける項目
-  const [fearLevel, setFearLevel] = useState(draft0.fearLevel ?? 0);
+  const [fearLevel, setFearLevel] = useState(start.fearLevel ?? 0);
   const [slippingContact, setSlippingContact] = useState(draft0.slippingContact ?? false);
-  const [rpe, setRpe] = useState(draft0.rpe ?? 70);
+  const [rpe, setRpe] = useState(start.rpe ?? 70);
   const draftTouched = React.useRef(false);
   useEffect(() => {
     if (!draftTouched.current) {
@@ -8234,6 +8255,11 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
         <>
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
             <p className="text-sm font-bold text-slate-700 mb-3">今日のコンディション報告</p>
+            {prev0 && prev0.date && (
+              <p className="text-[11px] text-slate-500 -mt-2 mb-3" data-testid="report-prefill-note">
+                前回（{Number(prev0.date.slice(5, 7))}/{Number(prev0.date.slice(8, 10))}）の値から始めています。今日の状態に合わせて動かしてください。
+              </p>
+            )}
 
             <label className="text-xs text-slate-500 flex justify-between">
               <span>痛みの強さ（VAS）</span>
@@ -9768,6 +9794,59 @@ function formatReportDate(date) {
   const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
   return `${d.getMonth() + 1}月${d.getDate()}日（${WEEKDAYS[d.getDay()]}）`;
 }
+// v15.38：指導者の選手タブの一番上に、今日・明日の面談を出す（日程調整タブを開かなくても分かるように）
+//   今日の面談は、始まって1時間たつまで出す。押すとその選手の詳細を開く
+function TodayMeetings({ slots, players, onOpen }) {
+  const now = new Date();
+  const today = localDateStr(now);
+  const t = new Date(now);
+  t.setDate(t.getDate() + 1);
+  const tomorrow = localDateStr(t);
+  const list = (slots || [])
+    .filter((s) => s.bookedBy && s.datetime)
+    .filter((s) => {
+      const day = s.datetime.slice(0, 10);
+      if (day === tomorrow) return true;
+      if (day !== today) return false;
+      return parseDatetime(s.datetime).getTime() > now.getTime() - 3600000;
+    })
+    .map((s) => ({ slot: s, player: players.find((p) => p.id === s.bookedBy) || null }))
+    .filter((x) => x.player)
+    .sort((a, b) => a.slot.datetime.localeCompare(b.slot.datetime));
+  if (list.length === 0) return null;
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-4 print:hidden" data-testid="today-meetings">
+      <p className="text-sm font-bold text-slate-700 flex items-center gap-1.5 mb-2">
+        <CalendarRange size={16} className="text-blue-600" /> 今日・明日の面談
+        <span className="bg-blue-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">{list.length}</span>
+      </p>
+      <ul className="divide-y divide-slate-100">
+        {list.map(({ slot, player }) => (
+          <li key={slot.id} className="flex items-center justify-between gap-2 py-2.5">
+            <button onClick={() => onOpen(player.id)} className="min-w-0 flex-1 text-left hover:bg-slate-50 flex items-center gap-2">
+              <span
+                className={`shrink-0 text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                  slot.datetime.slice(0, 10) === today ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600"
+                }`}
+              >
+                {slot.datetime.slice(0, 10) === today ? "今日" : "明日"} {slot.datetime.slice(11, 16)}
+              </span>
+              <span className="text-sm font-semibold text-slate-800 truncate">{player.name}</span>
+            </button>
+            {slot.zoomUrl ? (
+              <a href={slot.zoomUrl} target="_blank" rel="noreferrer" className="shrink-0 text-xs font-bold text-blue-600 underline">
+                URLを開く
+              </a>
+            ) : (
+              <span className="shrink-0 text-[11px] text-slate-400">URL未登録</span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function UnrepliedReports({ players, onOpen }) {
   const nowMin = Math.floor(Date.now() / 60000); // 1分ごとに対象を見直す
   const candidates = useMemo(

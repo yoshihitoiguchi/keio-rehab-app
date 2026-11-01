@@ -941,6 +941,56 @@ try {
     await c.close();
   });
 
+  await step("日報を前回の値から始める・今日明日の面談（v15.38）", async () => {
+    const ldt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const ld = (off) => ldt(new Date(Date.now() + off * 86400000));
+    const st = makeState({ injuryDaysAgo: 20 });
+    st.reports = [
+      { id: 1, player_id: "p-1", date: ld(-2), vas: 1, mental: 3, fatigue: 2, sleep_quality: 6, created_at: iso(new Date(Date.now() - 2 * 86400000)) },
+      { id: 2, player_id: "p-1", date: ld(-1), vas: 5, mental: 4, fatigue: 6, sleep_quality: 8, created_at: iso(new Date(Date.now() - 86400000)) },
+    ];
+    const p = await newPage(st);
+    await playerLogin(p);
+    await clickText(p, "日報", "nav button"); await sleep(500);
+    const vals = async () => p.$$eval('input[type="range"]', (rs) => rs.map((r) => r.value));
+    const v = await vals();
+    const note = await p.evaluate(() => document.querySelector('[data-testid="report-prefill-note"]')?.innerText || "");
+    ok(v[0] === "5" && v.includes("6") && v.includes("8"), "スライダーは前回の日報の値（痛み5・疲労度6・睡眠8）から始まる " + v.join(","));
+    ok(note.includes(`前回（${Number(ld(-1).slice(5, 7))}/${Number(ld(-1).slice(8, 10))}）の値から始めています`), "前回の値から始めていることが書いてある");
+    ok(p.errs.length === 0, "例外なし " + p.errs.join("|"));
+    await p.close();
+
+    const st0 = makeState({ injuryDaysAgo: 3 });
+    const p0 = await newPage(st0);
+    await playerLogin(p0);
+    await clickText(p0, "日報", "nav button"); await sleep(500);
+    ok((await p0.$$eval('input[type="range"]', (rs) => rs[0]?.value)) === "3" && !(await p0.$('[data-testid="report-prefill-note"]')), "初めての日報はこれまでどおり痛み3から（案内なし）");
+    await p0.close();
+
+    // 指導者：今日・明日の面談
+    const st2 = makeState({ injuryDaysAgo: 20 });
+    const soon = new Date(Date.now() + 5 * 60000);
+    const hm = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    st2.slots = [
+      { id: "slot-today", org_id: "default", datetime: `${ldt(soon)} ${hm(soon)}`, booked_by: "p-1", matched_roles: ["coach", "doctor"], zoom_url: "https://zoom.example/abc" },
+      { id: "slot-later", org_id: "default", datetime: `${ld(2)} 18:00`, booked_by: "p-1", matched_roles: ["coach", "doctor"], zoom_url: null },
+    ];
+    const c = await newPage(st2);
+    await coachLogin(c); await sleep(500);
+    let card = await c.evaluate(() => document.querySelector('[data-testid="today-meetings"]')?.innerText || "");
+    ok(card.includes("今日・明日の面談") && card.includes("山田 太郎") && card.includes(hm(soon)) && card.includes("URLを開く"), "選手タブの上に今日の面談と URL が出る " + JSON.stringify(card));
+    ok(!card.includes("18:00") || ldt(soon) === ld(2), "あさって以降の面談は出さない");
+    if (process.env.SHOT_DIR) await c.screenshot({ path: process.env.SHOT_DIR + "/today-meetings.png" });
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+    await c.close();
+    const st3 = makeState({ injuryDaysAgo: 20 });
+    st3.slots = [{ id: "slot-x", org_id: "default", datetime: `${ld(5)} 18:00`, booked_by: "p-1", matched_roles: ["coach"], zoom_url: null }];
+    const c3 = await newPage(st3);
+    await coachLogin(c3); await sleep(400);
+    ok(!(await c3.$('[data-testid="today-meetings"]')), "今日・明日の面談がなければ出さない");
+    await c3.close();
+  });
+
   await step("痛みが急に上がった日報の目印（v15.35）", async () => {
     const ld = (off) => ((d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`)(new Date(Date.now() + off * 86400000));
     const rep = (id, hoursAgo, vas, honne = "") => { const d = new Date(Date.now() - hoursAgo * 3600000); return { id, player_id: "p-1", date: ld(-hoursAgo / 24), vas, mental: 3, fatigue: 3, sleep_quality: 7, honne, created_at: iso(d) }; };
