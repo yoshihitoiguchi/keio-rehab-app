@@ -278,7 +278,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.38";
+const APP_BUILD = "v15.39";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -2899,6 +2899,120 @@ function uploadedMediaKind(url) {
   return /\.(mp4|mov|webm|m4v|qt)(\?|$)/i.test(url) ? "video" : "image";
 }
 
+// v15.39：よく使う返事（指導者用）。組織ごとに app_settings の key='quick_replies' に JSON で保存し、
+//   チャットと日報のコメントの入力欄の上に出す。押すと入力欄に入る（そのまま送られはしない）
+const QUICK_REPLIES_KEY = "quick_replies";
+const QUICK_REPLIES_MAX = 20;
+const quickReplyStore = { orgId: null, list: null, loading: null, subs: new Set() };
+function loadQuickReplies(orgId) {
+  if (quickReplyStore.orgId === orgId && (quickReplyStore.list || quickReplyStore.loading)) {
+    return quickReplyStore.loading || Promise.resolve(quickReplyStore.list);
+  }
+  quickReplyStore.orgId = orgId;
+  quickReplyStore.list = null;
+  quickReplyStore.loading = sbSelect(
+    "app_settings",
+    `?org_id=eq.${encodeURIComponent(orgId)}&key=eq.${QUICK_REPLIES_KEY}&select=value`
+  )
+    .then((rows) => {
+      let list = [];
+      try {
+        const v = JSON.parse(rows?.[0]?.value || "[]");
+        if (Array.isArray(v)) list = v.filter((x) => typeof x === "string" && x.trim());
+      } catch {
+        list = [];
+      }
+      quickReplyStore.list = list;
+      return list;
+    })
+    .catch(() => {
+      quickReplyStore.list = [];
+      return [];
+    })
+    .finally(() => {
+      quickReplyStore.loading = null;
+    });
+  return quickReplyStore.loading;
+}
+async function saveQuickReplies(orgId, list) {
+  await sbUpsert("app_settings", { org_id: orgId, key: QUICK_REPLIES_KEY, value: JSON.stringify(list) }, "key,org_id");
+  quickReplyStore.orgId = orgId;
+  quickReplyStore.list = list;
+  quickReplyStore.subs.forEach((fn) => fn(list));
+}
+function QuickReplies({ orgId, onPick }) {
+  const [list, setList] = useState(() => (quickReplyStore.orgId === orgId ? quickReplyStore.list : null));
+  const [editing, setEditing] = useState(false);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    if (!orgId) return undefined;
+    let active = true;
+    loadQuickReplies(orgId).then((l) => active && setList(l));
+    const sub = (l) => active && setList(l);
+    quickReplyStore.subs.add(sub);
+    return () => {
+      active = false;
+      quickReplyStore.subs.delete(sub);
+    };
+  }, [orgId]);
+  if (!orgId || !list) return null;
+
+  const add = async () => {
+    const t = await askText("よく使う返事を登録", { multiline: true, placeholder: "例：確認しました。無理せず続けましょう。", okLabel: "登録する" });
+    const v = (t || "").trim();
+    if (!v) return;
+    setError(null);
+    try {
+      await saveQuickReplies(orgId, [...list.filter((x) => x !== v), v].slice(-QUICK_REPLIES_MAX));
+    } catch (err) {
+      setError(errText(err));
+    }
+  };
+  const remove = async (v) => {
+    setError(null);
+    try {
+      await saveQuickReplies(orgId, list.filter((x) => x !== v));
+    } catch (err) {
+      setError(errText(err));
+    }
+  };
+
+  return (
+    <div className="mb-2" data-testid="quick-replies">
+      <div className="flex gap-1.5 overflow-x-auto pb-1">
+        {list.map((v) => (
+          <span key={v} className="shrink-0 flex items-center rounded-full border border-blue-200 bg-blue-50 text-xs text-blue-800">
+            <button
+              type="button"
+              onClick={() => (editing ? null : onPick(v))}
+              className="px-3 py-1.5 max-w-[14rem] truncate text-left"
+              title={v}
+            >
+              {v}
+            </button>
+            {editing && (
+              <button type="button" onClick={() => remove(v)} className="pr-2 pl-0.5 py-1.5 text-blue-400 hover:text-red-500" aria-label={`「${v}」を消す`}>
+                <X size={12} />
+              </button>
+            )}
+          </span>
+        ))}
+        {(editing || list.length === 0) && list.length < QUICK_REPLIES_MAX && (
+          <button type="button" onClick={add} className="shrink-0 px-3 py-1.5 rounded-full border border-dashed border-slate-300 text-xs text-slate-500">
+            ＋ よく使う返事を登録
+          </button>
+        )}
+        {list.length > 0 && (
+          <button type="button" onClick={() => setEditing((e) => !e)} className="shrink-0 px-3 py-1.5 rounded-full text-xs text-slate-500 underline">
+            {editing ? "完了" : "編集"}
+          </button>
+        )}
+      </div>
+      {error && <p className="text-xs text-red-600 mt-1">{error}</p>}
+    </div>
+  );
+}
+
 function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, playerId, orgId, draftKey, tall }) {
   const [text, setText] = useState(() => (draftKey && readDraft(draftKey)?.text) || "");
   const listRef = React.useRef(null);
@@ -3062,6 +3176,7 @@ function ChatPanel({ messages, myRole, title, onSend, roleOptions, hideHeader, p
           />
         </div>
       )}
+      {roleOptions && <QuickReplies orgId={orgId} onPick={(v) => setText((t) => (t.trim() ? `${t} ${v}` : v))} />}
       <div className="flex flex-wrap gap-2">
         <input
           value={text}
@@ -5791,6 +5906,69 @@ function WeeklyReview({ player }) {
   );
 }
 
+// v15.39：予約した面談をスマホのカレンダーに入れる。面談の日時は日本時間・約40分
+const MEETING_MINUTES = 40;
+function meetingTimes(datetime) {
+  const start = new Date(`${String(datetime).replace(" ", "T")}:00+09:00`);
+  if (Number.isNaN(start.getTime())) return null;
+  return { start, end: new Date(start.getTime() + MEETING_MINUTES * 60000) };
+}
+function icsStamp(d) {
+  return d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+}
+function meetingIcs(slot) {
+  const t = meetingTimes(slot.datetime);
+  if (!t) return null;
+  const url = safeHref(slot.zoomUrl || "") ? slot.zoomUrl : "";
+  const esc = (v) => String(v).replace(/[\\;,]/g, (c) => "\\" + c);
+  return [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//RE:SPRINT//JA",
+    "BEGIN:VEVENT",
+    `UID:resprint-${esc(slot.id)}@keio-rehab-app`,
+    `DTSTAMP:${icsStamp(new Date())}`,
+    `DTSTART:${icsStamp(t.start)}`,
+    `DTEND:${icsStamp(t.end)}`,
+    "SUMMARY:RE:SPRINT 面談",
+    ...(url ? [`URL:${esc(url)}`, `DESCRIPTION:${esc(url)}`] : []),
+    "END:VEVENT",
+    "END:VCALENDAR",
+  ].join("\r\n");
+}
+function googleCalendarUrl(slot) {
+  const t = meetingTimes(slot.datetime);
+  if (!t) return null;
+  const q = new URLSearchParams({ action: "TEMPLATE", text: "RE:SPRINT 面談", dates: `${icsStamp(t.start)}/${icsStamp(t.end)}` });
+  if (safeHref(slot.zoomUrl || "")) q.set("details", slot.zoomUrl);
+  return `https://calendar.google.com/calendar/render?${q.toString()}`;
+}
+function AddToCalendar({ slot }) {
+  const ics = meetingIcs(slot);
+  const gUrl = googleCalendarUrl(slot);
+  if (!ics || !gUrl) return null;
+  const href = `data:text/calendar;charset=utf-8,${encodeURIComponent(ics)}`;
+  return (
+    <div className="flex gap-2" data-testid="add-to-calendar">
+      <a
+        href={href}
+        download="resprint-meeting.ics"
+        className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg border border-blue-200 bg-white text-blue-700 text-xs font-bold"
+      >
+        <CalendarClock size={14} /> iPhone のカレンダー
+      </a>
+      <a
+        href={gUrl}
+        target="_blank"
+        rel="noreferrer"
+        className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg border border-blue-200 bg-white text-blue-700 text-xs font-bold"
+      >
+        <CalendarClock size={14} /> Google カレンダー
+      </a>
+    </div>
+  );
+}
+
 // 受傷から2週間を過ぎて、まだ面談をしていない選手への案内（選手・指導者の両方に出す）
 //   受傷日からの日数だけで出す。日報の内容（痛みなど）とは関係しない。
 function MeetingReminder({ player, slots, viewer, hasOpenSlots, onGoBooking, onGoRequest }) {
@@ -8172,6 +8350,7 @@ function PlayerPersonalDashboard({ orgId, player, protocol, setMyPlayer, slots, 
                 ) : (
                   <p className="text-xs text-blue-500">オンライン会議URLは指導者側で準備中です。</p>
                 )}
+                <AddToCalendar slot={bookedSlot} />
               </div>
             ) : (
               <div className="space-y-2">
@@ -10101,6 +10280,12 @@ function ReportThread({ player, viewer, focusReportId = null, focusAt = null }) 
             ))}
             {openId === r.id ? (
               <div className="mt-2 space-y-2">
+                {staff && (
+                  <QuickReplies
+                    orgId={player.orgId || readSession(ORG_SESSION_KEY)?.id}
+                    onPick={(v) => setText((t) => (t.trim() ? `${t}\n${v}` : v))}
+                  />
+                )}
                 <textarea
                   value={text}
                   onChange={(e) => setText(e.target.value)}
@@ -11190,6 +11375,26 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
     }
   };
   const stepsOf = (exId) => steps.filter((s) => s.exercise_id === exId);
+  // v15.39：今日のメニューのうち、まだ「やった」を付けていない種目をまとめて記録する
+  const [allBusy, setAllBusy] = useState(false);
+  const markAllDone = async (ids) => {
+    const rest = ids.filter((id) => !doneToday(id));
+    if (rest.length === 0) return;
+    setAllBusy(true);
+    setLogs((prev) => [...prev, ...rest.map((id) => ({ exercise_id: id, done_on: today }))]);
+    try {
+      await sbUpsert(
+        "exercise_logs",
+        rest.map((id) => ({ player_id: player.id, exercise_id: id, done_on: today })),
+        "player_id,exercise_id,done_on"
+      );
+    } catch (err) {
+      setLogs((prev) => prev.filter((l) => !(l.done_on === today && rest.includes(l.exercise_id))));
+      setError(errText(err));
+    } finally {
+      setAllBusy(false);
+    }
+  };
 
   const saveProgress = async (exId, patch) => {
     const existing = progressOf(exId);
@@ -11376,6 +11581,21 @@ function CumulativeMenuPanel({ player, protocol, readOnly, onChanged }) {
           renderExercise={renderExercise}
           continueRule={activeContinueRule(protocol, player.currentPhase)}
         />
+        {readOnly && current.length > 1 && (
+          current.every((e) => doneToday(e.id)) ? (
+            <p className="mt-3 text-sm font-bold text-emerald-700 flex items-center justify-center gap-1.5" data-testid="all-done">
+              <CheckCircle2 size={16} /> 今日の分はすべて記録しました
+            </p>
+          ) : (
+            <button
+              onClick={() => markAllDone(current.map((e) => e.id))}
+              disabled={allBusy}
+              className="mt-3 w-full py-3 rounded-xl bg-emerald-600 text-white text-sm font-bold flex items-center justify-center gap-1.5 disabled:opacity-50"
+            >
+              <CheckCircle2 size={16} /> 今日の分を全部やった
+            </button>
+          )
+        )}
       </div>
 
       {upcoming.length > 0 && (

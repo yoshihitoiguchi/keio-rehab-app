@@ -931,6 +931,20 @@ ok(typeof (await db.query("select resprint_private.run_meeting_reminders() n")).
 ok(!!(await as(U4, "select resprint_private.meeting_reminders_at(now())")).error && !!(await as(U4, "select resprint_private.run_meeting_reminders()")).error, "[v44] アプリからは呼べない");
 await db.exec("delete from slots where org_id = 'comm-b'; delete from resprint_private.reminder_log; delete from net.calls");
 
+// ===== v45：PHASE が進んだら指導者に通知 =====
+await db.exec(`create table if not exists phase_advances (id bigint generated always as identity primary key, player_id text references players(id) on delete cascade,
+  from_phase int, to_phase int, confirmed_by_role text, confirmed_by_name text, confirmed_at timestamptz)`);
+await db.exec("grant select, insert on phase_advances to authenticated; alter table phase_advances enable row level security; drop policy if exists t45 on phase_advances; create policy t45 on phase_advances for all to authenticated using (true) with check (true)");
+ok(!(await run("supabase_migration_v45_phase_advance_notice.sql")), "[v45] 適用 1 回目");
+ok(!(await run("supabase_migration_v45_phase_advance_notice.sql")), "[v45] 適用 2 回目（冪等）");
+ok((await db.query("select count(*)::int n from pg_trigger where tgname = 'resprint_push_phase_advance'")).rows[0].n === 1, "[v45] トリガーは1つだけ");
+await db.exec("delete from net.calls");
+ok(!(await as(U4, "insert into phase_advances (player_id, from_phase, to_phase, confirmed_by_role, confirmed_by_name, confirmed_at) values ('p-b1', 3, 4, 'player', '本人', now())")).error, "[v45] PHASE を進める書き込みはそのまま成功する");
+const calls45 = (await db.query("select body->>'body' b, body->>'tag' t from net.calls order by id")).rows;
+ok(calls45.some((r) => r.b === "選手が次の PHASE に進みました"), "[v45] 指導者へ「選手が次の PHASE に進みました」を送る " + JSON.stringify(calls45));
+ok(!calls45.some((r) => /本人|PHASE 4|3/.test(r.b || "")), "[v45] 通知に選手名・PHASE の番号は入らない");
+await db.exec("delete from phase_advances; delete from net.calls");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

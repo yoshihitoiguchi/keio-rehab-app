@@ -148,6 +148,11 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/exercise_steps") return steps;
   if (p === "/rest/v1/gate_item_checks" && method === "GET") return st.checks;
   if (p === "/rest/v1/app_settings") {
+    const key = method === "POST" ? json.key : (u.searchParams.get("key") || "").replace(/^eq\./, "");
+    if (key === "quick_replies") {
+      if (method === "POST") { st.quickReplies = json.value; return [json]; }
+      return st.quickReplies ? [{ value: st.quickReplies }] : [];
+    }
     if (method === "POST") { st.meetingUrl = json.value; return [json]; }
     return st.meetingUrl ? [{ value: st.meetingUrl }] : [];
   }
@@ -989,6 +994,66 @@ try {
     await coachLogin(c3); await sleep(400);
     ok(!(await c3.$('[data-testid="today-meetings"]')), "今日・明日の面談がなければ出さない");
     await c3.close();
+  });
+
+  await step("カレンダーに追加・全部やった・よく使う返事（v15.39）", async () => {
+    // 選手：予約済みの面談をカレンダーに
+    const st = makeState({ injuryDaysAgo: 20, booked: true });
+    st.slots[0].zoom_url = "https://zoom.example/xyz";
+    const p = await newPage(st);
+    await playerLogin(p); await sleep(400);
+    const cal = await p.evaluate(() => {
+      const box = document.querySelector('[data-testid="add-to-calendar"]');
+      if (!box) return null;
+      const [a, g] = box.querySelectorAll("a");
+      return { text: box.innerText, ics: decodeURIComponent(a.getAttribute("href").split(",").slice(1).join(",")), g: g.href };
+    });
+    ok(cal && cal.text.includes("iPhone のカレンダー") && cal.text.includes("Google カレンダー"), "予約済みの面談に「カレンダーに追加」のボタンが2つ出る");
+    const startUtc = new Date(`${st.slots[0].datetime.replace(" ", "T")}:00+09:00`).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+    ok(cal && cal.ics.includes("BEGIN:VEVENT") && cal.ics.includes(`DTSTART:${startUtc}`) && cal.ics.includes("SUMMARY:RE:SPRINT 面談") && cal.ics.includes("zoom.example/xyz"), "カレンダーの予定は日本時間の面談の時刻・URL つき " + (cal?.ics || "").slice(0, 200));
+    ok(cal && cal.g.startsWith("https://calendar.google.com/calendar/render?") && cal.g.includes(startUtc), "Google カレンダーのリンクも同じ時刻");
+    ok(!(await p.evaluate(() => document.body.innerText)).includes("山田 太郎の面談"), "予定に選手名は入れない");
+    // 選手：全部やった
+    await clickText(p, "メニュー", "nav button"); await sleep(800);
+    let t = await text(p);
+    ok(t.includes("今日の分を全部やった"), "メニューに「今日の分を全部やった」が出る");
+    await clickText(p, "今日の分を全部やった", "button"); await sleep(600);
+    t = await text(p);
+    const posted = st.posts.filter((x) => x.p === "/rest/v1/exercise_logs");
+    ok(posted.length === 1 && Array.isArray(posted[0].b) && posted[0].b.length >= 2 && posted[0].b.every((r) => r.player_id === "p-1"), "まだの種目をまとめて1回で記録する " + JSON.stringify(posted.map((x) => x.b?.length)));
+    ok(t.includes("今日の分はすべて記録しました") && !t.includes("今日の分を全部やった"), "記録したら「すべて記録しました」に変わる");
+    ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
+    await p.close();
+
+    // 指導者：よく使う返事
+    const st2 = makeState({ injuryDaysAgo: 20 });
+    const c = await newPage(st2);
+    await coachLogin(c); await sleep(400);
+    await clickText(c, "チャット", "button"); await sleep(500);
+    ok((await text(c)).includes("よく使う返事を登録"), "チャットの入力欄の上に「よく使う返事を登録」が出る");
+    await clickText(c, "よく使う返事を登録", "button"); await sleep(300);
+    await c.type('[role="dialog"] textarea', "確認しました。無理せず続けましょう。");
+    await clickText(c, "登録する", '[role="dialog"] button'); await sleep(500);
+    ok(JSON.parse(st2.quickReplies || "[]")[0] === "確認しました。無理せず続けましょう。", "登録した返事は組織ごとに保存される");
+    await clickText(c, "確認しました。無理せず続けましょう。", '[data-testid="quick-replies"] button'); await sleep(200);
+    ok((await c.$eval('input[placeholder="メッセージを入力"]', (i) => i.value)) === "確認しました。無理せず続けましょう。", "押すと入力欄に入る（すぐには送らない）");
+    ok(!st2.posts.some((x) => x.p === "/rest/v1/messages"), "押しただけでは送信しない");
+    if (process.env.SHOT_DIR) await c.screenshot({ path: process.env.SHOT_DIR + "/quick-replies.png" });
+    await clickText(c, "日報", "button"); await sleep(500);
+    const hasThread = await c.$$eval("button", (bs) => bs.some((b) => b.innerText.trim() === "コメントする"));
+    if (hasThread) {
+      await clickText(c, "コメントする", "button"); await sleep(300);
+      ok(await c.$$eval('[data-testid="quick-replies"] button', (bs) => bs.some((b) => b.innerText.includes("確認しました。無理せず続けましょう。"))), "日報のコメントでも同じ返事が使える");
+    }
+    ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+    await c.close();
+
+    // 選手のチャットには出さない
+    const p2 = await newPage(makeState({ injuryDaysAgo: 20 }));
+    await playerLogin(p2);
+    await clickText(p2, "連絡・面談", "nav button"); await sleep(500);
+    ok(!(await p2.$('[data-testid="quick-replies"]')), "選手のチャットには、よく使う返事は出さない");
+    await p2.close();
   });
 
   await step("痛みが急に上がった日報の目印（v15.35）", async () => {

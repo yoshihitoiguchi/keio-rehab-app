@@ -279,6 +279,7 @@ GitHub Actions の **「本番DBに反映」**（`.github/workflows/db-apply.yml
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
+| v45_phase_advance_notice | **適用済み（2026-11-01）** | 選手が次の PHASE に進んだら（`phase_advances` に行が入ったら）指導者へ「選手が次の PHASE に進みました」を送るトリガー。トリガーの追加だけ。戻し方はファイルの冒頭 |
 | v42_auto_publish_slots | **適用済み（2026-10-31）** | 2人以上そろった日時を自動で公開するトリガー（`sync_slot`）と、過ぎた空き枠・空き時間の削除（`purge_past_schedule`、毎時）。戻し方はファイルの冒頭 |
 | v43_remaining_days | **適用済み（2026-10-31）** | `same_injury_remaining_days()`（同じ受傷の選手の、いまの PHASE から最後の PHASE までの日数）。関数の追加だけ。戻し方はファイルの冒頭 |
 | v41_return_days_final_phase | **適用済み（2026-10-31）** | `player_return_days`（受傷から最後の PHASE に入った日までの日数）・`same_injury_return_days()`。集計の2ビューもこの数え方に。戻し方はファイルの冒頭 |
