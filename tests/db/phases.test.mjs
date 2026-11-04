@@ -945,6 +945,29 @@ ok(calls45.some((r) => r.b === "選手が次の PHASE に進みました"), "[v4
 ok(!calls45.some((r) => /本人|PHASE 4|3/.test(r.b || "")), "[v45] 通知に選手名・PHASE の番号は入らない");
 await db.exec("delete from phase_advances; delete from net.calls");
 
+// ===== v46：カメラで測った値（GATE のチェックの添付） =====
+ok(!(await run("supabase_migration_v46_pose_measurements.sql")), "[v46] 適用 1 回目");
+ok(!(await run("supabase_migration_v46_pose_measurements.sql")), "[v46] 適用 2 回目（冪等）");
+const g46 = (await db.query("insert into gate_item_checks (player_id, checker_role, result) values ('p-b1', 'self', true) returning id")).rows[0].id;
+const g46other = (await db.query("insert into gate_item_checks (player_id, checker_role, result) values ('p1', 'self', true) returning id")).rows[0].id;
+const m46 = `'{"reps": 10}'::jsonb`;
+const pm46 = (await as(U4, `insert into pose_measurements (player_id, gate_check_id, exercise_key, variant, recorded_by, delegate, measured, landmarks)
+  values ('p-b1', ${g46}, 'hip-lift', 'long-lever', 'self', 'GPU', ${m46}, '{"t": [0]}'::jsonb) returning id`)).rows?.[0]?.id;
+ok(!!pm46 && (await as(U6, "select exercise_key from pose_measurements where player_id = 'p-b1'")).rows?.[0]?.exercise_key === "hip-lift",
+   "[v46] 同じ組織の人は、測った値を添付できる・読める");
+ok((await as(U1, "select id from pose_measurements")).rows?.length === 0
+   && !!(await as(U1, `insert into pose_measurements (player_id, exercise_key, recorded_by, measured) values ('p-b1', 'slider', 'self', ${m46})`)).error
+   && !!(await as(null, "select * from pose_measurements")).error, "[v46] ほかの組織・匿名キーからは読めない・書けない");
+ok(!!(await as(U4, `insert into pose_measurements (player_id, gate_check_id, exercise_key, recorded_by, measured) values ('p-b1', ${g46other}, 'slider', 'self', ${m46})`)).error,
+   "[v46] ほかの選手のチェックには添付できない");
+ok(!!(await as(U4, `update pose_measurements set measured = '{}'::jsonb where id = ${pm46}`)).error
+   || (await db.query(`select measured->>'reps' r from pose_measurements where id = ${pm46}`)).rows[0].r === "10", "[v46] 測った値は書き換えられない");
+ok(!!(await as(U4, `insert into pose_measurements (player_id, exercise_key, recorded_by, measured) values ('p-b1', 'Bad Key', 'self', ${m46})`)).error
+   && !!(await as(U4, `insert into pose_measurements (player_id, exercise_key, recorded_by, measured) values ('p-b1', 'slider', 'coach', ${m46})`)).error,
+   "[v46] 種目ID・記録した人の形が決まっている");
+await db.exec(`delete from gate_item_checks where id in (${g46}, ${g46other})`);
+ok((await db.query("select count(*)::int n from pose_measurements")).rows[0].n === 0, "[v46] チェックを消すと、添付した値も消える");
+
 // ===== ④ finalize =====
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 1 回目");
 ok(!(await run("supabase_migration_v17_finalize.sql")), "[④] v17_finalize の実行 2 回目（冪等）");

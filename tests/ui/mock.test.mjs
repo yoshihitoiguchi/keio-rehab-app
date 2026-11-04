@@ -103,7 +103,16 @@ function respond(st, url, method, body) {
   if (p === "/rest/v1/rpc/transfer_create") { st.transferCreated = (st.transferCreated || 0) + 1; return { code: "48151623", expires_at: iso(new Date(Date.now() + 1800000)) }; }
   if (p === "/rest/v1/rpc/transfer_redeem") return json?.p_code === "48151623" ? { org: { id: "default", name: "テスト組織" }, player: { id: "p-1", name: "山田 太郎" } } : null;
   if (p === "/rest/v1/organizations") return [{ id: "default", name: "テスト組織" }];
-  if (p === "/rest/v1/protocols") return [protocol, otherProtocol];
+  if (p === "/rest/v1/protocols") {
+    if (!st.heelDigGate) return [protocol, otherProtocol];
+    const ph = protocol.phases.map((x, i) => (i === 0 ? { ...x, conditions: ["Heel Dig ISO 屈曲90°・60°・30°を痛みなく実施可能", "条件B-1"] } : x));
+    return [{ ...protocol, phases: ph }, otherProtocol];
+  }
+  if (p === "/rest/v1/pose_measurements") {
+    if (!st.poseTable) return { __status: 404 };
+    if (method === "POST") { const row = { id: 80 + (st.poseRows || []).length, created_at: iso(new Date()), ...json }; st.poseRows = [row, ...(st.poseRows || [])]; return [row]; }
+    return st.poseRows || [];
+  }
   if (p === "/rest/v1/player_directory") return [{ id: "p-1", name: "山田 太郎" }];
   if (p === "/rest/v1/exercises") return exercises.map((e) => ({ ...e, org_id: "default", protocol_id: st.protocolId }));
   if (p === "/rest/v1/exercise_videos") return Object.entries(st.videos || {}).map(([name, video_url]) => ({ name, video_url }));
@@ -1424,6 +1433,39 @@ try {
     const t = await text(c);
     ok(t.includes("面談履歴（3件）"), "面談履歴に追加した面談が並ぶ");
     ok(await noOverflow(c) && c.errs.length === 0, "横にはみ出さない・例外なし " + c.errs.join("|"));
+  });
+
+  await step("GATE：カメラで測る（v46 の表があるときだけ・測れる種目だけ）", async () => {
+    const none = makeState({ phase: 1 });
+    none.heelDigGate = true;
+    const p0 = await newPage(none);
+    await playerLogin(p0);
+    ok((await text(p0)).includes("Heel Dig ISO 屈曲90°") && !(await text(p0)).includes("カメラで測る"), "表がない DB では「カメラで測る」を出さない");
+
+    const st = makeState({ phase: 1 });
+    st.heelDigGate = true;
+    st.poseTable = true;
+    st.poseRows = [{ id: 81, gate_check_id: 1, item_index: 0, exercise_key: "heel-dig-iso", variant: null, created_at: iso(now),
+      measured: { specId: "heel-dig-iso", specVersion: 1, variantId: null, side: "right", durationSec: 40, frameCount: 1200, fps: 30, validRatio: 0.95,
+        prescribed: { kneeFlexionDeg: [90, 60, 30], holdSec: 5 }, reps: 2,
+        byTarget: [{ targetDeg: 90, holds: [{ startSec: 2, seconds: 5.2, kneeFlexionDeg: 88 }] }, { targetDeg: 60, holds: [{ startSec: 10, seconds: 4.6, kneeFlexionDeg: 63 }] }, { targetDeg: 30, holds: [] }],
+        otherHolds: [], holds: [] } }];
+    const p = await newPage(st);
+    await playerLogin(p);
+    const n = await p.$$eval("button", (a) => a.filter((b) => b.innerText.trim() === "カメラで測る").length);
+    ok(n === 1, `測れる種目（Heel Dig ISO）の条件にだけ「カメラで測る」が出る（${n}）`);
+    let t = await text(p);
+    ok(t.includes("カメラで測った値"), "保存した測った値が、条件の下に畳んで出る");
+    await clickText(p, "カメラで測った値", "summary"); await sleep(300);
+    t = await text(p);
+    ok(t.includes("指定") && t.includes("実測") && t.includes("88°・5.2秒") && t.includes("63°・4.6秒"), "開くと「指定」と「実測」が並ぶ");
+    ok(!/合格|不合格|クリア|進んでよい|達成/.test(t), "合否や「進んでよい」は出さない");
+    await clickText(p, "カメラで測る"); await sleep(1200);
+    t = await text(p);
+    ok(t.includes("撮り方") && t.includes("床から 30〜50cm") && t.includes("2〜3m") && t.includes("動画も添付する"), "撮影ガイド（高さ・距離）と、動画を添付するかの選択が出る");
+    ok(t.includes("動画は保存しません"), "動画は初期設定では保存しない");
+    if (process.env.SHOT_DIR) await p.screenshot({ path: process.env.SHOT_DIR + "/pose-gate.png", fullPage: true });
+    ok(await noOverflow(p) && p.errs.length === 0, "横にはみ出さない・例外なし " + p.errs.join("|"));
   });
 } finally {
   try { await browser?.close(); } catch {}

@@ -141,6 +141,9 @@ const SUPABASE_ANON_KEY = "sb_publishable_c2dND4Q3D36SDX8JsxaWSA_ayFHmuSJ";   //
 ├ scripts/check-production.mjs     本番の状態を読み取りだけで確認（npm run check:prod）
 ├ tests/api/push.test.mjs           送信役のテスト（npm run test:api。実際には送らない）
 ├ tests/db/phases.test.mjs          段階ごとの SQL テスト（npm run test:db。PGlite で本番には触れない）
+├ src/pose/               カメラ計測（v15.40〜。下の「カメラで測る」）
+├ pose-demo/index.html    /pose-demo（カメラ計測を試すページ。ログイン不要・何も保存しない）
+├ tests/pose/analyze.test.mjs       カメラ計測の計算・文言のテスト（npm run test:pose）
 ├ tests/ui/mock.test.mjs            画面テスト（npm run test:ui。スマホ幅 390px。DB の代わりに決まった応答を返すので本番には触れない）
 ├ supabase_migration_v*.sql         マイグレーション（v15〜v17 は段階的に適用する。下記）
 ├ supabase_rollback_v15.sql / supabase_rollback_v16.sql   戻し用
@@ -187,6 +190,7 @@ Claude.ai のプレビュー環境が相対import（`./supabaseClient.js` など
 | `report_comments` | 日報の本音へのコメント・返信（日報1件ごと。`sender` が staff / player、指導者は `author_role` と `author_name` つき。書き換え不可・削除は可）（v35） |
 | `report_reactions` | 日報へのリアクション（日報1件ごと。指導者が立場 `author_role` ごとに `kind`＝seen 確認しました／good いいね／cheer がんばろう を付ける。同じ立場・種類は1件、もう一度押すと削除。表がない DB ではリアクションを出さない）（v39）。選手の日報タブ「これまでの日報」は、返事がなくても自分の日報をすべて見返せる（v15.26）。指導者の「選手」タブの一番上「まだ返事していない日報」は、送信から24時間以内の日報のうち（v15.34 で7日→24時間。作者の指示）、リアクションも指導者のコメントもまだないもの（デモの選手・復帰者リストの選手は除く。押すとその日報を開く。`UnrepliedReports`。DB の変更なし）（v15.33）。痛みが前の日報から3以上上がった日報には、指導者の画面（まだ返事していない日報・選手一覧・本日の日報・本音とコメント）に赤い印「痛み 6（+3）」を付ける（`painJumpOf`・`PainJumpBadge`。幅は中止の基準「前日から3以上」と同じ。事実を示すだけ。選手の画面には出さない。v15.35） |
 | `player_reinjuries` | 再受傷の記録（1回ごとに1行。再受傷日・記録時の PHASE・記録時の復帰日・再開した PHASE・メモ）。いちばん新しい再受傷日は `players.reinjury_date`。面談の目安（14日）はこの日から数え直す（`episodeStartDate`）（v36） |
+| `pose_measurements` | カメラで測った値（v46・**未適用**）。GATE のチェック（`gate_item_checks`）1件ごとの添付。種目ID `exercise_key`・種類 `variant`・測り方の版 `spec_version`・測った値 `measured`（指定と並べる値。合否は入れない）・撮った側の関節の座標 `landmarks`（6点・最大15コマ/秒）。動画は保存しない（選んだときだけ、今までどおり `media_attachments` に添付）。書き換え不可・削除は可。表がない DB では GATE に「カメラで測る」を出さない |
 | `meeting_notes` | 面談メモ（面談の内容。指導者が書き、選手本人と指導者が読む。`held_on` が面談の日）（v32） |
 | `player_metric_history` / `player_exercise_progress` | 記録の推移 |
 
@@ -247,6 +251,19 @@ normalizePlayer / normalizeSlot
 
 ---
 
+## カメラで測る（v15.40〜・2026-11-04 作者の指示）
+
+GATE の条件のうち、測れる種目（いまは Heel Dig ISO・Hip Lift〈Long Lever 含む〉・Slider）に「カメラで測る」を出す。
+**CLAUDE.md の「作らないもの」の「動画の自動解析」との関係は作者の判断待ち。決まるまで本番に合流しない。**
+
+- MediaPipe Tasks Vision の PoseLandmarker（lite）をブラウザで動かす（GPU、だめなら CPU）。wasm はアプリから配り、モデルは Google の配布元から読む。映像は外へ送らない。
+- 横から撮る前提。撮影ガイド（全身が入る枠・高さ・距離）を出す。
+- 種目ごとに何を測るかは **`src/pose/measurement-specs.ts`**（数値は作者の指示どおり。Claude が足さない）。計算は `src/pose/analyze.ts`、文言は `src/pose/copy.ts`。
+- 角度は整形外科の表記（0° = 完全伸展）。膝 = 股関節-膝-足首、股関節 = 肩-股関節-膝。
+- 画面は「指定」と「実測」を並べるだけ（`PoseResult`）。**合否・「次へ進んでよい」は出さない。** 進むのは今までどおり本人の「確認して次のPHASEへ進む」。
+- 測った値は「できた／できていない」を押したときに、そのチェックの添付として `pose_measurements` に保存する。動画は初期設定では保存しない。
+- `/pose-demo` で試せる（Vercel の rewrites で `/pose-demo/index.html`。Service Worker はこのページを控えに入れない）。
+
 ## Supabase マイグレーションの作法
 
 `supabase_migration_v*.sql` を Supabase の SQL Editor に貼って実行する運用。
@@ -279,6 +296,7 @@ GitHub Actions の **「本番DBに反映」**（`.github/workflows/db-apply.yml
 | v18_renew | **適用済み（2026-09-27）** | `org_renew()`：アプリを開くたびにログイン期限（30日）を延長 |
 | v21_coach_password | **適用済み（2026-09-28）** | 指導者パスワードを管理者が設定、照合はサーバー側（`coach_check`）。ハッシュはアプリから読めない |
 | v20_org_template | **適用済み（2026-09-28）** | 新しい組織に `default` のプロトコル・種目・段階・Phase別メニューを自動コピー。`phase_menus` の Phase 上限を 5→20 |
+| v46_pose_measurements | **未適用**（2026-11-04 作成） | `pose_measurements`（カメラで測った値）。表の追加だけ。「動画の自動解析」を作らない決まりとの関係を作者が決めてから反映する。戻し方はファイルの冒頭 |
 | v45_phase_advance_notice | **適用済み（2026-11-01）** | 選手が次の PHASE に進んだら（`phase_advances` に行が入ったら）指導者へ「選手が次の PHASE に進みました」を送るトリガー。トリガーの追加だけ。戻し方はファイルの冒頭 |
 | v42_auto_publish_slots | **適用済み（2026-10-31）** | 2人以上そろった日時を自動で公開するトリガー（`sync_slot`）と、過ぎた空き枠・空き時間の削除（`purge_past_schedule`、毎時）。戻し方はファイルの冒頭 |
 | v43_remaining_days | **適用済み（2026-10-31）** | `same_injury_remaining_days()`（同じ受傷の選手の、いまの PHASE から最後の PHASE までの日数）。関数の追加だけ。戻し方はファイルの冒頭 |
@@ -528,7 +546,7 @@ const APP_BUILD = "v15.35";
    変えると選手がログアウトされたり、書きかけが消えたりする。変えるなら古い形も読めるようにする。
 4. **ログインの保存を消すのは、本当に無効なときだけ。** 通信エラーでは消さない（「もう一度試す」を出す）。
 5. **勝手に読み込み直さない。** 更新は `UpdateNotice` のボタン（または長く使っていなかったとき）に任せる。
-6. 公開前に：`npm run build`・`npm run test:db`・`npm run test:ui`（スマホ幅 390px の画面テスト）・`npm run test:api`。公開後に本番のビルド番号を確認。
+6. 公開前に：`npm run build`・`npm run test:db`・`npm run test:ui`（スマホ幅 390px の画面テスト）・`npm run test:api`・`npm run test:pose`。公開後に本番のビルド番号を確認。
    画面を変えたら `tests/ui/mock.test.mjs` に確認を足す。
 
 ---

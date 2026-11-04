@@ -26,6 +26,8 @@ const STATIC_FILES = new Set([
 ]);
 
 function isAppFile(url) {
+  // 姿勢推定の .wasm（約14MB）はキャッシュしない
+  if (url.pathname.endsWith(".wasm")) return false;
   return url.pathname.startsWith("/assets/") || STATIC_FILES.has(url.pathname);
 }
 
@@ -58,6 +60,8 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
 
   const isPage = req.mode === "navigate";
+  // 試験用のページ（/pose-demo）は別のページなので、アプリ本体の控えに入れない
+  if (isPage && url.pathname.startsWith("/pose-demo")) return;
   if (!isPage && !isAppFile(url)) return;
 
   event.respondWith(

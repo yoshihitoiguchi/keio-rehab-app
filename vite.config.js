@@ -17,6 +17,12 @@ function versionFile() {
 
 export default defineConfig({
   plugins: [react(), versionFile()],
+  build: {
+    rollupOptions: {
+      // /pose-demo はカメラ計測を試すための別のページ
+      input: { main: "index.html", poseDemo: "pose-demo/index.html" },
+    },
+  },
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
   },

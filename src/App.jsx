@@ -57,6 +57,7 @@ import {
   Save,
   CheckCheck,
   ThumbsUp,
+  Camera,
 } from "lucide-react";
 import {
   SUPABASE_URL,
@@ -70,6 +71,12 @@ import {
 } from "./lib/auth.js";
 import { pushState, enablePush, disablePush, refreshPush } from "./lib/push.js";
 import { parseAvailabilityText, slotLabel } from "./lib/availabilityText.js";
+import { DISCLAIMER_MAIN, DISCLAIMER_SYMPTOM } from "./lib/disclaimer.js";
+import { specForGateText } from "./pose/measurement-specs.ts";
+import { POSE_COPY } from "./pose/copy.ts";
+import PoseResult from "./pose/PoseResult.jsx";
+// カメラ計測は使うときだけ読み込む（姿勢推定の部品が大きいため）
+const PoseCapture = React.lazy(() => import("./pose/PoseCapture.jsx"));
 
 // ============================================================
 // Supabase 接続設定とログイン状態は src/lib/auth.js にまとめてある。
@@ -278,7 +285,7 @@ function errText(err) {
 
 // 画面右上に表示するビルド識別子。
 // デプロイが反映されているかを一目で確認するためのもの。
-const APP_BUILD = "v15.39";
+const APP_BUILD = "v15.40";
 
 // ==================================================================
 // ログイン状態をこの端末に保存する（ホーム画面アプリ用）
@@ -823,11 +830,7 @@ function matchedCriteria(r) {
     .map((c) => ({ id: c.id, text: c.text, fact: c.fact(r) }));
 }
 
-// 入力内容に関係なく常に出す注記（出し分けない）
-const DISCLAIMER_MAIN =
-  "このアプリは診断を行いません。表示される基準は、医師とコーチが定めた目安です。診断と治療方針は診断した医師に従ってください。";
-const DISCLAIMER_SYMPTOM =
-  "しびれ、安静時や夜間の痛み、練習中の急な強い痛みなど、気になる症状があるときは医療機関に相談してください。";
+// 入力内容に関係なく常に出す注記（出し分けない）。文面は src/lib/disclaimer.js
 
 function StandingNotice() {
   return (
@@ -6076,6 +6079,11 @@ function GatePanel({
   const [pendingMedia, setPendingMedia] = useState({});
   const [checkerName, setCheckerName] = useState("");
   const [error, setError] = useState(null);
+  // カメラで測った値（v46 pose_measurements）。表がない DB では null のまま＝「カメラで測る」を出さない
+  const [poseRows, setPoseRows] = useState(null);
+  const [pendingPose, setPendingPose] = useState({});
+  const [poseOpen, setPoseOpen] = useState(null);
+  const [poseBusy, setPoseBusy] = useState(false);
 
   const items = phaseInfo?.conditions ?? [];
   const phase = player.currentPhase;
@@ -6089,6 +6097,12 @@ function GatePanel({
           `&select=*&order=created_at.desc`
       );
       setChecks(rows || []);
+      const poses = await sbSelect(
+        "pose_measurements",
+        `?player_id=eq.${encodeURIComponent(player.id)}&phase_number=eq.${phase}` +
+          `&select=id,gate_check_id,item_index,exercise_key,variant,measured,created_at&order=created_at.desc`
+      ).catch(() => null);
+      setPoseRows(Array.isArray(poses) ? poses : null);
     } catch (err) {
       setError(errText(err));
     } finally {
@@ -6097,7 +6111,32 @@ function GatePanel({
   };
   useEffect(() => {
     load();
+    setPendingPose({});
+    setPoseOpen(null);
   }, [player.id, phase]);
+
+  // カメラで測り終えたとき：動画を選んだときだけアップロードし、値は「できた／できていない」と一緒に保存する
+  const onPoseDone = async (idx, hit, done) => {
+    setPoseBusy(true);
+    setError(null);
+    try {
+      if (done.videoFile) {
+        const media = await uploadAttachment(done.videoFile, {
+          playerId: player.id,
+          orgId,
+          context: "gate_check",
+          contextId: `${phase}-${idx}`,
+        });
+        setPendingMedia((prev) => ({ ...prev, [idx]: media }));
+      }
+      setPendingPose((prev) => ({ ...prev, [idx]: { ...done, spec: hit.spec, variant: hit.variant } }));
+      setPoseOpen(null);
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setPoseBusy(false);
+    }
+  };
 
   const latestFor = (idx, role) =>
     checks.find((c) => c.item_index === idx && c.checker_role === role) || null;
@@ -6167,6 +6206,31 @@ function GatePanel({
         delete next[idx];
         return next;
       });
+      const pose = pendingPose[idx];
+      if (pose && row?.id) {
+        const [saved] = await sbInsert("pose_measurements", {
+          player_id: player.id,
+          gate_check_id: row.id,
+          phase_number: phase,
+          item_index: idx,
+          exercise_key: pose.spec.id,
+          variant: pose.variant?.id || null,
+          spec_version: pose.spec.version,
+          recorded_by: viewerRole,
+          delegate: pose.delegate || null,
+          measured: pose.measured,
+          landmarks: pose.landmarks,
+        });
+        if (saved) {
+          const { landmarks, ...rest } = saved;
+          setPoseRows((prev) => [rest, ...(prev || [])]);
+        }
+        setPendingPose((prev) => {
+          const next = { ...prev };
+          delete next[idx];
+          return next;
+        });
+      }
     } catch (err) {
       setError(errText(err));
     } finally {
@@ -6217,6 +6281,18 @@ function GatePanel({
                       }
                     />
                   )}
+                  {(() => {
+                    const pr = (poseRows || []).find((r) => r.item_index === idx);
+                    if (!pr) return null;
+                    return (
+                      <details className="mt-1.5">
+                        <summary className="text-[11px] text-blue-700 cursor-pointer min-h-[28px] flex items-center">
+                          カメラで測った値（{new Date(pr.created_at).toLocaleDateString("ja-JP")}）
+                        </summary>
+                        <PoseResult result={pr.measured} />
+                      </details>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -6245,7 +6321,38 @@ function GatePanel({
                       label="写真・動画を追加（任意）"
                       onUploaded={(m) => setPendingMedia((prev) => ({ ...prev, [idx]: m }))}
                     />
+                    {poseRows !== null && specForGateText(text) && poseOpen !== idx && (
+                      <button
+                        type="button"
+                        onClick={() => setPoseOpen(idx)}
+                        className="inline-flex items-center justify-center gap-1 min-h-[36px] px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-600 hover:text-blue-600 hover:border-blue-300"
+                      >
+                        <Camera size={14} /> {POSE_COPY.measureButton}
+                      </button>
+                    )}
                   </div>
+                  {poseOpen === idx && (
+                    <div className="mt-2">
+                      <React.Suspense fallback={<p className="text-xs text-slate-400">{POSE_COPY.loadingModel}</p>}>
+                        <PoseCapture
+                          spec={specForGateText(text).spec}
+                          variant={specForGateText(text).variant}
+                          allowVideo
+                          onCancel={() => setPoseOpen(null)}
+                          onDone={(done) => onPoseDone(idx, specForGateText(text), done)}
+                        />
+                      </React.Suspense>
+                      {poseBusy && <p className="text-xs text-slate-400 mt-1">アップロード中...</p>}
+                    </div>
+                  )}
+                  {pendingPose[idx] && (
+                    <div className="mt-1.5">
+                      <p className="text-[10px] text-green-600">
+                        測った値を用意しました。「できた」「できていない」を押すと一緒に記録されます。
+                      </p>
+                      <PoseResult result={pendingPose[idx].result} showChart={false} />
+                    </div>
+                  )}
                   {pendingMedia[idx] && (
                     <div className="mt-1.5">
                       <p className="text-[10px] text-green-600">
